@@ -3396,7 +3396,7 @@ _h265_ensure_rate_control (GstVaH265Enc * self)
       /* Fall through. */
     case VA_RC_QVBR:
       self->rc.qp_p = self->rc.qp_b = 26;
-      g_assert (self->rc.target_percentage >= 10);
+      self->rc.target_percentage = MAX (10, self->rc.target_percentage);
       self->rc.max_bitrate = (guint) gst_util_uint64_scale_int (bitrate,
           100, self->rc.target_percentage);
       self->rc.target_bitrate = bitrate;
@@ -3420,9 +3420,8 @@ _h265_ensure_rate_control (GstVaH265Enc * self)
       break;
   }
 
-  GST_DEBUG_OBJECT (self, "Max bitrate: %u bits/sec, "
-      "Target bitrate: %u bits/sec", self->rc.max_bitrate,
-      self->rc.target_bitrate);
+  GST_DEBUG_OBJECT (self, "Max bitrate: %u kbps, target bitrate: %u kbps",
+      self->rc.max_bitrate, self->rc.target_bitrate);
 
   if (self->rc.rc_ctrl_mode == VA_RC_CBR || self->rc.rc_ctrl_mode == VA_RC_VBR
       || self->rc.rc_ctrl_mode == VA_RC_VCM
@@ -4764,7 +4763,13 @@ gst_va_h265_enc_set_property (GObject * object, guint prop_id,
 {
   GstVaH265Enc *const self = GST_VA_H265_ENC (object);
   GstVaBaseEnc *base = GST_VA_BASE_ENC (self);
-  gboolean already_effect = FALSE;
+  GstVaEncoder *encoder = NULL;
+  gboolean no_effect;
+
+  gst_object_replace ((GstObject **) (&encoder), (GstObject *) base->encoder);
+  no_effect = (encoder && gst_va_encoder_is_open (encoder));
+  if (encoder)
+    gst_object_unref (encoder);
 
   GST_OBJECT_LOCK (self);
 
@@ -4795,18 +4800,18 @@ gst_va_h265_enc_set_property (GObject * object, guint prop_id,
       break;
     case PROP_QP_I:
       self->prop.qp_i = g_value_get_uint (value);
+      no_effect = FALSE;
       g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
-      already_effect = TRUE;
       break;
     case PROP_QP_P:
       self->prop.qp_p = g_value_get_uint (value);
+      no_effect = FALSE;
       g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
-      already_effect = TRUE;
       break;
     case PROP_QP_B:
       self->prop.qp_b = g_value_get_uint (value);
+      no_effect = FALSE;
       g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
-      already_effect = TRUE;
       break;
     case PROP_TRELLIS:
       self->prop.use_trellis = g_value_get_boolean (value);
@@ -4835,18 +4840,18 @@ gst_va_h265_enc_set_property (GObject * object, guint prop_id,
     }
     case PROP_BITRATE:
       self->prop.bitrate = g_value_get_uint (value);
+      no_effect = FALSE;
       g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
-      already_effect = TRUE;
       break;
     case PROP_TARGET_PERCENTAGE:
       self->prop.target_percentage = g_value_get_uint (value);
+      no_effect = FALSE;
       g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
-      already_effect = TRUE;
       break;
     case PROP_TARGET_USAGE:
       self->prop.target_usage = g_value_get_uint (value);
+      no_effect = FALSE;
       g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
-      already_effect = TRUE;
       break;
     case PROP_NUM_TILE_COLS:
       self->prop.num_tile_cols = g_value_get_uint (value);
@@ -4856,11 +4861,13 @@ gst_va_h265_enc_set_property (GObject * object, guint prop_id,
       break;
     case PROP_RATE_CONTROL:
       self->prop.rc_ctrl = g_value_get_enum (value);
+      no_effect = FALSE;
       g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
-      already_effect = TRUE;
       break;
     case PROP_CPB_SIZE:
       self->prop.cpb_size = g_value_get_uint (value);
+      no_effect = FALSE;
+      g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -4868,13 +4875,12 @@ gst_va_h265_enc_set_property (GObject * object, guint prop_id,
 
   GST_OBJECT_UNLOCK (self);
 
+  if (no_effect) {
 #ifndef GST_DISABLE_GST_DEBUG
-  if (!already_effect &&
-      base->encoder && gst_va_encoder_is_open (base->encoder)) {
-    GST_WARNING_OBJECT (self, "Property `%s` change ignored while processing.",
-        pspec->name);
-  }
+    GST_WARNING_OBJECT (self, "Property `%s` change may not take effect "
+        "until the next encoder reconfig.", pspec->name);
 #endif
+  }
 }
 
 static void
@@ -5261,7 +5267,7 @@ gst_va_h265_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_CPB_SIZE] = g_param_spec_uint ("cpb-size",
       "max CPB size in Kb",
       "The desired max CPB size in Kb (0: auto-calculate)", 0, 2000 * 1024, 0,
-      param_flags);
+      param_flags | GST_PARAM_MUTABLE_PLAYING);
 
   /**
    * GstVaH265Enc:num-tile-cols:

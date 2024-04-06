@@ -23,7 +23,6 @@
 
 #include "gstd3d12encoder.h"
 #include "gstd3d12encoderbufferpool.h"
-#include "gstd3d12pluginutils.h"
 #include <gst/base/gstqueuearray.h>
 #include <directx/d3dx12.h>
 #include <wrl.h>
@@ -702,10 +701,9 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
   auto mem = gst_buffer_peek_memory (buffer, 0);
   if (gst_is_d3d12_memory (mem)) {
     auto dmem = GST_D3D12_MEMORY_CAST (mem);
-    if (dmem->device == self->device) {
+    if (gst_d3d12_device_is_equal (dmem->device, self->device)) {
       GstMapInfo map_info;
-      if (!gst_memory_map (mem, &map_info,
-              (GstMapFlags) (GST_MAP_READ | GST_MAP_D3D12))) {
+      if (!gst_memory_map (mem, &map_info, GST_MAP_READ_D3D12)) {
         GST_ERROR_OBJECT (self, "Couldn't map memory");
         return nullptr;
       }
@@ -813,8 +811,7 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
 
     GstMapInfo map_info;
     mem = gst_buffer_peek_memory (upload, 0);
-    if (!gst_memory_map (mem, &map_info,
-            (GstMapFlags) (GST_MAP_READ | GST_MAP_D3D12))) {
+    if (!gst_memory_map (mem, &map_info, GST_MAP_READ_D3D12)) {
       GST_ERROR_OBJECT (self, "Couldn't map memory");
       gst_buffer_unref (upload);
       return nullptr;
@@ -1252,8 +1249,7 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
 
   gst_d3d12_fence_data_add_notify_mini_object (fence_data, gst_ca);
 
-  ComPtr < ID3D12CommandAllocator > ca;
-  gst_d3d12_command_allocator_get_handle (gst_ca, &ca);
+  auto ca = gst_d3d12_command_allocator_get_handle (gst_ca);
   auto hr = ca->Reset ();
   if (!gst_d3d12_result (hr, self->device)) {
     GST_ERROR_OBJECT (self, "Couldn't reset command allocator");
@@ -1265,9 +1261,9 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
   if (!priv->cmd->cl) {
     auto device = gst_d3d12_device_get_device_handle (self->device);
     hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE,
-        ca.Get (), nullptr, IID_PPV_ARGS (&priv->cmd->cl));
+        ca, nullptr, IID_PPV_ARGS (&priv->cmd->cl));
   } else {
-    hr = priv->cmd->cl->Reset (ca.Get ());
+    hr = priv->cmd->cl->Reset (ca);
   }
 
   if (!gst_d3d12_result (hr, self->device)) {
@@ -1428,9 +1424,8 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
   if (completed < mem->fence_value) {
     auto queue = gst_d3d12_device_get_command_queue (self->device,
         D3D12_COMMAND_LIST_TYPE_DIRECT);
-    ComPtr < ID3D12Fence > fence;
-    gst_d3d12_command_queue_get_fence (queue, &fence);
-    gst_d3d12_command_queue_execute_wait (priv->cmd->queue, fence.Get (),
+    auto fence = gst_d3d12_command_queue_get_fence_handle (queue);
+    gst_d3d12_command_queue_execute_wait (priv->cmd->queue, fence,
         mem->fence_value);
   }
 

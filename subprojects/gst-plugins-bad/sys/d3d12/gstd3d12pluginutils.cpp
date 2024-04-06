@@ -221,22 +221,20 @@ gst_d3d12_buffer_copy_into (GstBuffer * dst, GstBuffer * src,
     auto src_dmem = GST_D3D12_MEMORY_CAST (src_mem);
 
     device = dst_dmem->device;
-    if (device != src_dmem->device) {
+    if (!gst_d3d12_device_is_equal (device, src_dmem->device)) {
       GST_LOG ("different device, perform fallback copy");
       return gst_d3d12_buffer_copy_into_fallback (dst, src, info);
     }
 
     /* Map memory to execute pending upload and wait for external fence */
     GstMapInfo map_info;
-    if (!gst_memory_map (src_mem, &map_info,
-            (GstMapFlags) (GST_MAP_READ | GST_MAP_D3D12))) {
+    if (!gst_memory_map (src_mem, &map_info, GST_MAP_READ_D3D12)) {
       GST_ERROR ("Cannot map src d3d12 memory");
       return FALSE;
     }
     gst_memory_unmap (src_mem, &map_info);
 
-    if (!gst_memory_map (dst_mem, &map_info,
-            (GstMapFlags) (GST_MAP_WRITE | GST_MAP_D3D12))) {
+    if (!gst_memory_map (dst_mem, &map_info, GST_MAP_WRITE_D3D12)) {
       GST_ERROR ("Cannot map dst d3d12 memory");
       return FALSE;
     }

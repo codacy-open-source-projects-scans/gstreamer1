@@ -1457,7 +1457,7 @@ gst_d3d12_convert_propose_allocation (GstBaseTransform * trans,
         gst_clear_object (&pool);
       } else {
         auto dpool = GST_D3D12_BUFFER_POOL (pool);
-        if (dpool->device != filter->device)
+        if (!gst_d3d12_device_is_equal (dpool->device, filter->device))
           gst_clear_object (&pool);
       }
     }
@@ -1548,7 +1548,7 @@ gst_d3d12_convert_decide_allocation (GstBaseTransform * trans, GstQuery * query)
         gst_clear_object (&pool);
       } else {
         auto dpool = GST_D3D12_BUFFER_POOL (pool);
-        if (dpool->device != filter->device)
+        if (!gst_d3d12_device_is_equal (dpool->device, filter->device))
           gst_clear_object (&pool);
       }
     }
@@ -1979,8 +1979,7 @@ gst_d3d12_convert_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     return GST_FLOW_ERROR;
   }
 
-  ComPtr < ID3D12CommandAllocator > ca;
-  gst_d3d12_command_allocator_get_handle (gst_ca, &ca);
+  auto ca = gst_d3d12_command_allocator_get_handle (gst_ca);
 
   auto hr = ca->Reset ();
   if (!gst_d3d12_result (hr, priv->ctx->device)) {
@@ -1992,14 +1991,14 @@ gst_d3d12_convert_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   if (!priv->ctx->cl) {
     auto device = gst_d3d12_device_get_device_handle (priv->ctx->device);
     hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        ca.Get (), nullptr, IID_PPV_ARGS (&priv->ctx->cl));
+        ca, nullptr, IID_PPV_ARGS (&priv->ctx->cl));
     if (!gst_d3d12_result (hr, priv->ctx->device)) {
       GST_ERROR_OBJECT (self, "Couldn't create command list");
       gst_d3d12_command_allocator_unref (gst_ca);
       return GST_FLOW_ERROR;
     }
   } else {
-    hr = priv->ctx->cl->Reset (ca.Get (), nullptr);
+    hr = priv->ctx->cl->Reset (ca, nullptr);
     if (!gst_d3d12_result (hr, priv->ctx->device)) {
       GST_ERROR_OBJECT (self, "Couldn't reset command list");
       gst_d3d12_command_allocator_unref (gst_ca);

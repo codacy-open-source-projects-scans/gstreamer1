@@ -196,9 +196,13 @@ have_dx_math = cxx.compiles('''
     name: 'DirectXMath support in Windows SDK')
 
 if not have_dx_math
-  directxmath_dep = dependency('directxmath',
+  directxmath_dep = dependency('DirectXMath', 'directxmath',
       allow_fallback: true,
-      required: get_option('d3d11-math'))
+      version: '>= 3.1.9',
+      required: d3d11_opt)
+  if not directxmath_dep.found()
+    subdir_done()
+  endif
   extra_deps += [directxmath_dep]
 endif
 

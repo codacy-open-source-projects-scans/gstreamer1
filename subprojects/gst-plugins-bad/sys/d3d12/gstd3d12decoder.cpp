@@ -21,8 +21,8 @@
 #include <config.h>
 #endif
 
-#include <directx/d3dx12.h>
 #include "gstd3d12decoder.h"
+#include <directx/d3dx12.h>
 #include <gst/base/gstqueuearray.h>
 #include <wrl.h>
 #include <string.h>
@@ -37,8 +37,20 @@
 #include <algorithm>
 #include <atomic>
 
-GST_DEBUG_CATEGORY_EXTERN (gst_d3d12_decoder_debug);
-#define GST_CAT_DEFAULT gst_d3d12_decoder_debug
+#ifndef GST_DISABLE_GST_DEBUG
+#define GST_CAT_DEFAULT ensure_debug_category()
+static GstDebugCategory *
+ensure_debug_category (void)
+{
+  static GstDebugCategory *cat = nullptr;
+
+  GST_D3D12_CALL_ONCE_BEGIN {
+    cat = _gst_debug_category_new ("d3d12decoder", 0, "d3d12decoder");
+  } GST_D3D12_CALL_ONCE_END;
+
+  return cat;
+}
+#endif /* GST_DISABLE_GST_DEBUG */
 
 struct DecoderFormat
 {
@@ -710,7 +722,8 @@ gst_d3d12_decoder_configure (GstD3D12Decoder * decoder,
         D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
     session->reference_only = true;
   } else {
-    resource_flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+    resource_flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     session->reference_only = false;
   }
 
@@ -722,9 +735,12 @@ gst_d3d12_decoder_configure (GstD3D12Decoder * decoder,
   align.padding_right = session->aligned_width - info->width;
   align.padding_bottom = session->aligned_height - info->height;
 
+  D3D12_HEAP_FLAGS heap_flags = D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
+  if (!session->reference_only)
+    heap_flags |= D3D12_HEAP_FLAG_SHARED;
+
   auto params = gst_d3d12_allocation_params_new (decoder->device, info,
-      GST_D3D12_ALLOCATION_FLAG_DEFAULT, resource_flags,
-      D3D12_HEAP_FLAG_CREATE_NOT_ZEROED);
+      GST_D3D12_ALLOCATION_FLAG_DEFAULT, resource_flags, heap_flags);
   gst_d3d12_allocation_params_alignment (params, &align);
   if (!session->array_of_textures)
     gst_d3d12_allocation_params_set_array_size (params, session->dpb_size);
@@ -755,8 +771,9 @@ gst_d3d12_decoder_configure (GstD3D12Decoder * decoder,
 
     params = gst_d3d12_allocation_params_new (decoder->device, info,
         GST_D3D12_ALLOCATION_FLAG_DEFAULT,
-        D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
-        D3D12_HEAP_FLAG_CREATE_NOT_ZEROED);
+        D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        D3D12_HEAP_FLAG_CREATE_NOT_ZEROED | D3D12_HEAP_FLAG_SHARED);
     gst_d3d12_allocation_params_alignment (params, &align);
     gst_buffer_pool_config_set_d3d12_allocation_params (config, params);
     gst_d3d12_allocation_params_free (params);
@@ -1078,8 +1095,7 @@ gst_d3d12_decoder_end_picture (GstD3D12Decoder * decoder,
   memset (&in_args, 0, sizeof (D3D12_VIDEO_DECODE_INPUT_STREAM_ARGUMENTS));
   memset (&out_args, 0, sizeof (D3D12_VIDEO_DECODE_OUTPUT_STREAM_ARGUMENTS));
 
-  ComPtr < ID3D12CommandAllocator > ca;
-  gst_d3d12_command_allocator_get_handle (gst_ca, &ca);
+  auto ca = gst_d3d12_command_allocator_get_handle (gst_ca);
 
   hr = ca->Reset ();
   if (!gst_d3d12_result (hr, decoder->device)) {
@@ -1091,9 +1107,9 @@ gst_d3d12_decoder_end_picture (GstD3D12Decoder * decoder,
   if (!priv->cmd->cl) {
     hr = priv->cmd->device->CreateCommandList (0,
         D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE,
-        ca.Get (), nullptr, IID_PPV_ARGS (&priv->cmd->cl));
+        ca, nullptr, IID_PPV_ARGS (&priv->cmd->cl));
   } else {
-    hr = priv->cmd->cl->Reset (ca.Get ());
+    hr = priv->cmd->cl->Reset (ca);
   }
 
   if (!gst_d3d12_result (hr, decoder->device)) {
@@ -1420,7 +1436,7 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
     mem = gst_buffer_peek_memory (frame->output_buffer, 0);
     if (gst_is_d3d12_memory (mem)) {
       dmem = GST_D3D12_MEMORY_CAST (mem);
-      if (dmem->device == self->device) {
+      if (gst_d3d12_device_is_equal (dmem->device, self->device)) {
         out_resource = gst_d3d12_memory_get_resource_handle (dmem);
         gst_d3d12_memory_get_subresource_index (dmem, 0, &out_subresource[0]);
         gst_d3d12_memory_get_subresource_index (dmem, 1, &out_subresource[1]);
@@ -1791,7 +1807,7 @@ gst_d3d12_decoder_decide_allocation (GstD3D12Decoder * decoder,
         gst_clear_object (&pool);
       } else {
         GstD3D12BufferPool *dpool = GST_D3D12_BUFFER_POOL (pool);
-        if (dpool->device != decoder->device) {
+        if (!gst_d3d12_device_is_equal (dpool->device, decoder->device)) {
           GST_DEBUG_OBJECT (videodec, "Different device, will create new one");
           gst_clear_object (&pool);
         }

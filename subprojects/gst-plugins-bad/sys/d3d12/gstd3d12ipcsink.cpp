@@ -515,7 +515,7 @@ gst_d3d12_ipc_upload (GstD3D12IpcSink * self, GstBuffer * buf)
   mem = gst_buffer_peek_memory (buf, 0);
   if (gst_is_d3d12_memory (mem)) {
     auto dmem = GST_D3D12_MEMORY_CAST (mem);
-    if (dmem->device == priv->device) {
+    if (gst_d3d12_device_is_equal (dmem->device, priv->device)) {
       D3D12_RESOURCE_DESC desc;
       D3D12_HEAP_FLAGS heap_flags = D3D12_HEAP_FLAG_NONE;
 
@@ -575,7 +575,7 @@ gst_d3d12_ipc_sink_ensure_server (GstD3D12IpcSink * self, GstBuffer * buffer)
   mem = gst_buffer_peek_memory (buffer, 0);
   if (gst_is_d3d12_memory (mem)) {
     GstD3D12Memory *dmem = GST_D3D12_MEMORY_CAST (mem);
-    if (dmem->device != priv->device) {
+    if (!gst_d3d12_device_is_equal (dmem->device, priv->device)) {
       g_object_get (dmem->device, "adapter-luid", &adapter_luid, nullptr);
       gst_object_unref (priv->device);
       priv->device = (GstD3D12Device *) gst_object_ref (dmem->device);
@@ -584,11 +584,10 @@ gst_d3d12_ipc_sink_ensure_server (GstD3D12IpcSink * self, GstBuffer * buffer)
 
   auto queue = gst_d3d12_device_get_command_queue (priv->device,
       D3D12_COMMAND_LIST_TYPE_DIRECT);
-  ComPtr < ID3D12Fence > fence;
-  gst_d3d12_command_queue_get_fence (queue, &fence);
+  auto fence = gst_d3d12_command_queue_get_fence_handle (queue);
 
   priv->server = gst_d3d12_ipc_server_new (priv->pipe_name, adapter_luid,
-      fence.Get ());
+      fence);
   if (!priv->server) {
     GST_ERROR_OBJECT (self, "Couldn't create server");
     return FALSE;
@@ -621,8 +620,7 @@ gst_d3d12_ipc_sink_prepare (GstBaseSink * sink, GstBuffer * buf)
   dmem = (GstD3D12Memory *) gst_buffer_peek_memory (uploaded, 0);
 
   /* Upload staging to device memory */
-  if (!gst_video_frame_map (&frame, &priv->info, uploaded,
-          (GstMapFlags) (GST_MAP_READ | GST_MAP_D3D12))) {
+  if (!gst_video_frame_map (&frame, &priv->info, uploaded, GST_MAP_READ_D3D12)) {
     GST_ERROR_OBJECT (self, "Couldn't upload memory");
     gst_buffer_unref (uploaded);
     return GST_FLOW_ERROR;
