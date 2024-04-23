@@ -25,6 +25,7 @@
 #include "gstd3d12-private.h"
 #include "gstd3d12commandlistpool.h"
 #include <directx/d3dx12.h>
+#include <d3d11on12.h>
 #include <wrl.h>
 #include <vector>
 #include <string.h>
@@ -39,6 +40,8 @@
 #include <queue>
 #include <unordered_map>
 #include <thread>
+#include <gmodule.h>
+#include <atomic>
 
 GST_DEBUG_CATEGORY_STATIC (gst_d3d12_sdk_debug);
 
@@ -56,6 +59,30 @@ ensure_debug_category (void)
 }
 #endif /* GST_DISABLE_GST_DEBUG */
 
+static PFN_D3D11ON12_CREATE_DEVICE GstD3D11On12CreateDevice = nullptr;
+
+static gboolean
+load_d3d11on12_symbol (void)
+{
+  static gboolean ret = FALSE;
+  static GModule *d3d11_lib_module = nullptr;
+  GST_D3D12_CALL_ONCE_BEGIN {
+    d3d11_lib_module = g_module_open ("d3d11.dll", G_MODULE_BIND_LAZY);
+    if (!d3d11_lib_module)
+      return;
+
+    if (!g_module_symbol (d3d11_lib_module, "D3D11On12CreateDevice",
+            (gpointer *) & GstD3D11On12CreateDevice)) {
+      return;
+    }
+
+    ret = TRUE;
+  }
+  GST_D3D12_CALL_ONCE_END;
+
+  return ret;
+}
+
 enum
 {
   PROP_0,
@@ -65,13 +92,21 @@ enum
   PROP_VENDOR_ID,
   PROP_HARDWARE,
   PROP_DESCRIPTION,
+  PROP_DEVICE_REMOVED_REASON,
 };
+
+static GParamSpec *pspec_removed_reason = nullptr;
 
 /* *INDENT-OFF* */
 using namespace Microsoft::WRL;
 
 struct DeviceInner
 {
+  DeviceInner ()
+  {
+    dev_removed_event = CreateEventEx (nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+  }
+
   ~DeviceInner ()
   {
     Drain ();
@@ -88,7 +123,13 @@ struct DeviceInner
     factory = nullptr;
     adapter = nullptr;
 
-    ReportLiveObjects ();
+    if (removed_reason == S_OK)
+      ReportLiveObjects ();
+
+    if (dev_removed_monitor_handle)
+      UnregisterWait (dev_removed_monitor_handle);
+
+    CloseHandle (dev_removed_event);
   }
 
   void Drain ()
@@ -143,11 +184,31 @@ struct DeviceInner
     info_queue->ClearStoredMessages ();
   }
 
+  void AddClient (GstD3D12Device * client)
+  {
+    std::lock_guard <std::mutex> lk (lock);
+    clients.push_back (client);
+  }
+
+  void RemoveClient (GstD3D12Device * client)
+  {
+    std::lock_guard <std::mutex> lk (lock);
+    auto it = clients.begin ();
+    for (auto it = clients.begin (); it != clients.end(); it++) {
+      if (*it == client) {
+        clients.erase (it);
+        return;
+      }
+    }
+  }
+
   ComPtr<ID3D12Device> device;
   ComPtr<IDXGIAdapter1> adapter;
   ComPtr<IDXGIFactory2> factory;
+  ComPtr<ID3D11On12Device> device11on12;
   std::unordered_map<GstVideoFormat, GstD3D12Format> format_table;
   std::recursive_mutex extern_lock;
+  std::recursive_mutex device11on12_lock;
   std::mutex lock;
 
   ComPtr<ID3D12InfoQueue> info_queue;
@@ -168,6 +229,13 @@ struct DeviceInner
   guint vendor_id = 0;
   std::string description;
   gint64 adapter_luid = 0;
+
+  HANDLE dev_removed_monitor_handle = nullptr;
+  HANDLE dev_removed_event;
+  ComPtr<ID3D12Fence> dev_removed_fence;
+  std::atomic<HRESULT> removed_reason = { S_OK };
+
+  std::vector<GstD3D12Device*> clients;
 };
 
 typedef std::shared_ptr<DeviceInner> DeviceInnerPtr;
@@ -213,7 +281,7 @@ public:
 
   GstD3D12Device * GetDevice (const GstD3D12DeviceConstructData * data)
   {
-    std::lock_guard <std::mutex> lk (lock_);
+    std::lock_guard <std::recursive_mutex> lk (lock_);
     auto it = std::find_if (list_.begin (), list_.end (),
         [&] (const auto & device) {
           if (data->type == GST_D3D12_DEVICE_CONSTRUCT_FOR_INDEX)
@@ -233,6 +301,8 @@ public:
 
       GST_DEBUG_OBJECT (device, "Reusing created device");
 
+      device->priv->inner->AddClient (device);
+
       return device;
     }
 
@@ -247,12 +317,14 @@ public:
 
     list_.push_back (device->priv->inner);
 
+    device->priv->inner->AddClient (device);
+
     return device;
   }
 
   void ReleaseDevice (gint64 luid)
   {
-    std::lock_guard <std::mutex> lk (lock_);
+    std::lock_guard <std::recursive_mutex> lk (lock_);
     for (const auto & it : list_) {
       if (it->adapter_luid == luid) {
         if (it.use_count () == 1) {
@@ -261,6 +333,52 @@ public:
         }
         return;
       }
+    }
+  }
+
+  void OnDeviceRemoved (gint64 luid)
+  {
+    std::lock_guard <std::recursive_mutex> lk (lock_);
+    DeviceInnerPtr ptr;
+
+    {
+      auto it = std::find_if (list_.begin (), list_.end (),
+          [&] (const auto & device) {
+            return device->adapter_luid == luid;
+          });
+
+      if (it == list_.end ())
+        return;
+
+      ptr = *it;
+      list_.erase (it);
+    }
+
+    UnregisterWait (ptr->dev_removed_monitor_handle);
+    ptr->dev_removed_monitor_handle = nullptr;
+
+    ptr->removed_reason = ptr->device->GetDeviceRemovedReason ();
+    if (SUCCEEDED (ptr->removed_reason))
+      ptr->removed_reason = DXGI_ERROR_DEVICE_REMOVED;
+
+    auto error_text = g_win32_error_message ((guint) ptr->removed_reason);
+    GST_ERROR ("Adapter LUID: %" G_GINT64_FORMAT
+        ", DeviceRemovedReason: 0x%x, %s", ptr->adapter_luid,
+        (guint) ptr->removed_reason, GST_STR_NULL (error_text));
+    g_free (error_text);
+
+    std::vector<GstD3D12Device *> clients;
+    {
+      std::lock_guard<std::mutex> client_lk (ptr->lock);
+      for (auto it : ptr->clients) {
+        gst_object_ref (it);
+        clients.push_back (it);
+      }
+    }
+
+    for (auto it : clients) {
+      g_object_notify_by_pspec (G_OBJECT (it), pspec_removed_reason);
+      gst_object_unref (it);
     }
   }
 
@@ -284,11 +402,19 @@ private:
   }
 
 private:
-  std::mutex lock_;
+  std::recursive_mutex lock_;
   std::vector<DeviceInnerPtr> list_;
   std::unordered_map<UINT,UINT> name_map_;
 };
 /* *INDENT-ON* */
+
+static VOID NTAPI
+on_device_removed (PVOID context, BOOLEAN unused)
+{
+  DeviceInner *inner = (DeviceInner *) context;
+  auto manager = DeviceCacheManager::GetInstance ();
+  manager->OnDeviceRemoved (inner->adapter_luid);
+}
 
 static gboolean
 gst_d3d12_device_enable_debug (void)
@@ -345,6 +471,7 @@ gst_d3d12_device_enable_debug (void)
 #define gst_d3d12_device_parent_class parent_class
 G_DEFINE_TYPE (GstD3D12Device, gst_d3d12_device, GST_TYPE_OBJECT);
 
+static void gst_d3d12_device_dispose (GObject * object);
 static void gst_d3d12_device_finalize (GObject * object);
 static void gst_d3d12_device_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
@@ -357,6 +484,7 @@ gst_d3d12_device_class_init (GstD3D12DeviceClass * klass)
   GParamFlags readable_flags =
       (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
+  gobject_class->dispose = gst_d3d12_device_dispose;
   gobject_class->finalize = gst_d3d12_device_finalize;
   gobject_class->get_property = gst_d3d12_device_get_property;
 
@@ -381,12 +509,32 @@ gst_d3d12_device_class_init (GstD3D12DeviceClass * klass)
   g_object_class_install_property (gobject_class, PROP_DESCRIPTION,
       g_param_spec_string ("description", "Description",
           "Human readable device description", nullptr, readable_flags));
+
+  pspec_removed_reason =
+      g_param_spec_int ("device-removed-reason", "Device Removed Reason",
+      "HRESULT code returned from ID3D12Device::GetDeviceRemovedReason",
+      G_MININT32, G_MAXINT32, 0, readable_flags);
+  g_object_class_install_property (gobject_class, PROP_DEVICE_REMOVED_REASON,
+      pspec_removed_reason);
 }
 
 static void
 gst_d3d12_device_init (GstD3D12Device * self)
 {
   self->priv = new GstD3D12DevicePrivate ();
+}
+
+static void
+gst_d3d12_device_dispose (GObject * object)
+{
+  auto self = GST_D3D12_DEVICE (object);
+
+  GST_DEBUG_OBJECT (self, "Dispose");
+
+  if (self->priv->inner)
+    self->priv->inner->RemoveClient (self);
+
+  G_OBJECT_CLASS (parent_class)->dispose (object);
 }
 
 static void
@@ -430,6 +578,9 @@ gst_d3d12_device_get_property (GObject * object, guint prop_id,
       break;
     case PROP_DESCRIPTION:
       g_value_set_string (value, priv->description.c_str ());
+      break;
+    case PROP_DEVICE_REMOVED_REASON:
+      g_value_set_int (value, priv->removed_reason);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -766,6 +917,26 @@ gst_d3d12_device_new_internal (const GstD3D12DeviceConstructData * data)
   GST_OBJECT_FLAG_SET (priv->copy_queue, GST_OBJECT_FLAG_MAY_BE_LEAKED);
   GST_OBJECT_FLAG_SET (priv->copy_cl_pool, GST_OBJECT_FLAG_MAY_BE_LEAKED);
   GST_OBJECT_FLAG_SET (priv->copy_ca_pool, GST_OBJECT_FLAG_MAY_BE_LEAKED);
+
+  hr = device->CreateFence (0,
+      D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS (&priv->dev_removed_fence));
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create device removed monitor fence");
+    gst_object_unref (self);
+    return nullptr;
+  }
+
+  hr = priv->dev_removed_fence->SetEventOnCompletion (G_MAXUINT64,
+      priv->dev_removed_event);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "SetEventOnCompletion failed");
+    gst_object_unref (self);
+    return nullptr;
+  }
+
+  RegisterWaitForSingleObject (&priv->dev_removed_monitor_handle,
+      priv->dev_removed_event, on_device_removed, priv.get (), INFINITE,
+      WT_EXECUTEONLYONCE);
 
   return self;
 
@@ -1355,4 +1526,78 @@ gst_d3d12_device_is_equal (GstD3D12Device * device1, GstD3D12Device * device2)
     return TRUE;
 
   return FALSE;
+}
+
+IUnknown *
+gst_d3d12_device_get_11on12_handle (GstD3D12Device * device)
+{
+  g_return_val_if_fail (GST_IS_D3D12_DEVICE (device), nullptr);
+
+  auto priv = device->priv->inner;
+  std::lock_guard < std::mutex > lk (priv->lock);
+
+  if (!priv->device11on12) {
+    if (!load_d3d11on12_symbol ()) {
+      GST_WARNING_OBJECT (device, "D3D11On12CreateDevice symbol was not found");
+      return nullptr;
+    }
+
+    static const D3D_FEATURE_LEVEL feature_levels[] = {
+      D3D_FEATURE_LEVEL_12_1,
+      D3D_FEATURE_LEVEL_12_0,
+      D3D_FEATURE_LEVEL_11_1,
+      D3D_FEATURE_LEVEL_11_0,
+    };
+
+    IUnknown *cq[] =
+        { gst_d3d12_command_queue_get_handle (priv->direct_queue) };
+    ComPtr < ID3D11Device > device11;
+    auto hr = GstD3D11On12CreateDevice (priv->device.Get (),
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, feature_levels,
+        G_N_ELEMENTS (feature_levels), cq, 1, 0, &device11, nullptr, nullptr);
+    if (FAILED (hr)) {
+      GST_WARNING_OBJECT (device, "Couldn't create 11on12 device, hr: 0x%x",
+          (guint) hr);
+      return nullptr;
+    }
+
+    hr = device11.As (&priv->device11on12);
+    if (FAILED (hr)) {
+      GST_ERROR_OBJECT (device, "Couldn't get 11on12 interface");
+      return nullptr;
+    }
+  }
+
+  return priv->device11on12.Get ();
+}
+
+void
+gst_d3d12_device_11on12_lock (GstD3D12Device * device)
+{
+  g_return_if_fail (GST_IS_D3D12_DEVICE (device));
+
+  auto priv = device->priv->inner;
+  priv->device11on12_lock.lock ();
+}
+
+void
+gst_d3d12_device_11on12_unlock (GstD3D12Device * device)
+{
+  g_return_if_fail (GST_IS_D3D12_DEVICE (device));
+
+  auto priv = device->priv->inner;
+  priv->device11on12_lock.unlock ();
+}
+
+void
+gst_d3d12_device_check_device_removed (GstD3D12Device * device)
+{
+  g_return_if_fail (GST_IS_D3D12_DEVICE (device));
+
+  auto priv = device->priv->inner;
+  auto hr = priv->device->GetDeviceRemovedReason ();
+  if (FAILED (hr)) {
+    auto manager = DeviceCacheManager::GetInstance ();
+    manager->OnDeviceRemoved (priv->adapter_luid);
+  }
 }

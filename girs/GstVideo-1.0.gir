@@ -996,6 +996,33 @@ Shift and Alt).</doc>
           </parameter>
         </parameters>
       </function>
+      <function name="event_new_mouse_double_click" c:identifier="gst_navigation_event_new_mouse_double_click" version="1.26">
+        <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">Create a new navigation event for the given key mouse double click.</doc>
+        <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.h"/>
+        <return-value transfer-ownership="full">
+          <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">a new #GstEvent</doc>
+          <type name="Gst.Event" c:type="GstEvent*"/>
+        </return-value>
+        <parameters>
+          <parameter name="button" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">The number of the pressed mouse button.</doc>
+            <type name="gint" c:type="gint"/>
+          </parameter>
+          <parameter name="x" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">The x coordinate of the mouse cursor.</doc>
+            <type name="gdouble" c:type="gdouble"/>
+          </parameter>
+          <parameter name="y" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">The y coordinate of the mouse cursor.</doc>
+            <type name="gdouble" c:type="gdouble"/>
+          </parameter>
+          <parameter name="state" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">a bit-mask representing the state of the modifier keys (e.g. Control,
+Shift and Alt).</doc>
+            <type name="NavigationModifierType" c:type="GstNavigationModifierType"/>
+          </parameter>
+        </parameters>
+      </function>
       <function name="event_new_mouse_move" c:identifier="gst_navigation_event_new_mouse_move" version="1.22">
         <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">Create a new navigation event for the new mouse location.</doc>
         <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.h"/>
@@ -1876,7 +1903,7 @@ implementing the #GstNavigation interface.</doc>
           </instance-parameter>
           <parameter name="event" transfer-ownership="none">
             <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">The type of mouse event, as a text string. Recognised values are
-"mouse-button-press", "mouse-button-release" and "mouse-move".</doc>
+"mouse-button-press", "mouse-button-release", "mouse-move" and "mouse-double-click".</doc>
             <type name="utf8" c:type="const char*"/>
           </parameter>
           <parameter name="button" transfer-ownership="none">
@@ -2061,6 +2088,11 @@ from the event.</doc>
       </member>
       <member name="touch_cancel" value="12" c:identifier="GST_NAVIGATION_EVENT_TOUCH_CANCEL" version="1.22" glib:nick="touch-cancel">
         <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.h">An event cancelling all currently active touch points.</doc>
+      </member>
+      <member name="mouse_double_click" value="13" c:identifier="GST_NAVIGATION_EVENT_MOUSE_DOUBLE_CLICK" version="1.26" glib:nick="mouse-double-click">
+        <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.h">A mouse button double click event.
+Use gst_navigation_event_parse_mouse_button_event() to extract the details
+from the event.</doc>
       </member>
     </enumeration>
     <record name="NavigationInterface" c:type="GstNavigationInterface" glib:is-gtype-struct-for="Navigation">
@@ -3403,6 +3435,11 @@ Return the width of one tile in pixels, zero if its not an integer.</doc>
         </parameter>
       </parameters>
     </function-macro>
+    <constant name="VIDEO_FORMAT_LAST" value="134" c:type="GST_VIDEO_FORMAT_LAST" version="1.26">
+      <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.h">Number of video formats in #GstVideoFormat.</doc>
+      <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.h"/>
+      <type name="gint" c:type="gint"/>
+    </constant>
     <constant name="VIDEO_FPS_RANGE" value="(fraction) [ 0, max ]" c:type="GST_VIDEO_FPS_RANGE">
       <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.h"/>
       <type name="utf8" c:type="gchar*"/>
@@ -10414,8 +10451,10 @@ no corresponding FOURCC value, 0 is returned.</doc>
         </parameters>
       </function>
       <function name="to_string" c:identifier="gst_video_format_to_string">
-        <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.c">Returns a string containing a descriptive name for
-the #GstVideoFormat if there is one, or NULL otherwise.</doc>
+        <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.c">Returns a string containing a descriptive name for the #GstVideoFormat.
+
+Since 1.26 this can also be used with %GST_VIDEO_FORMAT_UNKNOWN, previous
+versions were printing a critical warning and returned %NULL.</doc>
         <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.h"/>
         <return-value transfer-ownership="none">
           <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.c">the name corresponding to @format</doc>
@@ -16766,6 +16805,33 @@ Shift and Alt).</doc>
         </parameter>
       </parameters>
     </function>
+    <function name="navigation_event_new_mouse_double_click" c:identifier="gst_navigation_event_new_mouse_double_click" moved-to="Navigation.event_new_mouse_double_click" version="1.26">
+      <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">Create a new navigation event for the given key mouse double click.</doc>
+      <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.h"/>
+      <return-value transfer-ownership="full">
+        <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">a new #GstEvent</doc>
+        <type name="Gst.Event" c:type="GstEvent*"/>
+      </return-value>
+      <parameters>
+        <parameter name="button" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">The number of the pressed mouse button.</doc>
+          <type name="gint" c:type="gint"/>
+        </parameter>
+        <parameter name="x" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">The x coordinate of the mouse cursor.</doc>
+          <type name="gdouble" c:type="gdouble"/>
+        </parameter>
+        <parameter name="y" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">The y coordinate of the mouse cursor.</doc>
+          <type name="gdouble" c:type="gdouble"/>
+        </parameter>
+        <parameter name="state" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">a bit-mask representing the state of the modifier keys (e.g. Control,
+Shift and Alt).</doc>
+          <type name="NavigationModifierType" c:type="GstNavigationModifierType"/>
+        </parameter>
+      </parameters>
+    </function>
     <function name="navigation_event_new_mouse_move" c:identifier="gst_navigation_event_new_mouse_move" moved-to="Navigation.event_new_mouse_move" version="1.22">
       <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.c">Create a new navigation event for the new mouse location.</doc>
       <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/navigation.h"/>
@@ -18669,8 +18735,10 @@ no corresponding FOURCC value, 0 is returned.</doc>
       </parameters>
     </function>
     <function name="video_format_to_string" c:identifier="gst_video_format_to_string" moved-to="VideoFormat.to_string">
-      <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.c">Returns a string containing a descriptive name for
-the #GstVideoFormat if there is one, or NULL otherwise.</doc>
+      <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.c">Returns a string containing a descriptive name for the #GstVideoFormat.
+
+Since 1.26 this can also be used with %GST_VIDEO_FORMAT_UNKNOWN, previous
+versions were printing a critical warning and returned %NULL.</doc>
       <source-position filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.h"/>
       <return-value transfer-ownership="none">
         <doc xml:space="preserve" filename="../subprojects/gst-plugins-base/gst-libs/gst/video/video-format.c">the name corresponding to @format</doc>

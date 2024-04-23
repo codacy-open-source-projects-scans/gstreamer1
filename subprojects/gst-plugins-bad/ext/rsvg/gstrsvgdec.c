@@ -72,13 +72,10 @@ static GstFlowReturn gst_rsvg_dec_handle_frame (GstVideoDecoder * decoder,
 static GstFlowReturn gst_rsvg_decode_image (GstRsvgDec * rsvg,
     GstBuffer * buffer, GstVideoCodecFrame * frame);
 
-static void gst_rsvg_dec_finalize (GObject * object);
-
 static void
 gst_rsvg_dec_class_init (GstRsvgDecClass * klass)
 {
   GstVideoDecoderClass *video_decoder_class = GST_VIDEO_DECODER_CLASS (klass);
-  GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
 
   GST_DEBUG_CATEGORY_INIT (rsvgdec_debug, "rsvgdec", 0, "RSVG decoder");
@@ -91,7 +88,6 @@ gst_rsvg_dec_class_init (GstRsvgDecClass * klass)
   gst_element_class_add_static_pad_template (element_class, &sink_factory);
   gst_element_class_add_static_pad_template (element_class, &src_factory);
 
-  gobject_class->finalize = gst_rsvg_dec_finalize;
   video_decoder_class->stop = GST_DEBUG_FUNCPTR (gst_rsvg_dec_stop);
   video_decoder_class->set_format = GST_DEBUG_FUNCPTR (gst_rsvg_dec_set_format);
   video_decoder_class->parse = GST_DEBUG_FUNCPTR (gst_rsvg_dec_parse);
@@ -108,13 +104,6 @@ gst_rsvg_dec_init (GstRsvgDec * rsvg)
       (rsvg), TRUE);
   GST_PAD_SET_ACCEPT_TEMPLATE (GST_VIDEO_DECODER_SINK_PAD (rsvg));
 }
-
-static void
-gst_rsvg_dec_finalize (GObject * object)
-{
-  G_OBJECT_CLASS (gst_rsvg_dec_parent_class)->finalize (object);
-}
-
 
 #define CAIRO_UNPREMULTIPLY(a,r,g,b) G_STMT_START { \
   b = (a > 0) ? MIN ((b * 255 + a / 2) / a, 255) : 0; \
@@ -156,8 +145,12 @@ gst_rsvg_decode_image (GstRsvgDec * rsvg, GstBuffer * buffer,
   cairo_surface_t *surface;
   RsvgHandle *handle;
   GError *error = NULL;
-  RsvgDimensionData dimension;
+#if LIBRSVG_MAJOR_VERSION > (2) || (LIBRSVG_MAJOR_VERSION == (2) && LIBRSVG_MINOR_VERSION > (52))
+  RsvgRectangle viewport;
+#else
   gdouble scalex, scaley;
+#endif
+  GstRsvgDimension dimension;
   GstMapInfo minfo;
   GstVideoFrame vframe;
   GstVideoCodecState *output_state;
@@ -174,20 +167,74 @@ gst_rsvg_decode_image (GstRsvgDec * rsvg, GstBuffer * buffer,
     g_error_free (error);
     return GST_FLOW_ERROR;
   }
-
+#if LIBRSVG_MAJOR_VERSION > (2) || (LIBRSVG_MAJOR_VERSION == (2) && LIBRSVG_MINOR_VERSION > (52))
+  rsvg_handle_get_intrinsic_size_in_pixels (handle, &dimension.width,
+      &dimension.height);
+#else
   rsvg_handle_get_dimensions (handle, &dimension);
+#endif
 
   output_state = gst_video_decoder_get_output_state (decoder);
   if ((output_state == NULL)
-      || GST_VIDEO_INFO_WIDTH (&output_state->info) != dimension.width
-      || GST_VIDEO_INFO_HEIGHT (&output_state->info) != dimension.height) {
+      || rsvg->dimension.width != dimension.width
+      || rsvg->dimension.height != dimension.height) {
+    GstCaps *peer_caps;
+    GstCaps *source_caps;
+    GstCaps *templ_caps;
 
-    /* Create the output state */
-    if (output_state)
-      gst_video_codec_state_unref (output_state);
-    output_state =
-        gst_video_decoder_set_output_state (decoder, GST_RSVG_VIDEO_FORMAT,
-        dimension.width, dimension.height, rsvg->input_state);
+    templ_caps =
+        gst_pad_get_pad_template_caps (GST_VIDEO_DECODER_SRC_PAD (rsvg));
+    peer_caps =
+        gst_pad_peer_query_caps (GST_VIDEO_DECODER_SRC_PAD (rsvg), templ_caps);
+
+    GST_DEBUG_OBJECT (rsvg,
+        "Trying to negotiate for SVG resolution %" G_GUINT64_FORMAT "x %"
+        G_GUINT64_FORMAT " with downstream caps %" GST_PTR_FORMAT,
+        (guint64) dimension.width, (guint64) dimension.height, peer_caps);
+
+    source_caps = gst_caps_make_writable (g_steal_pointer (&templ_caps));
+    gst_caps_set_simple (source_caps, "width", G_TYPE_INT, dimension.width,
+        "height", G_TYPE_INT, dimension.height, "pixel-aspect-ratio",
+        GST_TYPE_FRACTION, 1, 1, NULL);
+
+    if (gst_caps_can_intersect (source_caps, peer_caps)
+        || gst_caps_is_empty (peer_caps)) {
+      GST_DEBUG_OBJECT (rsvg, "Using input resolution");
+      if (output_state)
+        gst_video_codec_state_unref (output_state);
+      output_state =
+          gst_video_decoder_set_output_state (decoder, GST_RSVG_VIDEO_FORMAT,
+          dimension.width, dimension.height, rsvg->input_state);
+      output_state->info.par_n = 1;
+      output_state->info.par_d = 1;
+    } else {
+      GstVideoInfo info;
+      GstStructure *s;
+
+      peer_caps = gst_caps_make_writable (peer_caps);
+      peer_caps = gst_caps_truncate (peer_caps);
+      s = gst_caps_get_structure (peer_caps, 0);
+      gst_structure_fixate_field_nearest_int (s, "width", dimension.width);
+      gst_structure_fixate_field_nearest_int (s, "height", dimension.height);
+      peer_caps = gst_caps_fixate (peer_caps);
+
+      gst_video_info_from_caps (&info, peer_caps);
+
+      if (output_state)
+        gst_video_codec_state_unref (output_state);
+      output_state =
+          gst_video_decoder_set_output_state (decoder, GST_RSVG_VIDEO_FORMAT,
+          info.width, info.height, rsvg->input_state);
+      GST_DEBUG_OBJECT (rsvg,
+          "Using resolution %ux%u with pixel-aspect-ratio %u/%u",
+          output_state->info.width, output_state->info.height,
+          output_state->info.par_n, output_state->info.par_d);
+    }
+
+    gst_clear_caps (&source_caps);
+    gst_clear_caps (&peer_caps);
+
+    rsvg->dimension = dimension;
   }
 
   ret = gst_video_decoder_allocate_output_frame (decoder, frame);
@@ -225,6 +272,21 @@ gst_rsvg_decode_image (GstRsvgDec * rsvg, GstBuffer * buffer,
   cairo_set_operator (cr, CAIRO_OPERATOR_OVER);
   cairo_set_source_rgba (cr, 0.0, 0.0, 0.0, 1.0);
 
+#if LIBRSVG_MAJOR_VERSION > (2) || (LIBRSVG_MAJOR_VERSION == (2) && LIBRSVG_MINOR_VERSION > (52))
+  viewport.x = 0;
+  viewport.y = 0;
+  viewport.width = GST_VIDEO_INFO_WIDTH (&output_state->info);
+  viewport.height = GST_VIDEO_INFO_HEIGHT (&output_state->info);
+  if (!rsvg_handle_render_document (handle, cr, &viewport, &error)) {
+    GST_ERROR_OBJECT (rsvg, "Failed to render SVG image: %s", error->message);
+    g_error_free (error);
+    g_object_unref (handle);
+    cairo_destroy (cr);
+    cairo_surface_destroy (surface);
+    gst_video_codec_state_unref (output_state);
+    return GST_FLOW_ERROR;
+  }
+#else
   scalex = scaley = 1.0;
   if (GST_VIDEO_INFO_WIDTH (&output_state->info) != dimension.width) {
     scalex =
@@ -236,8 +298,10 @@ gst_rsvg_decode_image (GstRsvgDec * rsvg, GstBuffer * buffer,
         ((gdouble) GST_VIDEO_INFO_HEIGHT (&output_state->info)) /
         ((gdouble) dimension.height);
   }
+
   cairo_scale (cr, scalex, scaley);
   rsvg_handle_render_cairo (handle, cr);
+#endif
 
   g_object_unref (handle);
   cairo_destroy (cr);
@@ -259,17 +323,10 @@ static gboolean
 gst_rsvg_dec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
 {
   GstRsvgDec *rsvg = GST_RSVG_DEC (decoder);
-  GstVideoInfo *info = &state->info;
 
   if (rsvg->input_state)
     gst_video_codec_state_unref (rsvg->input_state);
   rsvg->input_state = gst_video_codec_state_ref (state);
-
-  /* Create the output state */
-  state = gst_video_decoder_set_output_state (decoder, GST_RSVG_VIDEO_FORMAT,
-      GST_VIDEO_INFO_WIDTH (info), GST_VIDEO_INFO_HEIGHT (info),
-      rsvg->input_state);
-  gst_video_codec_state_unref (state);
 
   return TRUE;
 }
@@ -369,6 +426,8 @@ gst_rsvg_dec_stop (GstVideoDecoder * decoder)
     gst_video_codec_state_unref (rsvg->input_state);
     rsvg->input_state = NULL;
   }
+
+  memset (&rsvg->dimension, 0, sizeof (RsvgDimensionData));
 
   return TRUE;
 }

@@ -109,9 +109,10 @@ base_tests = [
   [['libs/vkinstance.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkimagebufferpool.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkvideodecode.c'], not gstvulkan_dep.found() or vulkan_conf.get('GST_VULKAN_HAVE_VIDEO_EXTENSIONS') != 1, [gstvulkan_dep]],
-  [['libs/d3d11device.cpp'], not gstd3d11_dep.found(), [gstd3d11_dep]],
+  [['libs/d3d11device.cpp'], not gstd3d11_dep.found(), [gstd3d11_dep, gstvideo_dep]],
   [['libs/d3d11memory.c'], not gstd3d11_dep.found(), [gstd3d11_dep]],
   [['libs/cudamemory.c'], not gstcuda_dep.found(), [gstcuda_dep, gstcuda_stub_dep]],
+  [['libs/d3d12device.cpp'], not gstd3d12_dep.found(), [gstd3d12_dep]],
 ]
 
 # Make sure our headers are C++ clean
@@ -185,8 +186,10 @@ test_defines = [
   '-DGST_USE_UNSTABLE_API',
 ]
 
-test_deps = [gst_dep, gstapp_dep, gstbase_dep,
-             gstbasecamerabin_dep, gstphotography_dep,
+test_deps = [gst_dep, gstapp_dep, gstbase_dep, gstbadaudio_dep,
+             gstbasecamerabin_dep, gstphotography_dep, gstwebrtc_dep,
+             gstmpegts_dep, gstmse_dep, gstplay_dep, gstplayer_dep,
+             gstanalytics_dep, gstinsertbin_dep, gst_transcoder_dep,
              gstpbutils_dep, gstcontroller_dep, gstaudio_dep,
              gstvideo_dep, gstrtp_dep, gsturidownloader_dep,
              gstcheck_dep, gio_dep, gsttag_dep]
