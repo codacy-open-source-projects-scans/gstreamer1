@@ -70,7 +70,7 @@ G_BEGIN_DECLS
  *
  * Since: 1.26
  */
-#define GST_MAP_D3D12 (GST_MAP_FLAG_LAST << 1)
+#define GST_MAP_D3D12 ((GstMapFlags) (GST_MAP_FLAG_LAST << 1))
 
 /**
  * GST_MAP_READ_D3D12:
@@ -221,6 +221,11 @@ GST_D3D12_API
 void              gst_d3d12_memory_set_external_fence (GstD3D12Memory * mem,
                                                        ID3D12Fence * fence,
                                                        guint64 fence_val);
+
+GST_D3D12_API
+gboolean          gst_d3d12_memory_get_external_fence (GstD3D12Memory * mem,
+                                                       ID3D12Fence ** fence,
+                                                       guint64 * fence_val);
 
 GST_D3D12_API
 ID3D11Texture2D * gst_d3d12_memory_get_d3d11_texture (GstD3D12Memory * mem,

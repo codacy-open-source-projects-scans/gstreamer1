@@ -445,7 +445,7 @@ gst_d3d12_decoder_open (GstD3D12Decoder * decoder, GstElement * element)
   desc.Type = D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE;
   desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
   cmd->queue = gst_d3d12_command_queue_new (cmd->device.Get (), &desc,
-      D3D12_FENCE_FLAG_NONE, 4);
+      D3D12_FENCE_FLAG_NONE, ASYNC_DEPTH * 2);
   if (!cmd->queue) {
     GST_ERROR_OBJECT (element, "Couldn't create command queue");
     return FALSE;
@@ -1299,6 +1299,17 @@ gst_d3d12_decoder_end_picture (GstD3D12Decoder * decoder,
   }
 
   decoder_pic->fence_val = priv->cmd->fence_val;
+  auto fence_handle =
+      gst_d3d12_command_queue_get_fence_handle (priv->cmd->queue);
+  dmem = (GstD3D12Memory *) gst_buffer_peek_memory (decoder_pic->buffer, 0);
+  gst_d3d12_memory_set_external_fence (dmem,
+      fence_handle, priv->cmd->fence_val);
+  if (decoder_pic->output_buffer) {
+    dmem = (GstD3D12Memory *)
+        gst_buffer_peek_memory (decoder_pic->output_buffer, 0);
+    gst_d3d12_memory_set_external_fence (dmem,
+        fence_handle, priv->cmd->fence_val);
+  }
 
   GstD3D12FenceData *fence_data;
   gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
@@ -1436,7 +1447,6 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
 
     frame->output_buffer = gst_buffer_ref (buffer);
   } else {
-    GstMemory *mem;
     ID3D12Resource *out_resource = nullptr;
     UINT out_subresource[2];
 
@@ -1446,17 +1456,19 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
       goto error;
     }
 
-    mem = gst_buffer_peek_memory (frame->output_buffer, 0);
-    if (gst_is_d3d12_memory (mem)) {
-      dmem = GST_D3D12_MEMORY_CAST (mem);
+    auto out_mem = gst_buffer_peek_memory (frame->output_buffer, 0);
+    if (gst_is_d3d12_memory (out_mem)) {
+      auto out_dmem = GST_D3D12_MEMORY_CAST (out_mem);
       if (gst_d3d12_device_is_equal (dmem->device, self->device)) {
-        out_resource = gst_d3d12_memory_get_resource_handle (dmem);
-        gst_d3d12_memory_get_subresource_index (dmem, 0, &out_subresource[0]);
-        gst_d3d12_memory_get_subresource_index (dmem, 1, &out_subresource[1]);
+        out_resource = gst_d3d12_memory_get_resource_handle (out_dmem);
+        gst_d3d12_memory_get_subresource_index (out_dmem, 0,
+            &out_subresource[0]);
+        gst_d3d12_memory_get_subresource_index (out_dmem, 1,
+            &out_subresource[1]);
 
-        GST_MINI_OBJECT_FLAG_SET (dmem,
+        GST_MINI_OBJECT_FLAG_SET (out_dmem,
             GST_D3D12_MEMORY_TRANSFER_NEED_DOWNLOAD);
-        GST_MINI_OBJECT_FLAG_UNSET (dmem,
+        GST_MINI_OBJECT_FLAG_UNSET (out_dmem,
             GST_D3D12_MEMORY_TRANSFER_NEED_UPLOAD);
       }
     }
@@ -1519,17 +1531,27 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
     }
 
     guint64 copy_fence_val = 0;
+    GstD3D12FenceData *fence_data = nullptr;
     D3D12_COMMAND_LIST_TYPE queue_type = D3D12_COMMAND_LIST_TYPE_COPY;
-    if (out_resource)
+    if (out_resource) {
       queue_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+      gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
+      gst_d3d12_fence_data_add_notify_mini_object (fence_data,
+          gst_buffer_ref (buffer));
+    }
+
+    auto fence_handle =
+        gst_d3d12_command_queue_get_fence_handle (priv->cmd->queue);
     gst_d3d12_device_copy_texture_region (self->device, copy_args.size (),
-        copy_args.data (), queue_type, &copy_fence_val);
-    gst_d3d12_device_fence_wait (self->device, queue_type,
-        copy_fence_val, priv->copy_event_handle);
+        copy_args.data (), fence_data, fence_handle, decoder_pic->fence_val,
+        queue_type, &copy_fence_val);
 
     if (!out_resource) {
       guint8 *map_data;
       GstVideoFrame vframe;
+
+      gst_d3d12_device_fence_wait (self->device, queue_type,
+          copy_fence_val, priv->copy_event_handle);
 
       hr = priv->session->staging->Map (0, nullptr, (void **) &map_data);
       if (!gst_d3d12_result (hr, self->device)) {
@@ -1555,6 +1577,8 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
 
       priv->session->staging->Unmap (0, nullptr);
       gst_video_frame_unmap (&vframe);
+    } else {
+      gst_d3d12_buffer_after_write (frame->output_buffer, copy_fence_val);
     }
   }
 
@@ -1592,8 +1616,6 @@ gst_d3d12_decoder_output_loop (GstD3D12Decoder * self)
 
   GST_DEBUG_OBJECT (self, "Entering output thread");
 
-  HANDLE event_handle = CreateEventEx (nullptr, nullptr, 0, EVENT_ALL_ACCESS);
-
   while (true) {
     DecoderOutputData output_data;
     {
@@ -1613,8 +1635,6 @@ gst_d3d12_decoder_output_loop (GstD3D12Decoder * self)
 
     auto decoder_pic = get_decoder_picture (output_data.picture);
     g_assert (decoder_pic);
-    gst_d3d12_command_queue_fence_wait (priv->cmd->queue,
-        decoder_pic->fence_val, event_handle);
 
     if (priv->flushing) {
       GST_DEBUG_OBJECT (self, "Drop framem, we are flushing");
@@ -1639,8 +1659,6 @@ gst_d3d12_decoder_output_loop (GstD3D12Decoder * self)
   }
 
   GST_DEBUG_OBJECT (self, "Leaving output thread");
-
-  CloseHandle (event_handle);
 
   return nullptr;
 }

@@ -125,16 +125,7 @@ gst_va_base_enc_start (GstVideoEncoder * venc)
 
   gst_va_base_enc_reset_state (base);
 
-  base->input_frame_count = 0;
-  base->output_frame_count = 0;
-
   base->input_state = NULL;
-
-  /* Set the minimum pts to some huge value (1000 hours). This keeps
-   * the dts at the start of the stream from needing to be
-   * negative. */
-  base->start_pts = GST_SECOND * 60 * 60 * 1000;
-  gst_video_encoder_set_min_pts (venc, base->start_pts);
 
   return TRUE;
 }
@@ -478,12 +469,9 @@ _push_buffer_to_downstream (GstVaBaseEnc * base, GstVideoCodecFrame * frame)
   if (complete) {
     ret = gst_video_encoder_finish_frame (GST_VIDEO_ENCODER (base), frame);
   } else {
-    if (frame->output_buffer) {
-      ret = gst_video_encoder_finish_subframe (GST_VIDEO_ENCODER (base), frame);
-    } else {
-      /* Allow to output later and no data here. */
-      ret = GST_FLOW_OK;
-    }
+    /* Allow to output later and no data here. */
+    g_assert (!frame->output_buffer);
+    ret = GST_FLOW_OK;
   }
 
   return ret;
@@ -640,8 +628,10 @@ gst_va_base_enc_handle_frame (GstVideoEncoder * venc,
       GST_TIME_ARGS (GST_BUFFER_PTS (frame->input_buffer)));
 
   if (g_atomic_int_compare_and_exchange (&base->reconf, TRUE, FALSE)) {
-    if (!gst_va_base_enc_reset (base))
+    if (!gst_va_base_enc_reset (base)) {
+      gst_video_encoder_finish_frame (venc, frame);
       return GST_FLOW_ERROR;
+    }
   }
 
   ret = gst_va_base_enc_import_input_buffer (base,

@@ -25,6 +25,7 @@
 
 #include <gst/video/video.h>
 #include <gst/vulkan/vulkan.h>
+#include "gst/vulkan/gstvkdecoder-private.h"
 
 #include "gstvulkanelements.h"
 
@@ -219,7 +220,7 @@ gst_vulkan_h265_decoder_open (GstVideoDecoder * decoder)
     return FALSE;
   }
 
-  self->decoder = gst_vulkan_queue_create_decoder (self->decode_queue,
+  self->decoder = gst_vulkan_decoder_new_from_queue (self->decode_queue,
       VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR);
   if (!self->decoder) {
     GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
@@ -255,7 +256,7 @@ gst_vulkan_h265_decoder_stop (GstVideoDecoder * decoder)
   if (self->output_state)
     gst_video_codec_state_unref (self->output_state);
 
-  return TRUE;
+  return GST_VIDEO_DECODER_CLASS (parent_class)->stop (decoder);
 }
 
 static gboolean
