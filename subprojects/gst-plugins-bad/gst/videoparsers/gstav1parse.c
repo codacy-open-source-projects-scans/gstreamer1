@@ -106,6 +106,10 @@ struct _GstAV1Parse
   gint subsampling_x;
   gint subsampling_y;
   gboolean mono_chrome;
+  guint8 seq_level_idx;
+  guint8 seq_tier;
+  guint8 max_seq_level_idx;
+  guint8 max_seq_tier;
   guint8 bit_depth;
   gchar *colorimetry;
   GstAV1Profile profile;
@@ -311,6 +315,10 @@ gst_av1_parse_reset (GstAV1Parse * self)
   self->subsampling_y = -1;
   self->mono_chrome = FALSE;
   self->profile = GST_AV1_PROFILE_UNDEFINED;
+  self->seq_level_idx = GST_AV1_SEQ_LEVEL_MAX;
+  self->seq_tier = 0;
+  self->max_seq_level_idx = GST_AV1_SEQ_LEVEL_MAX;
+  self->max_seq_tier = 0;
   self->bit_depth = 0;
   self->align = GST_AV1_PARSE_ALIGN_NONE;
   self->in_align = GST_AV1_PARSE_ALIGN_NONE;
@@ -419,6 +427,80 @@ gst_av1_parse_profile_to_string (GstAV1Profile profile)
       return "professional";
     default:
       break;
+  }
+
+  return NULL;
+}
+
+static const gchar *
+gst_av1_parse_seq_level_idx_to_string (GstAV1SeqLevels seq_level_idx)
+{
+  switch (seq_level_idx) {
+    case GST_AV1_SEQ_LEVEL_2_0:
+      return "2.0";
+    case GST_AV1_SEQ_LEVEL_2_1:
+      return "2.1";
+    case GST_AV1_SEQ_LEVEL_2_2:
+      return "2.2";
+    case GST_AV1_SEQ_LEVEL_2_3:
+      return "2.3";
+    case GST_AV1_SEQ_LEVEL_3_0:
+      return "3.0";
+    case GST_AV1_SEQ_LEVEL_3_1:
+      return "3.1";
+    case GST_AV1_SEQ_LEVEL_3_2:
+      return "3.2";
+    case GST_AV1_SEQ_LEVEL_3_3:
+      return "3.3";
+    case GST_AV1_SEQ_LEVEL_4_0:
+      return "4.0";
+    case GST_AV1_SEQ_LEVEL_4_1:
+      return "4.1";
+    case GST_AV1_SEQ_LEVEL_4_2:
+      return "4.2";
+    case GST_AV1_SEQ_LEVEL_4_3:
+      return "4.3";
+    case GST_AV1_SEQ_LEVEL_5_0:
+      return "5.0";
+    case GST_AV1_SEQ_LEVEL_5_1:
+      return "5.1";
+    case GST_AV1_SEQ_LEVEL_5_2:
+      return "5.2";
+    case GST_AV1_SEQ_LEVEL_5_3:
+      return "5.3";
+    case GST_AV1_SEQ_LEVEL_6_0:
+      return "6.0";
+    case GST_AV1_SEQ_LEVEL_6_1:
+      return "6.1";
+    case GST_AV1_SEQ_LEVEL_6_2:
+      return "6.2";
+    case GST_AV1_SEQ_LEVEL_6_3:
+      return "6.3";
+    case GST_AV1_SEQ_LEVEL_7_0:
+      return "7.0";
+    case GST_AV1_SEQ_LEVEL_7_1:
+      return "7.1";
+    case GST_AV1_SEQ_LEVEL_7_2:
+      return "7.2";
+    case GST_AV1_SEQ_LEVEL_7_3:
+      return "7.3";
+    case GST_AV1_SEQ_LEVEL_MAX:
+    case GST_AV1_SEQ_LEVELS:
+      /* not valid */
+      return NULL;
+  }
+
+  return NULL;
+}
+
+static const gchar *
+gst_av1_parse_tier_to_string (guint8 seq_tier)
+{
+  switch (seq_tier) {
+    case 0:
+      return "main";
+    case 1:
+      return "high";
   }
 
   return NULL;
@@ -647,6 +729,8 @@ gst_av1_parse_update_src_caps (GstAV1Parse * self, GstCaps * caps)
   gint width, height;
   gint par_n = 0, par_d = 0;
   const gchar *profile = NULL;
+  const gchar *level = NULL;
+  const gchar *tier = NULL;
 
   if (G_UNLIKELY (!gst_pad_has_current_caps (GST_BASE_PARSE_SRC_PAD (self))))
     self->update_caps = TRUE;
@@ -737,6 +821,33 @@ gst_av1_parse_update_src_caps (GstAV1Parse * self, GstCaps * caps)
   profile = gst_av1_parse_profile_to_string (self->profile);
   if (profile)
     gst_caps_set_simple (final_caps, "profile", G_TYPE_STRING, profile, NULL);
+
+  level = gst_av1_parse_seq_level_idx_to_string (self->seq_level_idx);
+  if (level)
+    gst_caps_set_simple (final_caps, "level", G_TYPE_STRING, level, NULL);
+
+  tier = gst_av1_parse_tier_to_string (self->seq_tier);
+  if (tier)
+    gst_caps_set_simple (final_caps, "tier", G_TYPE_STRING, tier, NULL);
+
+  if ((self->max_seq_tier != self->seq_tier)
+      || (self->max_seq_level_idx != self->seq_level_idx)) {
+
+    tier = gst_av1_parse_tier_to_string (self->max_seq_tier);
+    if (tier) {
+      gst_caps_set_simple (final_caps, "max-tier", G_TYPE_STRING, tier, NULL);
+    } else {
+      GST_WARNING_OBJECT (self, "Invalid max seq tier %d", self->max_seq_tier);
+    }
+
+    level = gst_av1_parse_seq_level_idx_to_string (self->max_seq_level_idx);
+    if (level) {
+      gst_caps_set_simple (final_caps, "max-level", G_TYPE_STRING, level, NULL);
+    } else {
+      GST_WARNING_OBJECT (self, "Invalid max level idx %d",
+          self->max_seq_level_idx);
+    }
+  }
 
   src_caps = gst_pad_get_current_caps (GST_BASE_PARSE_SRC_PAD (self));
 
@@ -1296,6 +1407,22 @@ gst_av1_parse_handle_sequence_obu (GstAV1Parse * self, GstAV1OBU * obu)
   if (self->mono_chrome != seq_header.color_config.mono_chrome) {
     self->mono_chrome = seq_header.color_config.mono_chrome;
     self->update_caps = TRUE;
+  }
+
+  if (seq_header.operating_points_cnt_minus_1 + 1) {
+    /* Search for the actual max level and tier */
+    self->seq_level_idx = self->max_seq_level_idx =
+        seq_header.operating_points[0].seq_level_idx;
+    self->seq_tier = self->max_seq_tier =
+        seq_header.operating_points[0].seq_tier;
+
+    for (i = 1; i < seq_header.operating_points_cnt_minus_1 + 1; i++) {
+      if (self->max_seq_level_idx <
+          seq_header.operating_points[i].seq_level_idx) {
+        self->max_seq_level_idx = seq_header.operating_points[i].seq_level_idx;
+        self->max_seq_tier = seq_header.operating_points[i].seq_tier;
+      }
+    }
   }
 
   if (self->bit_depth != seq_header.bit_depth) {

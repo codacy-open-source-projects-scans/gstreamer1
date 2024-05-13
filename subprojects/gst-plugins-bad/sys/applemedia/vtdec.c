@@ -88,6 +88,8 @@ static gboolean gst_vtdec_flush (GstVideoDecoder * decoder);
 static GstFlowReturn gst_vtdec_finish (GstVideoDecoder * decoder);
 static gboolean gst_vtdec_sink_event (GstVideoDecoder * decoder,
     GstEvent * event);
+static GstStateChangeReturn gst_vtdec_change_state (GstElement * element,
+    GstStateChange transition);
 static GstFlowReturn gst_vtdec_handle_frame (GstVideoDecoder * decoder,
     GstVideoCodecFrame * frame);
 
@@ -188,6 +190,7 @@ gst_vtdec_class_init (GstVtdecClass * klass)
 
   gobject_class->finalize = gst_vtdec_finalize;
   element_class->set_context = gst_vtdec_set_context;
+  element_class->change_state = gst_vtdec_change_state;
   video_decoder_class->start = GST_DEBUG_FUNCPTR (gst_vtdec_start);
   video_decoder_class->stop = GST_DEBUG_FUNCPTR (gst_vtdec_stop);
   video_decoder_class->negotiate = GST_DEBUG_FUNCPTR (gst_vtdec_negotiate);
@@ -229,7 +232,7 @@ gst_vtdec_start (GstVideoDecoder * decoder)
   vtdec->is_flushing = FALSE;
   vtdec->is_draining = FALSE;
   vtdec->downstream_ret = GST_FLOW_OK;
-  vtdec->reorder_queue = gst_queue_array_new (0);
+  vtdec->reorder_queue = gst_vec_deque_new (0);
 
   /* Create the output task, but pause it immediately */
   vtdec->pause_task = TRUE;
@@ -254,13 +257,15 @@ gst_vtdec_stop (GstVideoDecoder * decoder)
   GstVideoCodecFrame *frame;
   GstVtdec *vtdec = GST_VTDEC (decoder);
 
+  GST_DEBUG_OBJECT (vtdec, "stop");
+
   gst_vtdec_drain_decoder (GST_VIDEO_DECODER_CAST (vtdec), TRUE);
   vtdec->downstream_ret = GST_FLOW_FLUSHING;
 
-  while ((frame = gst_queue_array_pop_head (vtdec->reorder_queue))) {
+  while ((frame = gst_vec_deque_pop_head (vtdec->reorder_queue))) {
     gst_video_decoder_release_frame (decoder, frame);
   }
-  gst_queue_array_free (vtdec->reorder_queue);
+  gst_vec_deque_free (vtdec->reorder_queue);
   vtdec->reorder_queue = NULL;
 
   gst_pad_stop_task (GST_VIDEO_DECODER_SRC_PAD (decoder));
@@ -289,8 +294,6 @@ gst_vtdec_stop (GstVideoDecoder * decoder)
   gst_clear_object (&vtdec->instance);
 #endif
 
-  GST_DEBUG_OBJECT (vtdec, "stop");
-
   return TRUE;
 }
 
@@ -303,7 +306,7 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
   gboolean is_flushing;
 
   g_mutex_lock (&vtdec->queue_mutex);
-  while (gst_queue_array_is_empty (vtdec->reorder_queue)
+  while (gst_vec_deque_is_empty (vtdec->reorder_queue)
       && !vtdec->pause_task && !vtdec->is_flushing && !vtdec->is_draining) {
     g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
   }
@@ -316,9 +319,9 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
 
   /* push a buffer if there are enough frames to guarantee 
    * that we push in PTS order, or if we're draining/flushing */
-  while ((gst_queue_array_get_length (vtdec->reorder_queue) >=
+  while ((gst_vec_deque_get_length (vtdec->reorder_queue) >=
           vtdec->dbp_size) || vtdec->is_flushing || vtdec->is_draining) {
-    frame = gst_queue_array_pop_head (vtdec->reorder_queue);
+    frame = gst_vec_deque_pop_head (vtdec->reorder_queue);
     is_flushing = vtdec->is_flushing;
     g_cond_signal (&vtdec->queue_cond);
     g_mutex_unlock (&vtdec->queue_mutex);
@@ -362,7 +365,7 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
   if (ret != GST_FLOW_OK) {
     g_mutex_lock (&vtdec->queue_mutex);
 
-    while ((frame = gst_queue_array_pop_head (vtdec->reorder_queue))) {
+    while ((frame = gst_vec_deque_pop_head (vtdec->reorder_queue))) {
       GST_LOG_OBJECT (vtdec, "flushing frame %d", frame->system_frame_number);
       gst_video_decoder_release_frame (decoder, frame);
     }
@@ -740,7 +743,7 @@ gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
     gst_video_codec_state_unref (vtdec->input_state);
   vtdec->input_state = gst_video_codec_state_ref (state);
 
-  return gst_video_decoder_negotiate (decoder);
+  return gst_vtdec_negotiate (decoder);
 }
 
 static gboolean
@@ -803,6 +806,20 @@ gst_vtdec_sink_event (GstVideoDecoder * decoder, GstEvent * event)
   }
 
   return ret;
+}
+
+static GstStateChangeReturn
+gst_vtdec_change_state (GstElement * element, GstStateChange transition)
+{
+  GstVtdec *self = GST_VTDEC (element);
+
+  if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+    GST_DEBUG_OBJECT (self, "pausing output loop on PAUSED->READY");
+    gst_vtdec_pause_output_loop (self);
+  }
+
+  return GST_ELEMENT_CLASS (gst_vtdec_parent_class)->change_state (element,
+      transition);
 }
 
 static GstFlowReturn
@@ -1239,16 +1256,17 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
    * which will lock up if we decide to wait in this callback, creating a deadlock. */
   push_anyway = vtdec->is_flushing || vtdec->is_draining;
   while (!push_anyway
-      && gst_queue_array_get_length (vtdec->reorder_queue) >
+      && gst_vec_deque_get_length (vtdec->reorder_queue) >
       vtdec->dbp_size * 2 + 1) {
     g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
     push_anyway = vtdec->is_flushing || vtdec->is_draining;
   }
 
-  gst_queue_array_push_sorted (vtdec->reorder_queue, frame, sort_frames_by_pts,
+  gst_vec_deque_push_sorted (vtdec->reorder_queue, frame, sort_frames_by_pts,
       NULL);
-  GST_LOG ("pushed frame %d, queue length %d", frame->decode_frame_number,
-      gst_queue_array_get_length (vtdec->reorder_queue));
+  GST_LOG ("pushed frame %d, queue length %" G_GSIZE_FORMAT,
+      frame->decode_frame_number,
+      gst_vec_deque_get_length (vtdec->reorder_queue));
   g_cond_signal (&vtdec->queue_cond);
   g_mutex_unlock (&vtdec->queue_mutex);
 }
