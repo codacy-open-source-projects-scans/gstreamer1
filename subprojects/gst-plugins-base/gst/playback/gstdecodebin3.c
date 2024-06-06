@@ -1633,7 +1633,6 @@ gst_decodebin3_input_pad_link (GstPad * pad, GstObject * parent, GstPad * peer)
   GstDecodebin3 *dbin = (GstDecodebin3 *) parent;
   GstQuery *query;
   gboolean pull_mode = FALSE;
-  gboolean has_caps = TRUE;
   GstPadLinkReturn res = GST_PAD_LINK_OK;
   DecodebinInput *input = g_object_get_data (G_OBJECT (pad), "decodebin.input");
 
@@ -1650,26 +1649,12 @@ gst_decodebin3_input_pad_link (GstPad * pad, GstObject * parent, GstPad * peer)
 
   GST_DEBUG_OBJECT (dbin, "Upstream can do pull-based : %d", pull_mode);
 
-  if (!pull_mode) {
-    /* If push-based, query if it will provide some caps */
-    query = gst_query_new_caps (NULL);
-    if (gst_pad_query (peer, query)) {
-      GstCaps *rescaps = NULL;
-      gst_query_parse_caps_result (query, &rescaps);
-      if (!rescaps || gst_caps_is_any (rescaps) || gst_caps_is_empty (rescaps)) {
-        GST_DEBUG_OBJECT (dbin, "Upstream can't provide caps");
-        has_caps = FALSE;
-      }
-    }
-    gst_query_unref (query);
-  }
-
-  /* If upstream *can* do pull-based OR it doesn't have any caps, we always use
-   * a parsebin. If not, we will delay that decision to a later stage
-   * (caps/stream/collection event processing) to figure out if one is really
-   * needed or whether an identity element will be enough */
+  /* If upstream *can* do pull-based we always use a parsebin. If not, we will
+   * delay that decision to a later stage (caps/stream/collection event
+   * processing) to figure out if one is really needed or whether an identity
+   * element will be enough */
   INPUT_LOCK (dbin);
-  if (pull_mode || !has_caps) {
+  if (pull_mode) {
     if (!gst_decodebin_input_ensure_parsebin (input))
       res = GST_PAD_LINK_REFUSED;
     else if (input->identity) {
@@ -2899,6 +2884,28 @@ gst_decodebin3_handle_message (GstBin * bin, GstMessage * message)
       }
       SELECTION_UNLOCK (dbin);
     }
+    case GST_MESSAGE_WARNING:
+    case GST_MESSAGE_ERROR:
+    case GST_MESSAGE_INFO:
+    {
+      GList *tmp;
+      /* Add the relevant stream-id if the message comes from a decoder */
+      for (tmp = dbin->output_streams; tmp; tmp = tmp->next) {
+        DecodebinOutputStream *out = tmp->data;
+        GstStructure *structure;
+        if (out->decoder
+            && (GST_MESSAGE_SRC (message) == (GstObject *) out->decoder
+                || gst_object_has_as_ancestor (GST_MESSAGE_SRC (message),
+                    (GstObject *) out->decoder))) {
+          message = gst_message_make_writable (message);
+          structure = gst_message_writable_details (message);
+          gst_structure_set (structure, "stream-id", G_TYPE_STRING,
+              out->slot->active_stream_id, NULL);
+          break;
+        }
+      }
+      break;
+    }
     default:
       break;
   }
@@ -3989,6 +3996,8 @@ missing_decoder:
     GST_DEBUG_OBJECT (slot->src_pad,
         "We are missing a decoder for %" GST_PTR_FORMAT, caps);
     *msg = gst_missing_decoder_message_new (GST_ELEMENT_CAST (dbin), caps);
+    gst_missing_plugin_message_set_stream_id (*msg,
+        gst_stream_get_stream_id (slot->active_stream));
     gst_caps_unref (caps);
 
     /* FALLTHROUGH */

@@ -100,7 +100,6 @@ vulkan_conf_options = [
     'GST_VULKAN_HAVE_WINDOW_WIN32',
     'GST_VULKAN_HAVE_WINDOW_ANDROID',
     'GST_VULKAN_HAVE_VIDEO_EXTENSIONS',
-    'GST_VULKAN_HAVE_VIDEO_ENCODERS',
 ]
 
 foreach option : vulkan_conf_options
@@ -298,11 +297,7 @@ if not vulkan_windowing
   endif
 endif
 
-# Only needed for the vulkan plugin, but doesn't make sense to build
-# anything else vulkan related if we are not going to build the plugin
-glslc = find_program('glslc', required: get_option('vulkan'))
-
-if not vulkan_dep.found() or not has_vulkan_header or not glslc.found()
+if not vulkan_dep.found() or not has_vulkan_header
   if get_option('vulkan').enabled()
     error('GStreamer Vulkan integration required via options, but needed dependencies not found.')
   else
@@ -314,8 +309,8 @@ if get_option('vulkan-video').allowed()
   video_test = '''
 #include <vulkan/vulkan.h>
 
-#if !(defined(VK_VERSION_1_4) || (defined(VK_VERSION_1_3) && VK_HEADER_VERSION >= 238))
-#error "Need at least Vulkan 1.3.238"
+#if !(defined(VK_VERSION_1_4) || (defined(VK_VERSION_1_3) && VK_HEADER_VERSION >= 275))
+#error "Need at least Vulkan 1.3.275"
 #endif
 
 /* vk_video/vulkan_video_codec_h264std.h */
@@ -325,6 +320,9 @@ static StdVideoH264PictureParameterSet h264_pps;
 /* vk_video/vulkan_video_codec_h265std.h */
 static StdVideoH265SequenceParameterSet h265_sps;
 static StdVideoH265PictureParameterSet h265_pps;
+
+static VkVideoEncodeH264ProfileInfoKHR h264_profile;
+static VkVideoEncodeH265ProfileInfoKHR h265_profile;
 '''
 
   if vulkan_inc_dir != ''
@@ -337,30 +335,8 @@ static StdVideoH265PictureParameterSet h265_pps;
     vulkan_priv_sources += files(
       'gstvkvideo-private.c',
       'gstvkdecoder-private.c',
+      'gstvkencoder-private.c',
     )
-
-    encoder_test = '''
-#include <vulkan/vulkan.h>
-
-#if !(defined(VERSION_1_4) || (defined(VK_VERSION_1_3) && VK_HEADER_VERSION >= 275))
-#error "Need at least Vulkan 1.3.275"
-#endif
-
-static VkVideoEncodeH264ProfileInfoKHR h264_profile;
-static VkVideoEncodeH265ProfileInfoKHR h265_profile;
-'''
-    if vulkan_inc_dir != ''
-      have_vk_encoder = cc.compiles(encoder_test, dependencies : vulkan_dep,  args: '-I' + vulkan_inc_dir)
-    else
-      have_vk_encoder = cc.compiles(encoder_test, dependencies : vulkan_dep)
-    endif
-    if have_vk_encoder
-      vulkan_conf.set('GST_VULKAN_HAVE_VIDEO_ENCODERS', 1)
-      vulkan_sources += files(
-        'gstvkencoder-private.c',
-      )
-    endif
-
   elif get_option('vulkan-video').enabled()
     error('Vulkan Video extensions headers not found')
   endif

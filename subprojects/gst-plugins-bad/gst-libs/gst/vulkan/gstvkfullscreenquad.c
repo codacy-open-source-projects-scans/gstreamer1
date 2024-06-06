@@ -898,7 +898,7 @@ gst_vulkan_full_screen_quad_class_init (GstVulkanFullScreenQuadClass * klass)
  */
 gboolean
 gst_vulkan_full_screen_quad_set_info (GstVulkanFullScreenQuad * self,
-    GstVideoInfo * in_info, GstVideoInfo * out_info)
+    const GstVideoInfo * in_info, const GstVideoInfo * out_info)
 {
   self->out_info = *out_info;
   self->in_info = *in_info;
@@ -1665,4 +1665,24 @@ gst_vulkan_full_screen_quad_submit (GstVulkanFullScreenQuad * self,
 
 error:
   return FALSE;
+}
+
+/**
+ * gst_vulkan_full_screen_quad_get_queue:
+ * @filter: a #GstVulkanVideoFilter
+ *
+ * Returns: (transfer full) (nullable): The currently configured
+ *     #GstVulkanQueue
+ *
+ * Since: 1.26
+ */
+GstVulkanQueue *
+gst_vulkan_full_screen_quad_get_queue (GstVulkanFullScreenQuad * self)
+{
+  g_return_val_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self), NULL);
+
+  if (self->queue)
+    return gst_object_ref (self->queue);
+  else
+    return NULL;
 }
