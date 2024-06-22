@@ -24,6 +24,7 @@
 #include <gst/d3d12/gstd3d12device-private.h>
 #include <gst/d3d12/gstd3d12format-private.h>
 #include <gst/d3d12/gstd3d12converter-private.h>
+#include <gst/d3d12/gstd3d12commandqueue-private.h>
 #include <gst/d3d12/gstd3d12compat.h>
 
 /*
@@ -88,5 +89,40 @@ public:
 private:
   GstD3D12Device *device_;
 };
+
+class GstD3D12DeviceDecoderLockGuard
+{
+public:
+  explicit GstD3D12DeviceDecoderLockGuard(GstD3D12Device * device) : device_ (device)
+  {
+    if (device_)
+      gst_d3d12_device_decoder_lock (device_);
+  }
+
+  ~GstD3D12DeviceDecoderLockGuard()
+  {
+    if (device_)
+      gst_d3d12_device_decoder_unlock (device_);
+  }
+
+  GstD3D12DeviceDecoderLockGuard(const GstD3D12DeviceDecoderLockGuard&) = delete;
+  GstD3D12DeviceDecoderLockGuard& operator=(const GstD3D12DeviceDecoderLockGuard&) = delete;
+
+private:
+  GstD3D12Device *device_;
+};
+
+static inline void
+gst_d3d12_com_release (IUnknown * unknown)
+{
+  if (unknown)
+    unknown->Release ();
+}
+
+#define FENCE_NOTIFY_COM(obj) \
+    ((gpointer) (obj)), ((GDestroyNotify) gst_d3d12_com_release)
+
+#define FENCE_NOTIFY_MINI_OBJECT(obj) \
+    ((gpointer) (obj)), ((GDestroyNotify) gst_mini_object_unref)
 
 #endif /* __cplusplus */
