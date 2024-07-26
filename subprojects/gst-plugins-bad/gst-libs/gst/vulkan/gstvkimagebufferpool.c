@@ -255,17 +255,17 @@ gst_vulkan_image_buffer_pool_set_config (GstBufferPool * pool,
   }
 
   {
-    gboolean dpb_only = FALSE, sampleable;
+    gboolean video = FALSE, sampleable;
     const GstVulkanFormatMap *vkmap;
 
 #if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
-    dpb_only = (priv->usage & VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR)
-        && !(priv->usage & VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR);
+    video = (priv->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR
+            | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR));
 #endif
     sampleable = priv->usage &
         (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 
-    if (sampleable && !dpb_only) {
+    if (sampleable && !video) {
       vkmap = gst_vulkan_format_get_map (GST_VIDEO_INFO_FORMAT (&priv->v_info));
       priv->img_flags = VK_IMAGE_CREATE_ALIAS_BIT;
       if (GST_VIDEO_INFO_N_PLANES (&priv->v_info) > 1
@@ -428,8 +428,8 @@ prepare_buffer (GstVulkanImageBufferPool * vk_pool, GstBuffer * buffer)
     goto error;
 
   if (!gst_vulkan_operation_add_frame_barrier (priv->exec, buffer,
-          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, priv->initial_access,
-          priv->initial_layout, NULL))
+          VK_PIPELINE_STAGE_NONE_KHR, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+          priv->initial_access, priv->initial_layout, NULL))
     goto error;
 
   barriers = gst_vulkan_operation_retrieve_image_barriers (priv->exec);
@@ -580,6 +580,23 @@ gst_vulkan_image_buffer_pool_stop (GstBufferPool * pool)
   return GST_BUFFER_POOL_CLASS (parent_class)->stop (pool);
 }
 
+static void
+gst_vulkan_image_buffer_pool_reset_buffer (GstBufferPool * pool,
+    GstBuffer * buffer)
+{
+  GstVulkanImageBufferPool *vk_pool = GST_VULKAN_IMAGE_BUFFER_POOL_CAST (pool);
+  GstVulkanImageBufferPoolPrivate *priv = GET_PRIV (vk_pool);
+  GstVulkanImageMemory *mem;
+  guint i, n = gst_buffer_n_memory (buffer);
+
+  GST_BUFFER_POOL_CLASS (parent_class)->reset_buffer (pool, buffer);
+
+  for (i = 0; i < n; i++) {
+    mem = (GstVulkanImageMemory *) gst_buffer_peek_memory (buffer, i);
+    mem->barrier.parent.access_flags = priv->initial_access;
+  }
+}
+
 /**
  * gst_vulkan_image_buffer_pool_new:
  * @device: the #GstVulkanDevice to use
@@ -614,6 +631,7 @@ gst_vulkan_image_buffer_pool_class_init (GstVulkanImageBufferPoolClass * klass)
   gstbufferpool_class->set_config = gst_vulkan_image_buffer_pool_set_config;
   gstbufferpool_class->alloc_buffer = gst_vulkan_image_buffer_pool_alloc;
   gstbufferpool_class->stop = gst_vulkan_image_buffer_pool_stop;
+  gstbufferpool_class->reset_buffer = gst_vulkan_image_buffer_pool_reset_buffer;
 }
 
 static void
