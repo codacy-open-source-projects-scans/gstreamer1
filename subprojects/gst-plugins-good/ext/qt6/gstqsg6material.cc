@@ -258,7 +258,7 @@ GstQSGTexture::rhiTexture() const
 
 class GstQSGMaterialShader : public QSGMaterialShader {
 public:
-  GstQSGMaterialShader(GstVideoFormat v_format);
+  GstQSGMaterialShader(GstVideoFormat v_format, GstGLTextureTarget target);
   ~GstQSGMaterialShader();
 
   bool updateUniformData(RenderState &state, QSGMaterial *newMaterial, QSGMaterial *oldMaterial) override;
@@ -269,26 +269,35 @@ private:
   QSGTexture *m_textures[GST_VIDEO_MAX_PLANES];
 };
 
-GstQSGMaterialShader::GstQSGMaterialShader(GstVideoFormat v_format)
+GstQSGMaterialShader::GstQSGMaterialShader(GstVideoFormat v_format,
+    GstGLTextureTarget target)
   : v_format(v_format)
 {
+  const gchar *frag_shader;
+
   setShaderFileName(VertexStage, ":/org/freedesktop/gstreamer/qml6/vertex.vert.qsb");
 
   switch (v_format) {
     case GST_VIDEO_FORMAT_RGBA:
     case GST_VIDEO_FORMAT_BGRA:
     case GST_VIDEO_FORMAT_RGB:
-      setShaderFileName(FragmentStage, ":/org/freedesktop/gstreamer/qml6/RGBA.frag.qsb");
+      if (target == GST_GL_TEXTURE_TARGET_EXTERNAL_OES)
+        frag_shader = ":/org/freedesktop/gstreamer/qml6/RGBA.frag.qsb.external";
+      else
+        frag_shader = ":/org/freedesktop/gstreamer/qml6/RGBA.frag.qsb";
       break;
     case GST_VIDEO_FORMAT_YV12:
-      setShaderFileName(FragmentStage, ":/org/freedesktop/gstreamer/qml6/YUV_TRIPLANAR.frag.qsb");
+      frag_shader = ":/org/freedesktop/gstreamer/qml6/YUV_TRIPLANAR.frag.qsb";
       break;
     case GST_VIDEO_FORMAT_NV12:
-      setShaderFileName(FragmentStage, ":/org/freedesktop/gstreamer/qml6/YUV_BIPLANAR.frag.qsb");
+      frag_shader = ":/org/freedesktop/gstreamer/qml6/YUV_BIPLANAR.frag.qsb";
       break;
     default:
       g_assert_not_reached ();
   }
+
+  GST_DEBUG("load fragment shader: %s", frag_shader);
+  setShaderFileName(FragmentStage, frag_shader);
 
   m_textures[0] = nullptr;
   m_textures[1] = nullptr;
@@ -436,17 +445,28 @@ QSGMaterialShader *
 GstQSGMaterial::createShader(QSGRendererInterface::RenderMode renderMode) const
 {
   GstVideoFormat v_format = GST_VIDEO_INFO_FORMAT (&this->v_info);
+  GstGLTextureTarget target = this->tex_target;
 
-  return new GstQSGMaterialShader(v_format);
+  return new GstQSGMaterialShader(v_format, target);
 }
 
 /* only called from the streaming thread with scene graph thread blocked */
 void
 GstQSGMaterial::setCaps (GstCaps * caps)
 {
+  GstStructure *s;
+  const gchar *target_str;
+
   GST_LOG ("%p setCaps %" GST_PTR_FORMAT, this, caps);
 
   gst_video_info_from_caps (&this->v_info, caps);
+
+  s = gst_caps_get_structure (caps, 0);
+  target_str = gst_structure_get_string (s, "texture-target");
+  if (!target_str)
+      target_str = GST_GL_TEXTURE_TARGET_2D_STR;
+
+  this->tex_target = gst_gl_texture_target_from_string(target_str);
 }
 
 /* only called from the streaming thread with scene graph thread blocked */
@@ -556,6 +576,7 @@ GstQSGMaterial::bind(GstQSGMaterialShader *shader, QRhi * rhi, QRhiResourceUpdat
   GstQSGTexture *ret;
   QRhiTexture *rhi_tex;
   QSize tex_size;
+  QRhiTexture::Flags flags = {};
 
   qt_context = GST_GL_CONTEXT (g_weak_ref_get (&this->qt_context_ref_));
   if (!qt_context)
@@ -580,7 +601,10 @@ GstQSGMaterial::bind(GstQSGMaterialShader *shader, QRhi * rhi, QRhiResourceUpdat
 
   tex_size = QSize(gst_gl_memory_get_texture_width(gl_mem), gst_gl_memory_get_texture_height (gl_mem));
 
-  rhi_tex = rhi->newTexture (video_format_to_rhi_format (v_format, plane), tex_size, 1, {});
+  if (gl_mem->tex_target == GST_GL_TEXTURE_TARGET_EXTERNAL_OES)
+    flags |= QRhiTexture::ExternalOES;
+
+  rhi_tex = rhi->newTexture (video_format_to_rhi_format (v_format, plane), tex_size, 1, flags);
   rhi_tex->createFrom({(guint64) tex_id, 0});
 
   sync_meta = gst_buffer_get_gl_sync_meta (this->sync_buffer_);
@@ -591,7 +615,8 @@ GstQSGMaterial::bind(GstQSGMaterialShader *shader, QRhi * rhi, QRhiResourceUpdat
 
   gst_gl_sync_meta_wait (sync_meta, qt_context);
 
-  GST_LOG ("%p binding GL texture %u for plane %d", this, tex_id, plane);
+  GST_LOG ("%p binding GL texture %u (%s) for plane %d",
+      this, tex_id, gst_gl_texture_target_to_string(gl_mem->tex_target), plane);
 
 out:
   if (G_UNLIKELY (use_dummy_tex)) {

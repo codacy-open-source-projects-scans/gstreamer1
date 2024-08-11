@@ -4601,6 +4601,69 @@ _pad_added_harness (struct test_webrtc *t, GstElement * element,
   }
 }
 
+GST_START_TEST (test_audio_sendrecv)
+{
+  struct test_webrtc *t = test_webrtc_new ();
+  GstHarness *h1, *h2;
+
+  t->on_negotiation_needed = NULL;
+  t->on_ice_candidate = NULL;
+  t->on_pad_added = _pad_added_fakesink;
+
+  h1 = gst_harness_new_with_element (t->webrtc1, "sink_0", NULL);
+  add_audio_test_src_harness (h1, 0xDEADBEEF);
+  t->harnesses = g_list_prepend (t->harnesses, h1);
+
+  h2 = gst_harness_new_with_element (t->webrtc2, "sink_0", NULL);
+  add_audio_test_src_harness (h2, 0xBEEFDEAD);
+  t->harnesses = g_list_prepend (t->harnesses, h2);
+
+  VAL_SDP_INIT (no_duplicate_payloads, on_sdp_media_no_duplicate_payloads,
+      NULL, NULL);
+  guint media_format_count[] = { 1 };
+  VAL_SDP_INIT (media_formats, on_sdp_media_count_formats,
+      media_format_count, &no_duplicate_payloads);
+  VAL_SDP_INIT (count, _count_num_sdp_media, GUINT_TO_POINTER (1),
+      &media_formats);
+  const gchar *expected_offer_setup[] = { "actpass", };
+  VAL_SDP_INIT (offer_setup, on_sdp_media_setup, expected_offer_setup, &count);
+  const gchar *expected_answer_setup[] = { "active", };
+  VAL_SDP_INIT (answer_setup, on_sdp_media_setup, expected_answer_setup,
+      &count);
+  const gchar *expected_offer_direction[] = { "sendrecv", };
+  VAL_SDP_INIT (offer, on_sdp_media_direction, expected_offer_direction,
+      &offer_setup);
+  const gchar *expected_answer_direction[] = { "sendrecv", };
+  VAL_SDP_INIT (answer, on_sdp_media_direction, expected_answer_direction,
+      &answer_setup);
+  GstWebRTCKind expected_kind = GST_WEBRTC_KIND_AUDIO;
+
+  g_signal_connect (t->webrtc1, "on-new-transceiver",
+      G_CALLBACK (on_new_transceiver_expected_kind),
+      GUINT_TO_POINTER (expected_kind));
+  g_signal_connect (t->webrtc2, "on-new-transceiver",
+      G_CALLBACK (on_new_transceiver_expected_kind),
+      GUINT_TO_POINTER (expected_kind));
+
+  test_validate_sdp (t, &offer, &answer);
+
+  fail_if (gst_element_set_state (t->webrtc1,
+          GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE);
+  fail_if (gst_element_set_state (t->webrtc2,
+          GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE);
+
+  /* Exchange a few buffers between webrtcbin1 and webrtcbin2 to check
+     that they can handle incoming data and we get no errors on the bus. */
+  for (int i = 0; i < 5; i++) {
+    gst_harness_push_from_src (h1);
+    gst_harness_push_from_src (h2);
+  }
+
+  test_webrtc_free (t);
+}
+
+GST_END_TEST;
+
 static void
 new_jitterbuffer_set_fast_start (GstElement * rtpbin,
     GstElement * rtpjitterbuffer, guint session_id, guint ssrc,
@@ -5977,6 +6040,63 @@ GST_START_TEST (test_sdp_session_setup_attribute)
 
 GST_END_TEST;
 
+static void
+_rollback_complete (GstPromise * promise, gpointer user_data)
+{
+  GstPromiseResult result = gst_promise_wait (promise);
+  fail_unless (result == GST_PROMISE_RESULT_REPLIED);
+
+  const GstStructure *reply = gst_promise_get_reply (promise);
+  GError *error = NULL;
+  if (reply != NULL
+      && gst_structure_get (reply, "error", G_TYPE_ERROR, &error, NULL)) {
+    /* Ignore invalid-state error, which just means WebRTCbin already processed the remote
+     * offer/answer and went back to stable state */
+    if (error->domain != GST_WEBRTC_ERROR
+        || error->code != GST_WEBRTC_ERROR_INVALID_STATE) {
+      fail ("rollback request resulted in error: %s", error->message);
+      g_clear_error (&error);
+      return;
+    }
+    g_clear_error (&error);
+  }
+}
+
+static void
+_rollback_offer (struct test_webrtc *t, GstElement * element,
+    GstPromise * promise, gpointer user_data)
+{
+  GstWebRTCSessionDescription *rollback =
+      gst_webrtc_session_description_new (GST_WEBRTC_SDP_TYPE_ROLLBACK, NULL);
+
+  promise = gst_promise_new_with_change_func (_rollback_complete, t, NULL);
+  if (element == t->webrtc1) {
+    g_signal_emit_by_name (t->webrtc1, "set-local-description", rollback,
+        promise);
+  } else {
+    g_signal_emit_by_name (t->webrtc2, "set-remote-description", rollback,
+        promise);
+  }
+  gst_promise_unref (promise);
+  gst_webrtc_session_description_free (rollback);
+}
+
+GST_START_TEST (test_offer_rollback)
+{
+  struct test_webrtc *t = create_audio_test ();
+
+  t->on_offer_set = _rollback_offer;
+  t->offer_set_data = NULL;
+
+  t->on_answer_set = NULL;
+  t->answer_set_data = NULL;
+
+  test_validate_sdp (t, NULL, NULL);
+  test_webrtc_free (t);
+}
+
+GST_END_TEST;
+
 static Suite *
 webrtcbin_suite (void)
 {
@@ -6001,6 +6121,7 @@ webrtcbin_suite (void)
     tcase_add_test (tc, test_session_stats);
     tcase_add_test (tc, test_stats_with_stream);
     tcase_add_test (tc, test_audio);
+    tcase_add_test (tc, test_audio_sendrecv);
     tcase_add_test (tc, test_ice_port_restriction);
     tcase_add_test (tc, test_audio_video);
     tcase_add_test (tc, test_media_direction);
@@ -6066,6 +6187,7 @@ webrtcbin_suite (void)
           "All datachannel tests are disabled. sctpenc %p, sctpdec %p", sctpenc,
           sctpdec);
     }
+    tcase_add_test (tc, test_offer_rollback);
   } else {
     GST_WARNING ("Some required elements were not found. "
         "All media tests are disabled. nicesrc %p, nicesink %p, "

@@ -678,7 +678,8 @@ enum
   PROP_ICE_AGENT,
   PROP_LATENCY,
   PROP_SCTP_TRANSPORT,
-  PROP_HTTP_PROXY
+  PROP_HTTP_PROXY,
+  PROP_REUSE_SRC_PADS,
 };
 
 static guint gst_webrtc_bin_signals[LAST_SIGNAL] = { 0 };
@@ -5750,20 +5751,22 @@ _update_transceiver_from_sdp_media (GstWebRTCBin * webrtc,
         gst_webrtc_rtp_transceiver_direction_to_string (new_dir));
 
     if (new_dir == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_INACTIVE) {
-      GstWebRTCBinPad *pad;
-
-      pad = _find_pad_for_mline (webrtc, GST_PAD_SRC, media_idx);
-      if (pad) {
-        GstPad *target = gst_ghost_pad_get_target (GST_GHOST_PAD (pad));
-        if (target) {
-          GstPad *peer = gst_pad_get_peer (target);
-          if (peer) {
-            gst_pad_send_event (peer, gst_event_new_eos ());
-            gst_object_unref (peer);
+      if (!webrtc->priv->reuse_source_pads) {
+        /* pad reuse is disallowed, so send EOS on this pad */
+        GstWebRTCBinPad *pad =
+            _find_pad_for_mline (webrtc, GST_PAD_SRC, media_idx);
+        if (pad) {
+          GstPad *target = gst_ghost_pad_get_target (GST_GHOST_PAD (pad));
+          if (target) {
+            GstPad *peer = gst_pad_get_peer (target);
+            if (peer) {
+              gst_pad_send_event (peer, gst_event_new_eos ());
+              gst_object_unref (peer);
+            }
+            gst_object_unref (target);
           }
-          gst_object_unref (target);
+          gst_object_unref (pad);
         }
-        gst_object_unref (pad);
       }
 
       /* XXX: send eos event up the sink pad as well? */
@@ -6280,6 +6283,22 @@ get_last_generated_description (GstWebRTCBin * webrtc, SDPSource source,
   return NULL;
 }
 
+static GstWebRTCRTPTransceiverDirection
+_reverse_direction (GstWebRTCRTPTransceiverDirection direction)
+{
+  switch (direction) {
+    case GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_NONE:
+    case GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_INACTIVE:
+    case GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDRECV:
+      return direction;
+    case GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY:
+      return GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY;
+    case GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY:
+      return GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY;
+  }
+  return GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_NONE;
+}
+
 /* https://w3c.github.io/webrtc-pc/#set-description (steps in 4.6.10.) */
 static gboolean
 _create_and_associate_transceivers_from_sdp (GstWebRTCBin * webrtc,
@@ -6304,7 +6323,9 @@ _create_and_associate_transceivers_from_sdp (GstWebRTCBin * webrtc,
      * Restore the value of connection's [[ sctpTransport]] internal slot
      * to its value at the last stable signaling state.
      */
-    return ret;
+    GST_FIXME_OBJECT (webrtc,
+        "Rolling back transceiver associations is not implemented");
+    return TRUE;
   }
 
   /* FIXME: With some peers, it's possible we could have
@@ -6328,12 +6349,14 @@ _create_and_associate_transceivers_from_sdp (GstWebRTCBin * webrtc,
     const gchar *mid;
     guint transport_idx;
     TransportStream *stream;
+    GstWebRTCRTPTransceiverDirection direction;
 
     if (_message_media_is_datachannel (sd->sdp->sdp, i))
       continue;
 
     media = gst_sdp_message_get_media (sd->sdp->sdp, i);
     mid = gst_sdp_media_get_attribute_val (media, "mid");
+    direction = _get_direction_from_media (media);
 
     /* XXX: not strictly required but a lot of functionality requires a mid */
     if (!mid) {
@@ -6390,8 +6413,6 @@ _create_and_associate_transceivers_from_sdp (GstWebRTCBin * webrtc,
          * that were added to the PeerConnection by addTrack and are not associated with any "m=" section
          * and are not stopped, find the first (according to the canonical order described in Section 5.2.1)
          * such RtpTransceiver. */
-        GstWebRTCRTPTransceiverDirection direction =
-            _get_direction_from_media (media);
         if (direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDRECV
             || direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY) {
           int j;
@@ -6464,11 +6485,18 @@ _create_and_associate_transceivers_from_sdp (GstWebRTCBin * webrtc,
       trans->mid = g_strdup (mid);
       g_object_notify (G_OBJECT (trans), "mid");
 
+      /* Let direction be an RTCRtpTransceiverDirection value representing the direction from the media
+         description, but with the send and receive directions reversed to represent this peer's point of view. */
+      direction = _reverse_direction (direction);
+      /* If the media description is rejected, set direction to "inactive". */
+      if (gst_sdp_media_get_port (media) == 0)
+        direction = GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_INACTIVE;
+
       /* If description is of type "answer" or "pranswer", then run the following steps: */
       if (sd->sdp->type == GST_WEBRTC_SDP_TYPE_ANSWER
           || sd->sdp->type == GST_WEBRTC_SDP_TYPE_PRANSWER) {
         /* Set transceiver.[[CurrentDirection]] to direction. */
-        trans->current_direction = _get_direction_from_media (media);
+        trans->current_direction = direction;
       }
       /* Let transport be the RTCDtlsTransport object representing the RTP/RTCP component of the media transport
        * used by transceiver's associated media description, according to [RFC8843]. */
@@ -6477,6 +6505,12 @@ _create_and_associate_transceivers_from_sdp (GstWebRTCBin * webrtc,
         webrtc_transceiver_set_transport (wtrans, stream);
       }
     }
+
+    wtrans = WEBRTC_TRANSCEIVER (trans);
+    if (wtrans->stream
+        && (direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDRECV
+            || direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY))
+      _connect_output_stream (webrtc, wtrans->stream, transport_idx);
   }
 
   ret = TRUE;
@@ -6502,51 +6536,57 @@ _set_description_task (GstWebRTCBin * webrtc, struct set_description *sd)
         webrtc->signaling_state);
     const gchar *type_str =
         _enum_value_to_string (GST_TYPE_WEBRTC_SDP_TYPE, sd->sdp->type);
-    gchar *sdp_text = gst_sdp_message_as_text (sd->sdp->sdp);
     GST_INFO_OBJECT (webrtc, "Attempting to set %s %s in the %s state",
         _sdp_source_to_string (sd->source), type_str, state);
-    GST_TRACE_OBJECT (webrtc, "SDP contents\n%s", sdp_text);
-    g_free (sdp_text);
   }
 
-  if (!validate_sdp (webrtc->signaling_state, sd->source, sd->sdp, &error))
-    goto out;
+  if (sd->sdp->type != GST_WEBRTC_SDP_TYPE_ROLLBACK) {
+    {
+      gchar *sdp_text = gst_sdp_message_as_text (sd->sdp->sdp);
+      GST_TRACE_OBJECT (webrtc, "SDP contents\n%s", sdp_text);
+      g_free (sdp_text);
+    }
 
-  if (webrtc->bundle_policy != GST_WEBRTC_BUNDLE_POLICY_NONE)
-    if (!_parse_bundle (sd->sdp->sdp, &bundled, &error))
+    if (!validate_sdp (webrtc->signaling_state, sd->source, sd->sdp, &error))
       goto out;
 
-  if (bundled) {
-    if (!_get_bundle_index (sd->sdp->sdp, bundled, &bundle_idx)) {
-      g_set_error (&error, GST_WEBRTC_ERROR, GST_WEBRTC_ERROR_SDP_SYNTAX_ERROR,
-          "Bundle tag is %s but no matching media found", bundled[0]);
+    if (webrtc->bundle_policy != GST_WEBRTC_BUNDLE_POLICY_NONE)
+      if (!_parse_bundle (sd->sdp->sdp, &bundled, &error))
+        goto out;
+
+    if (bundled) {
+      if (!_get_bundle_index (sd->sdp->sdp, bundled, &bundle_idx)) {
+        g_set_error (&error, GST_WEBRTC_ERROR,
+            GST_WEBRTC_ERROR_SDP_SYNTAX_ERROR,
+            "Bundle tag is %s but no matching media found", bundled[0]);
+        goto out;
+      }
+    }
+
+    if (transceivers_media_num_cmp (webrtc,
+            get_previous_description (webrtc, sd->source, sd->sdp->type),
+            sd->sdp) < 0) {
+      g_set_error_literal (&error, GST_WEBRTC_ERROR,
+          GST_WEBRTC_ERROR_SDP_SYNTAX_ERROR,
+          "m=lines removed from the SDP. Processing a completely new connection "
+          "is not currently supported.");
       goto out;
     }
-  }
 
-  if (transceivers_media_num_cmp (webrtc,
-          get_previous_description (webrtc, sd->source, sd->sdp->type),
-          sd->sdp) < 0) {
-    g_set_error_literal (&error, GST_WEBRTC_ERROR,
-        GST_WEBRTC_ERROR_SDP_SYNTAX_ERROR,
-        "m=lines removed from the SDP. Processing a completely new connection "
-        "is not currently supported.");
-    goto out;
-  }
+    if ((sd->sdp->type == GST_WEBRTC_SDP_TYPE_PRANSWER ||
+            sd->sdp->type == GST_WEBRTC_SDP_TYPE_ANSWER) &&
+        transceivers_media_num_cmp (webrtc,
+            get_last_generated_description (webrtc, sd->source, sd->sdp->type),
+            sd->sdp) != 0) {
+      g_set_error_literal (&error, GST_WEBRTC_ERROR,
+          GST_WEBRTC_ERROR_SDP_SYNTAX_ERROR,
+          "Answer doesn't have the same number of m-lines as the offer.");
+      goto out;
+    }
 
-  if ((sd->sdp->type == GST_WEBRTC_SDP_TYPE_PRANSWER ||
-          sd->sdp->type == GST_WEBRTC_SDP_TYPE_ANSWER) &&
-      transceivers_media_num_cmp (webrtc,
-          get_last_generated_description (webrtc, sd->source, sd->sdp->type),
-          sd->sdp) != 0) {
-    g_set_error_literal (&error, GST_WEBRTC_ERROR,
-        GST_WEBRTC_ERROR_SDP_SYNTAX_ERROR,
-        "Answer doesn't have the same number of m-lines as the offer.");
-    goto out;
+    if (!check_locked_mlines (webrtc, sd->sdp, &error))
+      goto out;
   }
-
-  if (!check_locked_mlines (webrtc, sd->sdp, &error))
-    goto out;
 
   switch (sd->sdp->type) {
     case GST_WEBRTC_SDP_TYPE_OFFER:{
@@ -6607,7 +6647,24 @@ _set_description_task (GstWebRTCBin * webrtc, struct set_description *sd)
       break;
     }
     case GST_WEBRTC_SDP_TYPE_ROLLBACK:{
-      GST_FIXME_OBJECT (webrtc, "rollbacks are completely untested");
+      if (webrtc->signaling_state == GST_WEBRTC_SIGNALING_STATE_STABLE ||
+          webrtc->signaling_state ==
+          GST_WEBRTC_SIGNALING_STATE_HAVE_LOCAL_PRANSWER
+          || webrtc->signaling_state ==
+          GST_WEBRTC_SIGNALING_STATE_HAVE_REMOTE_PRANSWER) {
+        /* If description.type is "rollback" and connection's signaling state is
+         * either "stable", "have-local-pranswer", or "have-remote-pranswer",
+         * then reject p with a newly created InvalidStateError and abort these
+         * steps. */
+        const gchar *state_name =
+            _enum_value_to_string (GST_TYPE_WEBRTC_SIGNALING_STATE,
+            webrtc->signaling_state);
+        g_set_error (&error, GST_WEBRTC_ERROR, GST_WEBRTC_ERROR_INVALID_STATE,
+            "Cannot roll back from current state %s", state_name);
+        goto out;
+      }
+
+      GST_FIXME_OBJECT (webrtc, "Rollbacks are only partially implemented");
       if (sd->source == SDP_LOCAL) {
         if (webrtc->pending_local_description)
           gst_webrtc_session_description_free
@@ -6652,6 +6709,11 @@ _set_description_task (GstWebRTCBin * webrtc, struct set_description *sd)
   if (webrtc->signaling_state != new_signaling_state) {
     webrtc->signaling_state = new_signaling_state;
     signalling_state_changed = TRUE;
+  }
+
+  if (sd->sdp->type == GST_WEBRTC_SDP_TYPE_ROLLBACK) {
+    /* If rolling back, leave all the transceivers and other setup alone. There's no SDP attached to use anyway */
+    goto update_signaling_state;
   }
 
   {
@@ -6831,6 +6893,7 @@ _set_description_task (GstWebRTCBin * webrtc, struct set_description *sd)
     ICE_UNLOCK (webrtc);
   }
 
+update_signaling_state:
   /*
    * If connection's signaling state changed above, fire an event named
    * signalingstatechange at connection.
@@ -6847,7 +6910,8 @@ _set_description_task (GstWebRTCBin * webrtc, struct set_description *sd)
     PC_LOCK (webrtc);
   }
 
-  if (webrtc->signaling_state == GST_WEBRTC_SIGNALING_STATE_STABLE) {
+  if (webrtc->signaling_state == GST_WEBRTC_SIGNALING_STATE_STABLE
+      && sd->sdp->type != GST_WEBRTC_SDP_TYPE_ROLLBACK) {
     gboolean prev_need_negotiation = webrtc->priv->need_negotiation;
 
     /* If connection's signaling state is now stable, update the
@@ -6891,7 +6955,8 @@ gst_webrtc_bin_set_remote_description (GstWebRTCBin * webrtc,
 
   if (remote_sdp == NULL)
     goto bad_input;
-  if (remote_sdp->sdp == NULL)
+  if (remote_sdp->sdp == NULL
+      && remote_sdp->type != GST_WEBRTC_SDP_TYPE_ROLLBACK)
     goto bad_input;
 
   sd = g_new0 (struct set_description, 1);
@@ -6929,7 +6994,7 @@ gst_webrtc_bin_set_local_description (GstWebRTCBin * webrtc,
 
   if (local_sdp == NULL)
     goto bad_input;
-  if (local_sdp->sdp == NULL)
+  if (local_sdp->sdp == NULL && local_sdp->type != GST_WEBRTC_SDP_TYPE_ROLLBACK)
     goto bad_input;
 
   sd = g_new0 (struct set_description, 1);
@@ -8256,6 +8321,9 @@ gst_webrtc_bin_request_new_pad (GstElement * element, GstPadTemplate * templ,
     /* parse serial number from requested padname */
     serial = g_ascii_strtoull (&name[5], NULL, 10);
     lock_mline = TRUE;
+    if (serial >= webrtc->priv->max_sink_pad_serial) {
+      webrtc->priv->max_sink_pad_serial = serial + 1;
+    }
   }
 
   if (lock_mline) {
@@ -8325,9 +8393,9 @@ gst_webrtc_bin_request_new_pad (GstElement * element, GstPadTemplate * templ,
       GstWebRTCBinPad *pad2;
       gboolean has_matching_caps;
 
-      /* Ignore transceivers with a non-matching kind */
+      /* Ignore transceivers with a non-matching kind or where we don't know the kind we want */
       if (tmptrans->kind != GST_WEBRTC_KIND_UNKNOWN &&
-          kind != GST_WEBRTC_KIND_UNKNOWN && tmptrans->kind != kind)
+          (kind == GST_WEBRTC_KIND_UNKNOWN || tmptrans->kind != kind))
         continue;
 
       /* Ignore stopped transmitters */
@@ -8349,7 +8417,7 @@ gst_webrtc_bin_request_new_pad (GstElement * element, GstPadTemplate * templ,
 
       GST_OBJECT_LOCK (tmptrans);
       has_matching_caps = (caps && tmptrans->codec_preferences &&
-          !gst_caps_can_intersect (caps, tmptrans->codec_preferences));
+          gst_caps_can_intersect (caps, tmptrans->codec_preferences));
       GST_OBJECT_UNLOCK (tmptrans);
       /* Ignore transceivers with non-matching caps */
       if (!has_matching_caps)
@@ -8507,6 +8575,9 @@ gst_webrtc_bin_set_property (GObject * object, guint prop_id,
       gst_webrtc_ice_set_http_proxy (webrtc->priv->ice,
           g_value_get_string (value));
       break;
+    case PROP_REUSE_SRC_PADS:
+      webrtc->priv->reuse_source_pads = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -8587,6 +8658,9 @@ gst_webrtc_bin_get_property (GObject * object, guint prop_id,
     case PROP_HTTP_PROXY:
       g_value_take_string (value,
           gst_webrtc_ice_get_http_proxy (webrtc->priv->ice));
+      break;
+    case PROP_REUSE_SRC_PADS:
+      g_value_set_boolean (value, webrtc->priv->reuse_source_pads);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -8901,6 +8975,23 @@ gst_webrtc_bin_class_init (GstWebRTCBinClass * klass)
           "The WebRTC SCTP Transport",
           GST_TYPE_WEBRTC_SCTP_TRANSPORT,
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstWebRTCBin:reuse-source-pads:
+   *
+   * When set to FALSE, if a transceiver becomes send-only or inactive then
+   * pre-existing source pads will receive an EOS event and no further traffic
+   * even after further renegotiation. When TRUE, pads will simply not
+   * receive any output when the negotiated transceiver state doesn't have
+   * incoming traffic. If renegotiated later, the pad will receive data again.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (gobject_class,
+      PROP_REUSE_SRC_PADS,
+      g_param_spec_boolean ("reuse-source-pads", "Reuse source pads",
+          "If FALSE, webrtcbin will send EOS on source pads with inactive transceivers. TRUE to reuse pads after renegotiation with no EOS",
+          FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   /**
    * GstWebRTCBin::create-offer:
