@@ -409,23 +409,6 @@ static const GstVaH265LevelLimits _va_h265_level_limits[] = {
 
 #ifndef GST_DISABLE_GST_DEBUG
 static const gchar *
-_h265_slice_type_name (GstH265SliceType type)
-{
-  switch (type) {
-    case GST_H265_P_SLICE:
-      return "P";
-    case GST_H265_B_SLICE:
-      return "B";
-    case GST_H265_I_SLICE:
-      return "I";
-    default:
-      g_assert_not_reached ();
-  }
-
-  return NULL;
-}
-
-static const gchar *
 _rate_control_get_name (guint32 rc_mode)
 {
   GParamSpecEnum *spec;
@@ -1547,7 +1530,7 @@ _h265_fill_picture_parameter (GstVaH265Enc * self, GstVaH265EncFrame * frame,
 
     if (g_queue_is_empty (&base->ref_list)) {
       GST_ERROR_OBJECT (self, "No reference found for frame type %s",
-          _h265_slice_type_name (frame->type));
+          gst_h265_slice_type_to_string (frame->type));
       return FALSE;
     }
 
@@ -2053,7 +2036,7 @@ _h265_push_one_frame (GstVaBaseEnc * base, GstVideoCodecFrame * gst_frame,
     if (GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (gst_frame) &&
         !(self->gop.cur_frame_index == 0 ||
             self->gop.cur_frame_index == self->gop.idr_period)) {
-      GST_DEBUG_OBJECT (base, "system_frame_number: %d is a force key "
+      GST_DEBUG_OBJECT (base, "system_frame_number: %u is a force key "
           "frame(IDR), begin a new GOP.", gst_frame->system_frame_number);
 
       frame->poc = 0;
@@ -2088,7 +2071,7 @@ _h265_push_one_frame (GstVaBaseEnc * base, GstVideoCodecFrame * gst_frame,
 
       if (self->gop.cur_frame_index == 0) {
         g_assert (frame->poc == 0);
-        GST_LOG_OBJECT (self, "system_frame_number: %d, an IDR frame, starts"
+        GST_LOG_OBJECT (self, "system_frame_number: %u, an IDR frame, starts"
             " a new GOP", gst_frame->system_frame_number);
 
         g_queue_clear_full (&base->ref_list,
@@ -2097,9 +2080,9 @@ _h265_push_one_frame (GstVaBaseEnc * base, GstVideoCodecFrame * gst_frame,
 
       frame_setup_from_gop (self, frame, self->gop.cur_frame_index);
 
-      GST_LOG_OBJECT (self, "Push frame, system_frame_number: %d, poc %d, "
+      GST_LOG_OBJECT (self, "Push frame, system_frame_number: %u, poc %d, "
           "frame type %s", gst_frame->system_frame_number, frame->poc,
-          _h265_slice_type_name (frame->type));
+          gst_h265_slice_type_to_string (frame->type));
 
       self->gop.cur_frame_index++;
       g_queue_push_tail (&base->reorder_list,
@@ -2311,13 +2294,14 @@ get_one:
 
   if (self->gop.b_pyramid && vaframe->type == GST_H265_B_SLICE) {
     GST_LOG_OBJECT (self, "pop a pyramid B frame with system_frame_number:"
-        " %d, poc: %d, is_ref: %s, level %d",
+        " %u, poc: %d, is_ref: %s, level %d",
         frame->system_frame_number, vaframe->poc,
         vaframe->is_ref ? "true" : "false", vaframe->pyramid_level);
   } else {
-    GST_LOG_OBJECT (self, "pop a frame with system_frame_number: %d,"
+    GST_LOG_OBJECT (self, "pop a frame with system_frame_number: %u,"
         " frame type: %s, poc: %d, is_ref: %s",
-        frame->system_frame_number, _h265_slice_type_name (vaframe->type),
+        frame->system_frame_number,
+        gst_h265_slice_type_to_string (vaframe->type),
         vaframe->poc, vaframe->is_ref ? "true" : "false");
   }
 
@@ -2333,7 +2317,7 @@ gst_va_h265_enc_reorder_frame (GstVaBaseEnc * base, GstVideoCodecFrame * frame,
 {
   if (!_h265_push_one_frame (base, frame, bump_all)) {
     GST_ERROR_OBJECT (base, "Failed to push the input frame"
-        " system_frame_number: %d into the reorder list",
+        " system_frame_number: %u into the reorder list",
         frame->system_frame_number);
 
     *out_frame = NULL;
@@ -3683,7 +3667,7 @@ _h265_print_gop_structure (GstVaH265Enc * self)
       g_string_append_printf (str, "%s", "LDB");
     } else {
       g_string_append_printf (str, "%s",
-          _h265_slice_type_name (self->gop.frame_types[i].slice_type));
+          gst_h265_slice_type_to_string (self->gop.frame_types[i].slice_type));
     }
 
     if (self->gop.b_pyramid

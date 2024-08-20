@@ -16,6 +16,7 @@ option('sharp', type : 'feature', value : 'disabled')
 # External subprojects
 option('tls', type : 'feature', value : 'auto', description : 'TLS support using glib-networking as a subproject')
 option('libnice', type : 'feature', value : 'auto', description: 'ICE support using libnice as a subproject')
+option('gtk', type: 'feature', value: 'disabled', description: 'Build GTK4 as a subproject')
 
 # Build for fuzzing
 option('oss_fuzz', type : 'feature', value : 'disabled',
@@ -23,6 +24,7 @@ option('oss_fuzz', type : 'feature', value : 'disabled',
 
 # Other options
 option('custom_subprojects', type : 'string', value : '', description : 'Comma-separated project names')
+option('gst-full', type: 'feature', value: 'auto', description: 'Enable the gstreamer-full library feature')
 option('gst-full-libraries', type : 'array', value : [],
   description : '''List of libraries to expose in gstreamer-full's ABI. gstreamer, glib and gobject are always included.''')
 option('gst-full-version-script', type : 'string', value: 'data/misc/gstreamer-full-default.map',

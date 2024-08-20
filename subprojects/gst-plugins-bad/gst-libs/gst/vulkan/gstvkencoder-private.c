@@ -74,7 +74,6 @@ struct _GstVulkanEncoderPrivate
   } prop;
 
   guint out_buffer_size_aligned;
-  guint out_buffer_offset_aligned;
   gboolean layered_dpb;
   GstBufferPool *dpb_pool;
   GstBuffer *layered_buffer;
@@ -290,9 +289,9 @@ gst_vulkan_video_encoder_get_format (GstVulkanEncoder * self,
   }
 
   if (n_fmts == 0) {
-    g_free (fmts);
     g_set_error (error, GST_VULKAN_ERROR, VK_ERROR_INITIALIZATION_FAILED,
         "Profile doesn't have an output format");
+    goto beach;
   }
 
   /* find the best output format */
@@ -487,8 +486,7 @@ gst_vulkan_encode_picture_free (GstVulkanEncodePicture * pic)
     gst_vulkan_image_view_unref (pic->dpb_view);
     pic->dpb_view = NULL;
   }
-  if (pic->packed_headers)
-    g_ptr_array_free (pic->packed_headers, FALSE);
+  g_clear_pointer (&pic->packed_headers, g_ptr_array_unref);
 
   g_free (pic);
 }
@@ -562,12 +560,9 @@ gst_vulkan_encoder_stop (GstVulkanEncoder * self)
 {
   GstVulkanEncoderPrivate *priv;
 
-  if (!self)
-    return TRUE;
-
   g_return_val_if_fail (GST_IS_VULKAN_ENCODER (self), FALSE);
-  priv = gst_vulkan_encoder_get_instance_private (self);
 
+  priv = gst_vulkan_encoder_get_instance_private (self);
   if (!priv->started)
     return TRUE;
 
@@ -657,20 +652,12 @@ gst_vulkan_encoder_start (GstVulkanEncoder * self,
         /* *INDENT-ON* */
       };
       codec_idx = GST_VK_VIDEO_EXTENSION_ENCODE_H265;
-
       break;
     default:
       g_set_error (error, GST_VULKAN_ERROR, VK_ERROR_INITIALIZATION_FAILED,
           "Invalid codec");
       return FALSE;
   }
-
-  priv->enc_caps = (VkVideoEncodeCapabilitiesKHR) {
-    /* *INDENT-OFF* */
-    .sType = VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR,
-    .pNext = &priv->caps.codec,
-    /* *INDENT-ON* */
-  };
 
   priv->profile = *profile;
 
@@ -782,11 +769,8 @@ gst_vulkan_encoder_start (GstVulkanEncoder * self,
       gst_vulkan_video_encoder_get_format (self,
       VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
       VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR, error);
-  if (pic_format == VK_FORMAT_UNDEFINED) {
-    g_set_error (error, GST_VULKAN_ERROR, VK_ERROR_INITIALIZATION_FAILED,
-        "No valid picture format found");
+  if (pic_format == VK_FORMAT_UNDEFINED)
     goto failed;
-  }
 
   session_create = (VkVideoSessionCreateInfoKHR) {
     /* *INDENT-OFF* */
@@ -825,8 +809,6 @@ gst_vulkan_encoder_start (GstVulkanEncoder * self,
 
   priv->out_buffer_size_aligned = GST_ROUND_UP_N (out_buffer_size,
       priv->caps.caps.minBitstreamBufferSizeAlignment);
-  priv->out_buffer_offset_aligned = GST_ROUND_UP_N (0,
-      priv->caps.caps.minBitstreamBufferOffsetAlignment);
 
   priv->started = TRUE;
 
@@ -1257,8 +1239,7 @@ gst_vulkan_encoder_encode (GstVulkanEncoder * self,
     gst_buffer_insert_memory (pic->out_buffer, i, mem);
     n_mems++;
   }
-  g_ptr_array_free (pic->packed_headers, TRUE);
-  pic->packed_headers = NULL;
+  g_clear_pointer (&pic->packed_headers, g_ptr_array_unref);
   /* Peek the output memory to be used by VkVideoEncodeInfoKHR.dstBuffer */
   mem = gst_buffer_peek_memory (pic->out_buffer, n_mems);
   /* Peek the image view to be encoded */
@@ -1281,7 +1262,7 @@ gst_vulkan_encoder_encode (GstVulkanEncoder * self,
     .pNext = pic->codec_pic_info,
     .flags = 0x0,
     .dstBuffer = ((GstVulkanBufferMemory *) mem)->buffer,
-    .dstBufferOffset = priv->out_buffer_offset_aligned,
+    .dstBufferOffset = 0,
     .dstBufferRange = ((GstVulkanBufferMemory *) mem)->barrier.size, //FIXME is it the correct value ?
     .srcPictureResource = (VkVideoPictureResourceInfoKHR) { // SPEC: this should be separate
         .sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR,
@@ -1355,7 +1336,7 @@ gst_vulkan_encoder_encode (GstVulkanEncoder * self,
     GST_INFO_OBJECT (self, "The frame %d has been encoded with size %lu",
         pic->pic_num, encode_res->data_size + params_size);
     gst_buffer_resize (pic->out_buffer, encode_res->offset,
-        encode_res->data_size + params_size + priv->out_buffer_offset_aligned);
+        encode_res->data_size + params_size);
   } else {
     GST_ERROR_OBJECT (self,
         "The operation did not complete properly, query status = %d",
