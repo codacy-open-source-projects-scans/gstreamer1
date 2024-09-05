@@ -4454,10 +4454,15 @@ gst_util_group_id_next (void)
   return ret;
 }
 
-/* Compute log2 of the passed 64-bit number by finding the highest set bit */
+/* Compute the number of bits needed at least to store `in` */
 static guint
-gst_log2 (GstClockTime in)
+gst_bit_storage_uint64 (guint64 in)
 {
+#if defined(__GNUC__) && __GNUC__ >= 4
+  return in ? 64 - __builtin_clzll (in) : 1;
+#else
+  /* integer log2(v) from:
+     <http://graphics.stanford.edu/~seander/bithacks.html#IntegerLog> */
   const guint64 b[] =
       { 0x2, 0xC, 0xF0, 0xFF00, 0xFFFF0000, 0xFFFFFFFF00000000LL };
   const guint64 S[] = { 1, 2, 4, 8, 16, 32 };
@@ -4471,7 +4476,8 @@ gst_log2 (GstClockTime in)
     }
   }
 
-  return count;
+  return count + 1;             // + 1 to get the number of storage bits needed
+#endif
 }
 
 /**
@@ -4638,10 +4644,20 @@ gst_calculate_linear_regression (const GstClockTime * xy,
    */
 
   /* Guess how many bits we might need for the usual distribution of input,
-   * with a fallback loop that drops precision if things go pear-shaped */
-  max_bits = gst_log2 (MAX (xmax - xmin, ymax - ymin)) * 7 / 8 + gst_log2 (n);
-  if (max_bits > 64)
-    pshift = max_bits - 64;
+   * with a fallback loop that drops precision if things go pear-shaped.
+   *
+   * Each calculation of tmp during the iteration is multiplying two numbers and
+   * then adding them together, or adding them together and then multiplying
+   * them. The second case is worse and means we need at least twice
+   * (multiplication) as many bits as the biggest number needs, plus another bit
+   * (addition). At most 63 bits (signed 64 bit integer) are available.
+   *
+   * That means that each number must require at most (63 - 1) / 2 bits = 31
+   * bits of storage.
+   */
+  max_bits = gst_bit_storage_uint64 (MAX (1, MAX (xmax - xmin, ymax - ymin)));
+  if (max_bits > 31)
+    pshift = max_bits - 31;
 
   i = 0;
   do {
