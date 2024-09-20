@@ -135,8 +135,32 @@ typedef enum {
   GST_MTS_DESC_STEREOSCOPIC_PROGRAM_INFO        = 0x35,
   GST_MTS_DESC_STEREOSCOPIC_VIDEO_INFO          = 0x36,
 
+  /**
+   * GST_MTS_DESC_EXTENSION:
+   *
+   * Extension Descriptor.
+   *
+   * Since: 1.26
+   */
+  GST_MTS_DESC_EXTENSION                        = 0x3f
   /* 55-63 ITU-T Rec. H.222.0 | ISO/IEC 13818-1 Reserved */
 } GstMpegtsDescriptorType;
+
+/**
+ * GstMpegtsExtendedDescriptorType:
+ *
+ * The type of an extended descriptor
+ *
+ * The values correpond to the registered extended descriptor types from the
+ * base ISO 13818 / ITU H.222.0 specifications
+ *
+ * Consult the specification for more details
+ *
+ * Since: 1.26
+ */
+typedef enum {
+  GST_MTS_DESC_EXT_JXS_VIDEO                    = 0x14,
+} GstMpegtsExtendedDescriptorType;
 
 /**
  * GstMpegtsMiscDescriptorType:
@@ -180,7 +204,7 @@ GType gst_mpegts_descriptor_get_type (void);
 /**
  * GstMpegtsDescriptor:
  * @tag: the type of descriptor
- * @tag_extension: the extended type (if @descriptor_tag is 0x7f)
+ * @tag_extension: the extended type (if @tag is 0x7f (for DVB) or 0x3f (for H.222.0))
  * @length: the length of the descriptor content (excluding tag/length field)
  * @data: the full descriptor data (including tag, extension, length). The first
  * two bytes are the @tag and @length.
@@ -201,6 +225,9 @@ struct _GstMpegtsDescriptor
 
 GST_MPEGTS_API
 void       gst_mpegts_descriptor_free (GstMpegtsDescriptor *desc);
+
+GST_MPEGTS_API
+GstMpegtsDescriptor       * gst_mpegts_descriptor_copy (GstMpegtsDescriptor *desc);
 
 GST_MPEGTS_API
 GPtrArray *gst_mpegts_parse_descriptors (guint8 * buffer, gsize buf_len);
@@ -638,6 +665,55 @@ GType gst_mpegts_metadata_pointer_descriptor_get_type(void);
  */
 GST_MPEGTS_API
 GstMpegtsDescriptor *gst_mpegts_descriptor_from_metadata_pointer(const GstMpegtsMetadataPointerDescriptor *metadata_pointer_descriptor);
+
+/* JPEG-XS descriptor */
+
+/**
+ * GstMpegtsJpegXsDescriptor:
+ *
+ * JPEG-XS descriptor
+ *
+ * Since: 1.26
+ */
+
+typedef struct _GstMpegtsJpegXsDescriptor {
+  guint8 descriptor_version;
+  guint16 horizontal_size, vertical_size;
+  guint32 brat, frat;
+  guint16 schar, Ppih, Plev;
+  guint32 max_buffer_size;
+  guint8 buffer_model_type;
+  guint8 colour_primaries;
+  guint8 transfer_characteristics;
+  guint8 matrix_coefficients;
+  gboolean video_full_range_flag;
+  gboolean still_mode;
+  gboolean mdm_flag;
+  guint16 X_c0, Y_c0, X_c1, Y_c1, X_c2, Y_c2;
+  guint16 X_wp, Y_wp;
+  guint32 L_max, L_min;
+  guint16 MaxCLL, MaxFALL;
+} GstMpegtsJpegXsDescriptor;
+
+/**
+ * GST_TYPE_MPEGTS_JPEG_XS_DESCRIPTOR:
+ *
+ * Since: 1.26
+ */
+#define GST_TYPE_MPEGTS_JPEG_XS_DESCRIPTOR	\
+  (gst_mpegts_jpeg_xs_descriptor_get_type())
+
+GST_MPEGTS_API
+GType gst_mpegts_jpeg_xs_descriptor_get_type(void);
+
+GST_MPEGTS_API
+gboolean
+gst_mpegts_descriptor_parse_jpeg_xs(const GstMpegtsDescriptor *descriptor,
+                                   GstMpegtsJpegXsDescriptor *res);
+
+GST_MPEGTS_API
+GstMpegtsDescriptor *
+gst_mpegts_descriptor_from_jpeg_xs(const GstMpegtsJpegXsDescriptor *jpegxs);
 
 G_END_DECLS
 

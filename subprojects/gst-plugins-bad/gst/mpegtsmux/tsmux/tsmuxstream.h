@@ -121,7 +121,8 @@ enum TsMuxStreamType {
   TSMUX_ST_PES_METADATA               = 0x15,
   TSMUX_ST_VIDEO_H264                 = 0x1b,
   TSMUX_ST_VIDEO_HEVC                 = 0x24,
-  TSMUX_ST_VIDEO_JP2K = 0x21,
+  TSMUX_ST_VIDEO_JP2K                 = 0x21,
+  TSMUX_ST_VIDEO_JPEG_XS              = 0x32,
 
   /* private stream types */
   TSMUX_ST_PS_AUDIO_AC3               = 0x81,
@@ -132,6 +133,7 @@ enum TsMuxStreamType {
   TSMUX_ST_PS_KLV                     = 0x8e,    /* only used internally */
   TSMUX_ST_PS_OPUS                    = 0x8f,    /* only used internally */
   TSMUX_ST_PS_ID3                     = 0x90,    /* only used internally */
+  TSMUX_ST_PS_ST_2038                 = 0x91,    /* only used internally */
   TSMUX_ST_PS_DVD_SUBPICTURE          = 0xff,
 
   /* Non-standard definitions */
@@ -227,6 +229,9 @@ struct TsMuxStream {
   guint16 profile_and_level;
   gboolean interlace_mode;
   guint8 color_spec;
+
+  /* PMT descriptor for the stream */
+  GstMpegtsDescriptor *pmt_descriptor;
 };
 
 /* stream management */

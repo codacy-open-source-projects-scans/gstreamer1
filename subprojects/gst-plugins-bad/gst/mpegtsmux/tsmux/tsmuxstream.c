@@ -153,6 +153,11 @@ tsmux_stream_new (guint16 pid, guint stream_type, guint stream_number)
       stream->pi.flags |= TSMUX_PACKET_FLAG_PES_FULL_HEADER;
       stream->gst_stream_type = GST_STREAM_TYPE_VIDEO;
       break;
+    case TSMUX_ST_VIDEO_JPEG_XS:
+      stream->id = 0xBD;        /* Private Stream 1 */
+      stream->pi.flags |= TSMUX_PACKET_FLAG_PES_FULL_HEADER;
+      stream->gst_stream_type = GST_STREAM_TYPE_VIDEO;
+      break;
     case TSMUX_ST_AUDIO_AAC:
     case TSMUX_ST_AUDIO_MPEG1:
     case TSMUX_ST_AUDIO_MPEG2:
@@ -212,6 +217,14 @@ tsmux_stream_new (guint16 pid, guint stream_type, guint stream_number)
 
       break;
     case TSMUX_ST_PS_KLV:
+      /* FIXME: assign sequential extended IDs? */
+      stream->id = 0xBD;
+      stream->stream_type = TSMUX_ST_PRIVATE_DATA;
+      stream->pi.flags |=
+          TSMUX_PACKET_FLAG_PES_FULL_HEADER |
+          TSMUX_PACKET_FLAG_PES_DATA_ALIGNMENT;
+      break;
+    case TSMUX_ST_PS_ST_2038:
       /* FIXME: assign sequential extended IDs? */
       stream->id = 0xBD;
       stream->stream_type = TSMUX_ST_PRIVATE_DATA;
@@ -296,6 +309,8 @@ tsmux_stream_free (TsMuxStream * stream)
   }
   g_list_free (stream->buffers);
 
+  if (stream->pmt_descriptor)
+    gst_mpegts_descriptor_free (stream->pmt_descriptor);
   g_free (stream);
 }
 
@@ -728,6 +743,79 @@ tsmux_stream_write_pes_header (TsMuxStream * stream, guint8 * data)
   }
 }
 
+static GstMpegtsDescriptor *
+j2k_descriptor (TsMuxStream * stream)
+{
+  GstMpegtsDescriptor *descriptor;
+  /* J2K video descriptor
+   * descriptor_tag             8 uimsbf
+   * descriptor_length          8 uimsbf
+   * profile_and_level         16 uimsbf
+   * horizontal_size           32 uimsbf
+   * vertical_size             32 uimsbf
+   * max_bit_rate              32 uimsbf
+   * max_buffer_size           32 uimsbf
+   * DEN_frame_rate            16 uimsbf
+   * NUM_frame_rate            16 uimsbf
+   * color_specification        8 bslbf
+   * still_mode                 1 bslbf
+   * interlace_video            1 bslbf
+   * reserved                   6 bslbf
+   * private_data_byte          8 bslbf
+   */
+  gint8 still_interlace_reserved = 0x00;
+  int wr_size = 0;
+  guint8 *add_info = NULL;
+  guint8 level = stream->profile_and_level & 0xF;
+  guint32 max_buffer_size = 0;
+  GstByteWriter writer;
+  gst_byte_writer_init_with_size (&writer, 32, FALSE);
+
+  switch (level) {
+    case 1:
+    case 2:
+    case 3:
+      max_buffer_size = 1250000;
+      break;
+    case 4:
+      max_buffer_size = 2500000;
+      break;
+    case 5:
+      max_buffer_size = 5000000;
+      break;
+    case 6:
+      max_buffer_size = 10000000;
+      break;
+    default:
+      break;
+  }
+
+  gst_byte_writer_put_uint16_be (&writer, stream->profile_and_level);
+  gst_byte_writer_put_uint32_be (&writer, stream->horizontal_size);
+  gst_byte_writer_put_uint32_be (&writer, stream->vertical_size);
+  gst_byte_writer_put_uint32_be (&writer, max_buffer_size);
+  gst_byte_writer_put_uint32_be (&writer, stream->max_bitrate);
+  gst_byte_writer_put_uint16_be (&writer, stream->den);
+  gst_byte_writer_put_uint16_be (&writer, stream->num);
+  gst_byte_writer_put_uint8 (&writer, stream->color_spec);
+
+  if (stream->interlace_mode)
+    still_interlace_reserved |= 0x40;
+
+  gst_byte_writer_put_uint8 (&writer, still_interlace_reserved);
+  gst_byte_writer_put_uint8 (&writer, 0x00);    /* private data byte */
+
+  wr_size = gst_byte_writer_get_size (&writer);
+  add_info = gst_byte_writer_reset_and_get_data (&writer);
+
+  descriptor =
+      gst_mpegts_descriptor_from_custom (GST_MTS_DESC_J2K_VIDEO, add_info,
+      wr_size);
+  g_free (add_info);
+
+  return descriptor;
+}
+
 /**
  * tsmux_stream_add_data:
  * @stream: a #TsMuxStream
@@ -825,71 +913,14 @@ tsmux_stream_default_get_es_descrs (TsMuxStream * stream,
       break;
     case TSMUX_ST_VIDEO_JP2K:
     {
-      /* J2K video descriptor
-       * descriptor_tag             8 uimsbf
-       * descriptor_length          8 uimsbf
-       * profile_and_level         16 uimsbf
-       * horizontal_size           32 uimsbf
-       * vertical_size             32 uimsbf
-       * max_bit_rate              32 uimsbf
-       * max_buffer_size           32 uimsbf
-       * DEN_frame_rate            16 uimsbf
-       * NUM_frame_rate            16 uimsbf
-       * color_specification        8 bslbf
-       * still_mode                 1 bslbf
-       * interlace_video            1 bslbf
-       * reserved                   6 bslbf
-       * private_data_byte          8 bslbf
-       */
-      gint8 still_interlace_reserved = 0x00;
-      int wr_size = 0;
-      guint8 *add_info = NULL;
-      guint8 level = stream->profile_and_level & 0xF;
-      guint32 max_buffer_size = 0;
-      GstByteWriter writer;
-      gst_byte_writer_init_with_size (&writer, 32, FALSE);
-
-      switch (level) {
-        case 1:
-        case 2:
-        case 3:
-          max_buffer_size = 1250000;
-          break;
-        case 4:
-          max_buffer_size = 2500000;
-          break;
-        case 5:
-          max_buffer_size = 5000000;
-          break;
-        case 6:
-          max_buffer_size = 10000000;
-          break;
-        default:
-          break;
-      }
-
-      gst_byte_writer_put_uint16_be (&writer, stream->profile_and_level);
-      gst_byte_writer_put_uint32_be (&writer, stream->horizontal_size);
-      gst_byte_writer_put_uint32_be (&writer, stream->vertical_size);
-      gst_byte_writer_put_uint32_be (&writer, max_buffer_size);
-      gst_byte_writer_put_uint32_be (&writer, stream->max_bitrate);
-      gst_byte_writer_put_uint16_be (&writer, stream->den);
-      gst_byte_writer_put_uint16_be (&writer, stream->num);
-      gst_byte_writer_put_uint8 (&writer, stream->color_spec);
-
-      if (stream->interlace_mode)
-        still_interlace_reserved |= 0x40;
-
-      gst_byte_writer_put_uint8 (&writer, still_interlace_reserved);
-      gst_byte_writer_put_uint8 (&writer, 0x00);        /* private data byte */
-
-      wr_size = gst_byte_writer_get_size (&writer);
-      add_info = gst_byte_writer_reset_and_get_data (&writer);
-
-      descriptor =
-          gst_mpegts_descriptor_from_custom (GST_MTS_DESC_J2K_VIDEO, add_info,
-          wr_size);
+      descriptor = j2k_descriptor (stream);
       g_ptr_array_add (pmt_stream->descriptors, descriptor);
+    }
+      break;
+    case TSMUX_ST_VIDEO_JPEG_XS:
+    {
+      g_ptr_array_add (pmt_stream->descriptors,
+          gst_mpegts_descriptor_copy (stream->pmt_descriptor));
     }
       break;
     case TSMUX_ST_PS_AUDIO_AC3:
@@ -982,6 +1013,13 @@ tsmux_stream_default_get_es_descrs (TsMuxStream * stream,
       if (stream->internal_stream_type == TSMUX_ST_PS_KLV) {
         descriptor = gst_mpegts_descriptor_from_registration ("KLVA", NULL, 0);
         GST_DEBUG ("adding KLVA registration descriptor");
+        g_ptr_array_add (pmt_stream->descriptors, descriptor);
+      }
+      if (stream->internal_stream_type == TSMUX_ST_PS_ST_2038) {
+        descriptor = gst_mpegts_descriptor_from_registration ("VANC", NULL, 0);
+        GST_DEBUG ("adding VANC registration descriptor");
+        g_ptr_array_add (pmt_stream->descriptors, descriptor);
+        descriptor = gst_mpegts_descriptor_from_custom (0xc4, NULL, 0);
         g_ptr_array_add (pmt_stream->descriptors, descriptor);
       }
     default:
