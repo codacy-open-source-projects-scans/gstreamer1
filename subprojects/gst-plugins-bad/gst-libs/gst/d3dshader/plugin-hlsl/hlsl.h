@@ -30,3 +30,4 @@
 #include "VSMain_color.hlsl"
 #include "VSMain_coord.hlsl"
 #include "VSMain_pos.hlsl"
+#include "CSMain_mipgen.hlsl"

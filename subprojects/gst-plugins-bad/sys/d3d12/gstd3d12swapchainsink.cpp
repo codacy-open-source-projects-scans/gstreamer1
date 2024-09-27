@@ -44,6 +44,8 @@ enum
   PROP_HEIGHT,
   PROP_BORDER_COLOR,
   PROP_SWAPCHAIN,
+  PROP_SAMPLING_METHOD,
+  PROP_MSAA,
 };
 
 #define DEFAULT_ADAPTER -1
@@ -51,6 +53,8 @@ enum
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
 #define DEFAULT_BORDER_COLOR (G_GUINT64_CONSTANT(0xffff000000000000))
+#define DEFAULT_SAMPLING_METHOD GST_D3D12_SAMPLING_METHOD_BILINEAR
+#define DEFAULT_MSAA GST_D3D12_MSAA_DISABLED
 
 #define BACK_BUFFER_COUNT 2
 
@@ -129,6 +133,7 @@ struct GstD3D12SwapChainSinkPrivate
     }
     gst_clear_caps (&caps);
     gst_clear_buffer (&cached_buf);
+    gst_clear_buffer (&msaa_buf);
     gst_clear_object (&conv);
     backbuf.clear ();
     convert_format = GST_VIDEO_FORMAT_UNKNOWN;
@@ -163,6 +168,7 @@ struct GstD3D12SwapChainSinkPrivate
   GstD3D12CommandQueue *cq = nullptr;
   GstD3D12CommandAllocatorPool *ca_pool = nullptr;
   GstBuffer *cached_buf = nullptr;
+  GstBuffer *msaa_buf = nullptr;
   GstCaps *caps = nullptr;
   GstD3D12Converter *conv = nullptr;
   GstD3D12OverlayCompositor *comp = nullptr;
@@ -173,12 +179,15 @@ struct GstD3D12SwapChainSinkPrivate
   D3D12_BOX prev_crop_rect = { };
   FLOAT border_color_val[4];
   GstVideoRectangle viewport = { };
+  gboolean auto_resize = FALSE;
 
   gint adapter = DEFAULT_ADAPTER;
   gint force_aspect_ratio = DEFAULT_FORCE_ASPECT_RATIO;
   guint width = DEFAULT_WIDTH;
   guint height = DEFAULT_HEIGHT;
   guint64 border_color = DEFAULT_BORDER_COLOR;
+  GstD3D12SamplingMethod sampling_method = DEFAULT_SAMPLING_METHOD;
+  GstD3D12MSAAMode msaa_mode = DEFAULT_MSAA;
 };
 /* *INDENT-ON* */
 
@@ -211,6 +220,9 @@ static gboolean gst_d3d12_swapchain_sink_set_info (GstVideoSink * sink,
 static GstFlowReturn gst_d3d12_swapchain_sink_show_frame (GstVideoSink * sink,
     GstBuffer * buf);
 static void gst_d3d12_swapchain_sink_resize (GstD3D12SwapChainSink * self,
+    guint width, guint height);
+static void
+gst_d3d12_swapchain_sink_resize_internal (GstD3D12SwapChainSink * self,
     guint width, guint height);
 
 #define gst_d3d12_swapchain_sink_parent_class parent_class
@@ -267,6 +279,18 @@ gst_d3d12_swapchain_sink_class_init (GstD3D12SwapChainSinkClass * klass)
           (GParamFlags) (GST_PARAM_DOC_SHOW_DEFAULT | G_PARAM_READABLE |
               G_PARAM_STATIC_STRINGS)));
 
+  g_object_class_install_property (object_class, PROP_SAMPLING_METHOD,
+      g_param_spec_enum ("sampling-method", "Sampling method",
+          "Sampler filter type to use", GST_TYPE_D3D12_SAMPLING_METHOD,
+          DEFAULT_SAMPLING_METHOD,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  g_object_class_install_property (object_class, PROP_MSAA,
+      g_param_spec_enum ("msaa", "MSAA",
+          "MSAA (Multi-Sampling Anti-Aliasing) level",
+          GST_TYPE_D3D12_MSAA_MODE, DEFAULT_MSAA,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
   d3d12_swapchain_sink_signals[SIGNAL_RESIZE] =
       g_signal_new_class_handler ("resize", G_TYPE_FROM_CLASS (klass),
       (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION),
@@ -298,6 +322,10 @@ gst_d3d12_swapchain_sink_class_init (GstD3D12SwapChainSinkClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (gst_d3d12_swapchain_sink_debug,
       "d3d12swapchainsink", 0, "d3d12swapchainsink");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_D3D12_SAMPLING_METHOD,
+      (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_D3D12_MSAA_MODE, (GstPluginAPIFlags) 0);
 }
 
 static void
@@ -335,7 +363,8 @@ gst_d3d12_swapchain_sink_set_property (GObject * object, guint prop_id,
       auto val = g_value_get_boolean (value);
       if (val != priv->force_aspect_ratio) {
         priv->force_aspect_ratio = val;
-        gst_d3d12_swapchain_sink_resize (self, priv->width, priv->height);
+        gst_d3d12_swapchain_sink_resize_internal (self,
+            priv->width, priv->height);
       }
       break;
     }
@@ -343,6 +372,29 @@ gst_d3d12_swapchain_sink_set_property (GObject * object, guint prop_id,
       priv->border_color = g_value_get_uint64 (value);
       priv->update_border_color ();
       break;
+    case PROP_SAMPLING_METHOD:
+    {
+      auto sampling_method = (GstD3D12SamplingMethod) g_value_get_enum (value);
+      if (priv->sampling_method != sampling_method) {
+        priv->sampling_method = sampling_method;
+        if (priv->conv) {
+          g_object_set (priv->conv, "sampler-filter",
+              gst_d3d12_sampling_method_to_native (priv->sampling_method),
+              nullptr);
+        }
+      }
+      break;
+    }
+    case PROP_MSAA:
+    {
+      auto msaa = (GstD3D12MSAAMode) g_value_get_enum (value);
+      if (priv->msaa_mode != msaa) {
+        priv->msaa_mode = msaa;
+        gst_d3d12_swapchain_sink_resize_internal (self,
+            priv->width, priv->height);
+      }
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -392,6 +444,43 @@ gst_d3d12_swapchain_sink_resize_unlocked (GstD3D12SwapChainSink * self,
       gst_buffer_append_memory (buf, mem);
       auto swapbuf = std::make_shared < BackBuffer > (buf, backbuf.Get ());
       priv->backbuf.push_back (swapbuf);
+    }
+  }
+
+  gst_clear_buffer (&priv->msaa_buf);
+  if (priv->swapchain) {
+    DXGI_SAMPLE_DESC sample_desc = { };
+    gst_d3d12_calculate_sample_desc_for_msaa (self->device,
+        DXGI_FORMAT_R8G8B8A8_UNORM, priv->msaa_mode, &sample_desc);
+
+    if (sample_desc.Count > 1) {
+      auto device = gst_d3d12_device_get_device_handle (self->device);
+
+      GST_DEBUG_OBJECT (self, "Enable MSAA x%d with quality level %d",
+          sample_desc.Count, sample_desc.Quality);
+      D3D12_HEAP_PROPERTIES heap_prop =
+          CD3DX12_HEAP_PROPERTIES (D3D12_HEAP_TYPE_DEFAULT);
+      D3D12_RESOURCE_DESC resource_desc =
+          CD3DX12_RESOURCE_DESC::Tex2D (DXGI_FORMAT_R8G8B8A8_UNORM,
+          priv->width, priv->height,
+          1, 1, sample_desc.Count, sample_desc.Quality,
+          D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+      D3D12_CLEAR_VALUE clear_value = { };
+      clear_value.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      for (guint i = 0; i < 4; i++)
+        clear_value.Color[i] = priv->border_color_val[i];
+
+      ComPtr < ID3D12Resource > msaa_texture;
+      auto hr = device->CreateCommittedResource (&heap_prop,
+          D3D12_HEAP_FLAG_NONE,
+          &resource_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, &clear_value,
+          IID_PPV_ARGS (&msaa_texture));
+      if (gst_d3d12_result (hr, self->device)) {
+        auto mem = gst_d3d12_allocator_alloc_wrapped (nullptr, self->device,
+            msaa_texture.Get (), 0, nullptr, nullptr);
+        priv->msaa_buf = gst_buffer_new ();
+        gst_buffer_append_memory (priv->msaa_buf, mem);
+      }
     }
   }
 
@@ -482,6 +571,12 @@ gst_d3d12_swapchain_sink_get_property (GObject * object, guint prop_id,
     case PROP_SWAPCHAIN:
       gst_d3d12_swapchain_sink_ensure_swapchain (self);
       g_value_set_pointer (value, priv->swapchain.Get ());
+      break;
+    case PROP_SAMPLING_METHOD:
+      g_value_set_enum (value, priv->sampling_method);
+      break;
+    case PROP_MSAA:
+      g_value_set_enum (value, priv->msaa_mode);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -702,11 +797,22 @@ gst_d3d12_swapchain_sink_render (GstD3D12SwapChainSink * self)
 
   auto mem = (GstD3D12Memory *) gst_buffer_peek_memory (backbuf, 0);
   auto backbuf_texture = gst_d3d12_memory_get_resource_handle (mem);
-  D3D12_RESOURCE_BARRIER barrier =
-      CD3DX12_RESOURCE_BARRIER::Transition (backbuf_texture,
-      D3D12_RESOURCE_STATE_COMMON,
-      D3D12_RESOURCE_STATE_RENDER_TARGET);
-  cl->ResourceBarrier (1, &barrier);
+  GstBuffer *conv_outbuf = backbuf;
+  ID3D12Resource *msaa_resource = nullptr;
+
+  if (priv->msaa_buf) {
+    conv_outbuf = priv->msaa_buf;
+    mem = (GstD3D12Memory *) gst_buffer_peek_memory (conv_outbuf, 0);
+    msaa_resource = gst_d3d12_memory_get_resource_handle (mem);
+    auto msaa_buf = gst_buffer_ref (priv->msaa_buf);
+    gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (msaa_buf));
+  } else {
+    D3D12_RESOURCE_BARRIER barrier =
+        CD3DX12_RESOURCE_BARRIER::Transition (backbuf_texture,
+        D3D12_RESOURCE_STATE_COMMON,
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cl->ResourceBarrier (1, &barrier);
+  }
 
   if (priv->viewport.x != 0 || priv->viewport.y != 0 ||
       (guint) priv->viewport.w != priv->width ||
@@ -717,25 +823,45 @@ gst_d3d12_swapchain_sink_render (GstD3D12SwapChainSink * self)
   }
 
   if (!gst_d3d12_converter_convert_buffer (priv->conv,
-          priv->cached_buf, backbuf, fence_data, cl.Get (), TRUE)) {
+          priv->cached_buf, conv_outbuf, fence_data, cl.Get (), TRUE)) {
     GST_ERROR_OBJECT (self, "Couldn't build convert command");
     gst_d3d12_fence_data_unref (fence_data);
     return FALSE;
   }
 
   if (!gst_d3d12_overlay_compositor_draw (priv->comp,
-          backbuf, fence_data, cl.Get ())) {
+          conv_outbuf, fence_data, cl.Get ())) {
     GST_ERROR_OBJECT (self, "Couldn't build overlay command");
     gst_d3d12_fence_data_unref (fence_data);
     return FALSE;
   }
 
-  barrier =
-      CD3DX12_RESOURCE_BARRIER::Transition (backbuf_texture,
-      D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-  cl->ResourceBarrier (1, &barrier);
-  hr = cl->Close ();
+  if (msaa_resource) {
+    std::vector < D3D12_RESOURCE_BARRIER > barriers;
+    barriers.push_back (CD3DX12_RESOURCE_BARRIER::Transition (msaa_resource,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_RESOLVE_SOURCE));
+    barriers.push_back (CD3DX12_RESOURCE_BARRIER::Transition (backbuf_texture,
+            D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RESOLVE_DEST));
+    cl->ResourceBarrier (barriers.size (), barriers.data ());
 
+    cl->ResolveSubresource (backbuf_texture, 0, msaa_resource, 0,
+        DXGI_FORMAT_R8G8B8A8_UNORM);
+
+    barriers.clear ();
+    barriers.push_back (CD3DX12_RESOURCE_BARRIER::Transition (msaa_resource,
+            D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
+            D3D12_RESOURCE_STATE_RENDER_TARGET));
+    barriers.push_back (CD3DX12_RESOURCE_BARRIER::Transition (backbuf_texture,
+            D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_COMMON));
+    cl->ResourceBarrier (barriers.size (), barriers.data ());
+  } else {
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition (backbuf_texture,
+        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+    cl->ResourceBarrier (1, &barrier);
+  }
+
+  hr = cl->Close ();
   if (!gst_d3d12_result (hr, self->device)) {
     GST_ERROR_OBJECT (self, "Couldn't close command list");
     gst_d3d12_fence_data_unref (fence_data);
@@ -784,6 +910,11 @@ gst_d3d12_swapchain_sink_set_buffer (GstD3D12SwapChainSink * self,
       need_render = true;
       update_converter = true;
       priv->caps_updated = false;
+      if (priv->auto_resize) {
+        gst_clear_buffer (&priv->cached_buf);
+        gst_d3d12_swapchain_sink_resize_internal (self,
+            GST_VIDEO_SINK_WIDTH (self), GST_VIDEO_SINK_HEIGHT (self));
+      }
     } else {
       need_render = false;
       update_converter = false;
@@ -797,7 +928,6 @@ gst_d3d12_swapchain_sink_set_buffer (GstD3D12SwapChainSink * self,
     if (priv->convert_format != format)
       gst_clear_object (&priv->conv);
 
-
     priv->display_width = GST_VIDEO_SINK_WIDTH (self);
     priv->display_height = GST_VIDEO_SINK_HEIGHT (self);
     priv->convert_format = format;
@@ -807,12 +937,23 @@ gst_d3d12_swapchain_sink_set_buffer (GstD3D12SwapChainSink * self,
     gst_clear_buffer (&priv->cached_buf);
 
     if (!priv->conv) {
+      DXGI_SAMPLE_DESC sample_desc = { };
+      gst_d3d12_calculate_sample_desc_for_msaa (self->device,
+          DXGI_FORMAT_R8G8B8A8_UNORM, priv->msaa_mode, &sample_desc);
+
       gst_structure_set (priv->convert_config,
           GST_D3D12_CONVERTER_OPT_DEST_ALPHA_MODE,
           GST_TYPE_D3D12_CONVERTER_ALPHA_MODE,
           GST_VIDEO_INFO_HAS_ALPHA (&priv->info) ?
           GST_D3D12_CONVERTER_ALPHA_MODE_PREMULTIPLIED :
-          GST_D3D12_CONVERTER_ALPHA_MODE_UNSPECIFIED, nullptr);
+          GST_D3D12_CONVERTER_ALPHA_MODE_UNSPECIFIED,
+          GST_D3D12_CONVERTER_OPT_SAMPLER_FILTER,
+          GST_TYPE_D3D12_CONVERTER_SAMPLER_FILTER,
+          gst_d3d12_sampling_method_to_native (priv->sampling_method),
+          GST_D3D12_CONVERTER_OPT_PSO_SAMPLE_DESC_COUNT, G_TYPE_UINT,
+          sample_desc.Count,
+          GST_D3D12_CONVERTER_OPT_PSO_SAMPLE_DESC_QUALITY, G_TYPE_UINT,
+          sample_desc.Quality, nullptr);
 
       priv->conv = gst_d3d12_converter_new (self->device, nullptr, &priv->info,
           &priv->display_info, nullptr, nullptr,
@@ -877,20 +1018,10 @@ gst_d3d12_swapchain_sink_set_buffer (GstD3D12SwapChainSink * self,
 }
 
 static void
-gst_d3d12_swapchain_sink_resize (GstD3D12SwapChainSink * self, guint width,
-    guint height)
+gst_d3d12_swapchain_sink_resize_internal (GstD3D12SwapChainSink * self,
+    guint width, guint height)
 {
   auto priv = self->priv;
-
-  if (width == 0 || width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
-    GST_WARNING_OBJECT (self, "Invalid width value %u", width);
-    return;
-  }
-
-  if (height == 0 || height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
-    GST_WARNING_OBJECT (self, "Invalid height value %u", height);
-    return;
-  }
 
   std::lock_guard < std::recursive_mutex > lk (priv->lock);
   if (!gst_d3d12_swapchain_sink_resize_unlocked (self, width, height)) {
@@ -900,7 +1031,7 @@ gst_d3d12_swapchain_sink_resize (GstD3D12SwapChainSink * self, guint width,
 
   if (priv->swapchain && priv->cached_buf &&
       gst_d3d12_swapchain_sink_render (self)) {
-    GST_ERROR_OBJECT (self, "resize %ux%u", width, height);
+    GST_DEBUG_OBJECT (self, "resize %ux%u", width, height);
     auto hr = priv->swapchain->Present (0, 0);
     if (!gst_d3d12_result (hr, self->device))
       GST_ERROR_OBJECT (self, "Present failed");
@@ -908,6 +1039,40 @@ gst_d3d12_swapchain_sink_resize (GstD3D12SwapChainSink * self, guint width,
     gst_d3d12_command_queue_execute_command_lists (priv->cq,
         0, nullptr, &priv->fence_val);
   }
+}
+
+static void
+gst_d3d12_swapchain_sink_resize (GstD3D12SwapChainSink * self, guint width,
+    guint height)
+{
+  auto priv = self->priv;
+
+  std::lock_guard < std::recursive_mutex > lk (priv->lock);
+  if (width == 0 && height == 0) {
+    GST_DEBUG_OBJECT (self, "Enable auto resize");
+    priv->auto_resize = TRUE;
+    if (GST_VIDEO_SINK_WIDTH (self) > 0 && GST_VIDEO_SINK_HEIGHT (self) > 0) {
+      width = GST_VIDEO_SINK_WIDTH (self);
+      height = GST_VIDEO_SINK_HEIGHT (self);
+    } else {
+      GST_DEBUG_OBJECT (self, "Caps is not configured yet");
+      return;
+    }
+  } else {
+    if (width == 0 || width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+      GST_WARNING_OBJECT (self, "Invalid width value %u", width);
+      return;
+    }
+
+    if (height == 0 || height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+      GST_WARNING_OBJECT (self, "Invalid height value %u", height);
+      return;
+    }
+
+    priv->auto_resize = FALSE;
+  }
+
+  gst_d3d12_swapchain_sink_resize_internal (self, width, height);
 }
 
 static gboolean

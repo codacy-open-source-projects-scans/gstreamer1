@@ -311,11 +311,12 @@ get_opt_value (GstAudioConverter * convert, const gchar * opt)
     GST_AUDIO_CONVERTER_OPT_MIX_MATRIX)
 
 static gboolean
-copy_config (GQuark field_id, const GValue * value, gpointer user_data)
+copy_config (const GstIdStr * fieldname, const GValue * value,
+    gpointer user_data)
 {
   GstAudioConverter *convert = user_data;
 
-  gst_structure_id_set_value (convert->config, field_id, value);
+  gst_structure_id_str_set_value (convert->config, fieldname, value);
 
   return TRUE;
 }
@@ -366,7 +367,7 @@ gst_audio_converter_update_config (GstAudioConverter * convert,
     gst_audio_resampler_update (convert->resampler, in_rate, out_rate, config);
 
   if (config) {
-    gst_structure_foreach (config, copy_config, convert);
+    gst_structure_foreach_id_str (config, copy_config, convert);
     gst_structure_free (config);
   }
 
@@ -1373,7 +1374,7 @@ gst_audio_converter_new (GstAudioConverterFlags flags, GstAudioInfo * in_info,
   convert->out = *out_info;
 
   /* default config */
-  convert->config = gst_structure_new_empty ("GstAudioConverter");
+  convert->config = gst_structure_new_static_str_empty ("GstAudioConverter");
   if (config)
     gst_audio_converter_update_config (convert, 0, 0, config);
 

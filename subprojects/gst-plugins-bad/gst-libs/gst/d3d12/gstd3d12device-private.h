@@ -92,5 +92,13 @@ void        gst_d3d12_device_decoder_unlock (GstD3D12Device * device);
 GST_D3D12_API
 GstD3D12WAFlags gst_d3d12_device_get_workaround_flags (GstD3D12Device * device);
 
+GST_D3D12_API
+HRESULT     gst_d3d12_device_get_sampler_state (GstD3D12Device * device,
+                                                D3D12_FILTER filter,
+                                                ID3D12DescriptorHeap ** heap);
+
+GST_D3D12_API
+gboolean    gst_d3d12_device_non_zeroed_supported (GstD3D12Device * device);
+
 G_END_DECLS
 

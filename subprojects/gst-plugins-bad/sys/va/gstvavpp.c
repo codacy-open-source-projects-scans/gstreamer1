@@ -944,11 +944,12 @@ gst_va_vpp_caps_remove_fields (GstCaps * caps)
   GstStructure *structure;
   GstCapsFeatures *features;
   gint i, n;
-  guint sysmem, dmabuf, va;
+  GstIdStr sysmem = GST_ID_STR_INIT, dmabuf = GST_ID_STR_INIT, va =
+      GST_ID_STR_INIT;
 
-  sysmem = g_quark_from_static_string (GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
-  dmabuf = g_quark_from_static_string (GST_CAPS_FEATURE_MEMORY_DMABUF);
-  va = g_quark_from_static_string (GST_CAPS_FEATURE_MEMORY_VA);
+  gst_id_str_set_static_str (&sysmem, GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
+  gst_id_str_set_static_str (&dmabuf, GST_CAPS_FEATURE_MEMORY_DMABUF);
+  gst_id_str_set_static_str (&va, GST_CAPS_FEATURE_MEMORY_VA);
 
   ret = gst_caps_new_empty ();
 
@@ -964,9 +965,9 @@ gst_va_vpp_caps_remove_fields (GstCaps * caps)
 
     structure = gst_structure_copy (structure);
 
-    if (gst_caps_features_contains_id (features, sysmem)
-        || gst_caps_features_contains_id (features, dmabuf)
-        || gst_caps_features_contains_id (features, va)) {
+    if (gst_caps_features_contains_id_str (features, &sysmem)
+        || gst_caps_features_contains_id_str (features, &dmabuf)
+        || gst_caps_features_contains_id_str (features, &va)) {
       /* rangify frame size */
       gst_structure_set (structure, "width", GST_TYPE_INT_RANGE, 1, G_MAXINT,
           "height", GST_TYPE_INT_RANGE, 1, G_MAXINT, NULL);
@@ -1014,7 +1015,7 @@ gst_va_vpp_complete_caps_features (const GstCaps * caps,
       continue;
     }
 
-    features = gst_caps_features_new (feature_name, NULL);
+    features = gst_caps_features_new_static_str (feature_name, NULL);
     if (!gst_caps_is_subset_structure_full (tmp, s, features))
       gst_caps_append_structure_full (tmp, gst_structure_copy (s), features);
     else

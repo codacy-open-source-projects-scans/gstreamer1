@@ -143,6 +143,8 @@ struct DeviceInner
 
     gst_clear_object (&fence_data_pool);
 
+    samplers.clear ();
+
     factory = nullptr;
     adapter = nullptr;
 
@@ -269,6 +271,7 @@ struct DeviceInner
   guint vendor_id = 0;
   std::string description;
   gint64 adapter_luid = 0;
+  gboolean non_zeroed_supported = FALSE;
 
   HANDLE dev_removed_monitor_handle = nullptr;
   HANDLE dev_removed_event;
@@ -276,6 +279,8 @@ struct DeviceInner
   std::atomic<HRESULT> removed_reason = { S_OK };
 
   std::vector<GstD3D12Device*> clients;
+
+  std::unordered_map<D3D12_FILTER, ComPtr<ID3D12DescriptorHeap>> samplers;
 };
 
 typedef std::shared_ptr<DeviceInner> DeviceInnerPtr;
@@ -1403,6 +1408,16 @@ gst_d3d12_device_new_internal (const GstD3D12DeviceConstructData * data)
       priv->dev_removed_event, on_device_removed, priv.get (), INFINITE,
       WT_EXECUTEONLYONCE);
 
+  /* D3D12_HEAP_FLAG_CREATE_NOT_ZEROED was introduced as of Windows 10 May 2020
+   * update, and supported if D3D12_FEATURE_D3D12_OPTIONS7 check is succeeded */
+  {
+    D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = { };
+    hr = device->CheckFeatureSupport (D3D12_FEATURE_D3D12_OPTIONS7, &options7,
+        sizeof (options7));
+    if (SUCCEEDED (hr))
+      priv->non_zeroed_supported = TRUE;
+  }
+
   return self;
 
 error:
@@ -2157,4 +2172,79 @@ gst_d3d12_device_get_workaround_flags (GstD3D12Device * device)
   g_return_val_if_fail (GST_IS_D3D12_DEVICE (device), GST_D3D12_WA_NONE);
 
   return device->priv->inner->wa_flags;
+}
+
+HRESULT
+gst_d3d12_device_get_sampler_state (GstD3D12Device * device,
+    D3D12_FILTER filter, ID3D12DescriptorHeap ** heap)
+{
+  g_return_val_if_fail (GST_IS_D3D12_DEVICE (device), E_INVALIDARG);
+  g_return_val_if_fail (heap, E_INVALIDARG);
+
+  UINT max_anisotropy = 1;
+  switch (filter) {
+    case D3D12_FILTER_MIN_MAG_MIP_POINT:
+    case D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT:
+    case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+    case D3D12_FILTER_MIN_MAG_MIP_LINEAR:
+      break;
+    case D3D12_FILTER_ANISOTROPIC:
+      max_anisotropy = 16;
+      break;
+    default:
+      GST_WARNING_OBJECT (device, "Not supported sampler filter %d", filter);
+      return E_INVALIDARG;
+  }
+
+  auto priv = device->priv->inner;
+
+  std::lock_guard < std::mutex > lk (priv->lock);
+  auto it = priv->samplers.find (filter);
+  if (it != priv->samplers.end ()) {
+    auto sampler = it->second;
+    *heap = it->second.Get ();
+    (*heap)->AddRef ();
+  } else {
+    ComPtr < ID3D12DescriptorHeap > new_heap;
+    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = { };
+    heap_desc.NumDescriptors = 1;
+    heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+    auto hr = priv->device->CreateDescriptorHeap (&heap_desc,
+        IID_PPV_ARGS (&new_heap));
+    if (FAILED (hr)) {
+      GST_ERROR_OBJECT (device, "Couldn't create heap");
+      return hr;
+    }
+
+    D3D12_SAMPLER_DESC sampler_desc = { };
+    sampler_desc.Filter = filter;
+    sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampler_desc.MipLODBias = 0.0f;
+    sampler_desc.MaxAnisotropy = max_anisotropy;
+    sampler_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    sampler_desc.MinLOD = 0;
+    sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+
+    auto cpu_handle = GetCPUDescriptorHandleForHeapStart (new_heap);
+    priv->device->CreateSampler (&sampler_desc, cpu_handle);
+
+    priv->samplers[filter] = new_heap;
+
+    *heap = new_heap.Get ();
+    (*heap)->AddRef ();
+  }
+
+  return S_OK;
+}
+
+gboolean
+gst_d3d12_device_non_zeroed_supported (GstD3D12Device * device)
+{
+  g_return_val_if_fail (GST_IS_D3D12_DEVICE (device), FALSE);
+
+  return device->priv->inner->non_zeroed_supported;
 }

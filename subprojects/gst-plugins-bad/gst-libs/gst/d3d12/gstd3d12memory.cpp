@@ -130,6 +130,7 @@ gst_d3d12_allocation_params_new (GstD3D12Device * device,
   ret->aligned_info = *info;
   ret->d3d12_format = d3d12_format;
   ret->array_size = 1;
+  ret->mip_levels = 1;
   ret->flags = flags;
   ret->heap_flags = heap_flags;
   ret->resource_flags = resource_flags;
@@ -300,6 +301,26 @@ gst_d3d12_allocation_params_set_array_size (GstD3D12AllocationParams * params,
   return TRUE;
 }
 
+/**
+ * gst_d3d12_allocation_params_set_mip_levels:
+ * @params: a #GstD3D12AllocationParams
+ * @mip_levels: a texture mip levels
+ *
+ * Returns: %TRUE if successful
+ *
+ * Since: 1.26
+ */
+gboolean
+gst_d3d12_allocation_params_set_mip_levels (GstD3D12AllocationParams * params,
+    guint mip_levels)
+{
+  g_return_val_if_fail (params, FALSE);
+
+  params->mip_levels = mip_levels;
+
+  return TRUE;
+}
+
 /* *INDENT-OFF* */
 struct GstD3D12MemoryTokenData
 {
@@ -392,9 +413,12 @@ gst_d3d12_memory_ensure_staging_resource (GstD3D12Memory * dmem)
       CD3DX12_HEAP_PROPERTIES (D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
       D3D12_MEMORY_POOL_L0);
   D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer (priv->size);
+  D3D12_HEAP_FLAGS heap_flags = D3D12_HEAP_FLAG_NONE;
+  if (gst_d3d12_device_non_zeroed_supported (dmem->device))
+    heap_flags = D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
+
   ComPtr < ID3D12Resource > staging;
-  hr = device->CreateCommittedResource (&prop,
-      D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+  hr = device->CreateCommittedResource (&prop, heap_flags,
       &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS (&staging));
   if (!gst_d3d12_result (hr, dmem->device)) {
     GST_ERROR_OBJECT (dmem->device, "Couldn't create staging resource");
@@ -786,7 +810,7 @@ gst_d3d12_memory_get_shader_resource_view_heap (GstD3D12Memory * mem)
     D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = { };
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv_desc.Texture2D.MipLevels = 1;
+    srv_desc.Texture2D.MipLevels = priv->desc.MipLevels;
 
     auto cpu_handle =
         CD3DX12_CPU_DESCRIPTOR_HANDLE (GetCPUDescriptorHandleForHeapStart
@@ -1413,6 +1437,7 @@ gst_d3d12_allocator_alloc_wrapped (GstD3D12Allocator * allocator,
   /* Then calculate staging memory size and copyable layout */
   UINT64 size;
   desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
   device_handle->GetCopyableFootprints (&desc, 0,
       num_subresources, 0, priv->layout, nullptr, nullptr, &size);
   priv->size = size;

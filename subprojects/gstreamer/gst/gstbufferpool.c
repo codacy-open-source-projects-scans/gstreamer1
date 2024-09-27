@@ -72,7 +72,6 @@
 
 #include "gstvecdeque.h"
 #include "gstinfo.h"
-#include "gstquark.h"
 #include "gstvalue.h"
 
 #include "gstbufferpool.h"
@@ -167,7 +166,7 @@ gst_buffer_pool_init (GstBufferPool * pool)
   priv->active = FALSE;
   priv->configured = FALSE;
   priv->started = FALSE;
-  priv->config = gst_structure_new_id_empty (GST_QUARK (BUFFER_POOL_CONFIG));
+  priv->config = gst_structure_new_static_str_empty ("GstBufferPoolConfig");
   gst_buffer_pool_config_set_params (priv->config, NULL, 0, 0, 0);
   priv->allocator = NULL;
   gst_allocation_params_init (&priv->params);
@@ -830,11 +829,11 @@ gst_buffer_pool_config_set_params (GstStructure * config, GstCaps * caps,
   g_return_if_fail (max_buffers == 0 || min_buffers <= max_buffers);
   g_return_if_fail (caps == NULL || gst_caps_is_fixed (caps));
 
-  gst_structure_id_set (config,
-      GST_QUARK (CAPS), GST_TYPE_CAPS, caps,
-      GST_QUARK (SIZE), G_TYPE_UINT, size,
-      GST_QUARK (MIN_BUFFERS), G_TYPE_UINT, min_buffers,
-      GST_QUARK (MAX_BUFFERS), G_TYPE_UINT, max_buffers, NULL);
+  gst_structure_set_static_str (config,
+      "caps", GST_TYPE_CAPS, caps,
+      "size", G_TYPE_UINT, size,
+      "min-buffers", G_TYPE_UINT, min_buffers,
+      "max-buffers", G_TYPE_UINT, max_buffers, NULL);
 }
 
 /**
@@ -863,9 +862,9 @@ gst_buffer_pool_config_set_allocator (GstStructure * config,
   g_return_if_fail (config != NULL);
   g_return_if_fail (allocator != NULL || params != NULL);
 
-  gst_structure_id_set (config,
-      GST_QUARK (ALLOCATOR), GST_TYPE_ALLOCATOR, allocator,
-      GST_QUARK (PARAMS), GST_TYPE_ALLOCATION_PARAMS, params, NULL);
+  gst_structure_set_static_str (config,
+      "allocator", GST_TYPE_ALLOCATOR, allocator,
+      "params", GST_TYPE_ALLOCATION_PARAMS, params, NULL);
 }
 
 /**
@@ -887,7 +886,7 @@ gst_buffer_pool_config_add_option (GstStructure * config, const gchar * option)
 
   g_return_if_fail (config != NULL);
 
-  value = gst_structure_id_get_value (config, GST_QUARK (OPTIONS));
+  value = gst_structure_get_value (config, "options");
   if (value) {
     len = gst_value_array_get_size (value);
     for (i = 0; i < len; ++i) {
@@ -900,8 +899,8 @@ gst_buffer_pool_config_add_option (GstStructure * config, const gchar * option)
     GValue new_array_val = { 0, };
 
     g_value_init (&new_array_val, GST_TYPE_ARRAY);
-    gst_structure_id_take_value (config, GST_QUARK (OPTIONS), &new_array_val);
-    value = gst_structure_id_get_value (config, GST_QUARK (OPTIONS));
+    gst_structure_take_value_static_str (config, "options", &new_array_val);
+    value = gst_structure_get_value (config, "options");
   }
   g_value_init (&option_value, G_TYPE_STRING);
   g_value_set_string (&option_value, option);
@@ -925,7 +924,7 @@ gst_buffer_pool_config_n_options (GstStructure * config)
 
   g_return_val_if_fail (config != NULL, 0);
 
-  value = gst_structure_id_get_value (config, GST_QUARK (OPTIONS));
+  value = gst_structure_get_value (config, "options");
   if (value) {
     size = gst_value_array_get_size (value);
   }
@@ -950,7 +949,7 @@ gst_buffer_pool_config_get_option (GstStructure * config, guint index)
 
   g_return_val_if_fail (config != NULL, 0);
 
-  value = gst_structure_id_get_value (config, GST_QUARK (OPTIONS));
+  value = gst_structure_get_value (config, "options");
   if (value) {
     const GValue *option_value;
 
@@ -978,7 +977,7 @@ gst_buffer_pool_config_has_option (GstStructure * config, const gchar * option)
 
   g_return_val_if_fail (config != NULL, 0);
 
-  value = gst_structure_id_get_value (config, GST_QUARK (OPTIONS));
+  value = gst_structure_get_value (config, "options");
   if (value) {
     len = gst_value_array_get_size (value);
     for (i = 0; i < len; ++i) {
@@ -1010,13 +1009,12 @@ gst_buffer_pool_config_get_params (GstStructure * config, GstCaps ** caps,
   g_return_val_if_fail (config != NULL, FALSE);
 
   if (caps) {
-    *caps = g_value_get_boxed (gst_structure_id_get_value (config,
-            GST_QUARK (CAPS)));
+    *caps = g_value_get_boxed (gst_structure_get_value (config, "caps"));
   }
-  return gst_structure_id_get (config,
-      GST_QUARK (SIZE), G_TYPE_UINT, size,
-      GST_QUARK (MIN_BUFFERS), G_TYPE_UINT, min_buffers,
-      GST_QUARK (MAX_BUFFERS), G_TYPE_UINT, max_buffers, NULL);
+  return gst_structure_get (config,
+      "size", G_TYPE_UINT, size,
+      "min-buffers", G_TYPE_UINT, min_buffers,
+      "max-buffers", G_TYPE_UINT, max_buffers, NULL);
 }
 
 /**
@@ -1036,13 +1034,12 @@ gst_buffer_pool_config_get_allocator (GstStructure * config,
   g_return_val_if_fail (config != NULL, FALSE);
 
   if (allocator)
-    *allocator = g_value_get_object (gst_structure_id_get_value (config,
-            GST_QUARK (ALLOCATOR)));
+    *allocator = g_value_get_object (gst_structure_get_value (config,
+            "allocator"));
   if (params) {
     GstAllocationParams *p;
 
-    p = g_value_get_boxed (gst_structure_id_get_value (config,
-            GST_QUARK (PARAMS)));
+    p = g_value_get_boxed (gst_structure_get_value (config, "params"));
     if (p) {
       *params = *p;
     } else {

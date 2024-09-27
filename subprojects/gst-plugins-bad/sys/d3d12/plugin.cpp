@@ -49,6 +49,7 @@
 #include "gstd3d12ipcsrc.h"
 #include "gstd3d12ipcsink.h"
 #include "gstd3d12swapchainsink.h"
+#include "gstd3d12mipmapping.h"
 #include <windows.h>
 #include <versionhelpers.h>
 #include <wrl.h>
@@ -161,6 +162,10 @@ plugin_init (GstPlugin * plugin)
   gst_element_register (plugin,
       "d3d12convert", GST_RANK_NONE, GST_TYPE_D3D12_CONVERT);
   gst_element_register (plugin,
+      "d3d12colorconvert", GST_RANK_NONE, GST_TYPE_D3D12_COLOR_CONVERT);
+  gst_element_register (plugin,
+      "d3d12scale", GST_RANK_NONE, GST_TYPE_D3D12_SCALE);
+  gst_element_register (plugin,
       "d3d12download", GST_RANK_NONE, GST_TYPE_D3D12_DOWNLOAD);
   gst_element_register (plugin,
       "d3d12upload", GST_RANK_NONE, GST_TYPE_D3D12_UPLOAD);
@@ -181,6 +186,8 @@ plugin_init (GstPlugin * plugin)
       "d3d12ipcsink", GST_RANK_NONE, GST_TYPE_D3D12_IPC_SINK);
   gst_element_register (plugin,
       "d3d12swapchainsink", GST_RANK_NONE, GST_TYPE_D3D12_SWAPCHAIN_SINK);
+  gst_element_register (plugin,
+      "d3d12mipmapping", GST_RANK_NONE, GST_TYPE_D3D12_MIP_MAPPING);
 
   g_object_set_data_full (G_OBJECT (plugin),
       "plugin-d3d12-shutdown", (gpointer) "shutdown-data",

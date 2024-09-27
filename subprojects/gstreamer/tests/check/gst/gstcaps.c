@@ -1160,7 +1160,8 @@ GST_START_TEST (test_union)
 GST_END_TEST;
 
 static gboolean
-_caps_is_fixed_foreach (GQuark field_id, const GValue * value, gpointer unused)
+_caps_is_fixed_foreach (const GstIdStr * fieldname, const GValue * value,
+    gpointer unused)
 {
   return gst_value_is_fixed (value);
 }
@@ -1179,7 +1180,8 @@ GST_START_TEST (test_normalize)
   for (i = 0; i < gst_caps_get_size (norm); i++) {
     GstStructure *st = gst_caps_get_structure (norm, i);
     /* Make sure all fields of all structures are fixed */
-    fail_unless (gst_structure_foreach (st, _caps_is_fixed_foreach, NULL));
+    fail_unless (gst_structure_foreach_id_str (st, _caps_is_fixed_foreach,
+            NULL));
   }
 
   gst_caps_unref (out);
@@ -1197,7 +1199,8 @@ GST_START_TEST (test_normalize)
   for (i = 0; i < gst_caps_get_size (norm); i++) {
     GstStructure *st = gst_caps_get_structure (norm, i);
     /* Make sure all fields of all structures are fixed */
-    fail_unless (gst_structure_foreach (st, _caps_is_fixed_foreach, NULL));
+    fail_unless (gst_structure_foreach_id_str (st, _caps_is_fixed_foreach,
+            NULL));
   }
 
   gst_caps_unref (out);
@@ -1214,7 +1217,8 @@ GST_START_TEST (test_normalize)
   for (i = 0; i < gst_caps_get_size (norm); i++) {
     GstStructure *st = gst_caps_get_structure (norm, i);
     /* Make sure all fields of all structures are fixed */
-    fail_unless (gst_structure_foreach (st, _caps_is_fixed_foreach, NULL));
+    fail_unless (gst_structure_foreach_id_str (st, _caps_is_fixed_foreach,
+            NULL));
   }
 
   gst_caps_unref (out);
@@ -1262,7 +1266,7 @@ GST_START_TEST (test_features)
   s1 = gst_structure_new ("video/x-raw", "width", G_TYPE_INT, 320, "height",
       GST_TYPE_INT_RANGE, 240, 260, NULL);
   fail_unless (s1 != NULL);
-  f1 = gst_caps_features_new ("memory:EGLImage", NULL);
+  f1 = gst_caps_features_new_static_str ("memory:EGLImage", NULL);
   fail_unless (f1 != NULL);
 
   gst_caps_append_structure_full (c1, s1, f1);
@@ -1289,7 +1293,8 @@ GST_START_TEST (test_features)
   s2 = gst_structure_new ("video/x-raw", "width", G_TYPE_INT, 320, "height",
       GST_TYPE_INT_RANGE, 240, 260, NULL);
   fail_unless (s2 != NULL);
-  f2 = gst_caps_features_new ("memory:VASurface", "meta:VAMeta", NULL);
+  f2 = gst_caps_features_new_static_str ("memory:VASurface", "meta:VAMeta",
+      NULL);
   fail_unless (f2 != NULL);
   gst_caps_append_structure_full (c2, s2, f2);
 
@@ -1363,7 +1368,7 @@ GST_START_TEST (test_features)
 
   c1 = gst_caps_from_string ("video/x-raw");
   f1 = gst_caps_get_features (c1, 0);
-  f2 = gst_caps_features_new ("memory:dmabuf", NULL);
+  f2 = gst_caps_features_new_static_str ("memory:dmabuf", NULL);
   gst_caps_set_features (c1, 0, f2);
 
   gst_caps_unref (c1);
@@ -1373,7 +1378,7 @@ GST_START_TEST (test_features)
       ("video/x-raw, format=NV12; video/x-raw, format=NV16");
   fail_unless_equals_int (gst_caps_get_size (c1), 2);
 
-  f1 = gst_caps_features_new ("memory:EGLImage", NULL);
+  f1 = gst_caps_features_new_static_str ("memory:EGLImage", NULL);
   gst_caps_set_features_simple (c1, f1);
 
   f2 = gst_caps_get_features (c1, 0);
@@ -1386,7 +1391,7 @@ GST_START_TEST (test_features)
   c1 = gst_caps_new_any ();
   fail_unless_equals_int (gst_caps_get_size (c1), 0);
 
-  f1 = gst_caps_features_new ("memory:EGLImage", NULL);
+  f1 = gst_caps_features_new_static_str ("memory:EGLImage", NULL);
   /* Nothing to set the features on, but method should still take
    * ownership of the given features */
   gst_caps_set_features_simple (c1, f1);
