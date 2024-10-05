@@ -189,6 +189,7 @@ gst_drm_height_from_drm (guint32 drmfmt, guint32 height)
     case DRM_FORMAT_YUV422:
     case DRM_FORMAT_NV12:
     case DRM_FORMAT_NV21:
+    case DRM_FORMAT_NV15:
     case DRM_FORMAT_P010:
     case DRM_FORMAT_P016:
       ret = height * 3 / 2;
@@ -224,8 +225,11 @@ gst_drm_bpp_from_drm (guint32 drm_fourcc)
     case DRM_FORMAT_NV24:
       bpp = 8;
       break;
-    case DRM_FORMAT_P010:
+    case DRM_FORMAT_NV15:
       bpp = 10;
+      break;
+    case DRM_FORMAT_P010:
+      bpp = 16;
       break;
     case DRM_FORMAT_UYVY:
     case DRM_FORMAT_YUYV:

@@ -848,7 +848,7 @@ gst_structure_get_name_id (const GstStructure * structure)
  *
  * Get the name of @structure as a GstIdStr.
  *
- * Returns: the quark representing the name of the structure.
+ * Returns: the name of the structure.
  *
  * Since: 1.26
  */
@@ -1381,8 +1381,8 @@ gst_structure_id_str_set_valist_internal (GstStructure * structure,
  *
  * Identical to gst_structure_set, except that field names are
  * passed using a GstIdStr for the field name. This allows more efficient
- * setting of the structure if the caller already knows the associated
- * quark values.
+ * setting of the structure if the caller already owns the associated
+ * GstIdStr values or if they can be built from static literals.
  * The last variable argument must be %NULL.
  *
  * Since: 1.26
@@ -1481,7 +1481,7 @@ gst_structure_new_id (GQuark name_quark, GQuark field_quark, ...)
  * @...: variable arguments
  *
  * Creates a new #GstStructure with the given name as a GQuark, followed by
- * fieldname quark, GType, argument(s) "triplets" in the same format as
+ * fieldname GstIdStr, GType, argument(s) "triplets" in the same format as
  * gst_structure_id_set(). Basically a convenience wrapper around
  * gst_structure_new_id_empty() and gst_structure_id_set().
  *
@@ -1828,6 +1828,94 @@ gst_structure_remove_fields_valist (GstStructure * structure,
 }
 
 /**
+ * gst_structure_id_str_remove_field:
+ * @structure: a #GstStructure
+ * @fieldname: the name of the field to remove
+ *
+ * Removes the field with the given name.  If the field with the given
+ * name does not exist, the structure is unchanged.
+ *
+ * Since: 1.26
+ */
+void
+gst_structure_id_str_remove_field (GstStructure * structure,
+    const GstIdStr * fieldname)
+{
+  GstStructureField *field;
+  guint i, len;
+
+  g_return_if_fail (structure != NULL);
+  g_return_if_fail (fieldname != NULL);
+  g_return_if_fail (IS_MUTABLE (structure));
+
+  len = GST_STRUCTURE_LEN (structure);
+  for (i = 0; i < len; i++) {
+    field = GST_STRUCTURE_FIELD (structure, i);
+
+    if (gst_id_str_is_equal (&field->name, fieldname)) {
+      if (G_IS_VALUE (&field->value)) {
+        g_value_unset (&field->value);
+      }
+      gst_id_str_clear (&field->name);
+      _structure_remove_index (structure, i);
+      return;
+    }
+  }
+}
+
+/**
+ * gst_structure_id_str_remove_fields:
+ * @structure: a #GstStructure
+ * @fieldname: the name of the field to remove
+ * @...: %NULL-terminated list of more fieldnames to remove
+ *
+ * Removes the fields with the given names. If a field does not exist, the
+ * argument is ignored.
+ *
+ * Since: 1.26
+ */
+void
+gst_structure_id_str_remove_fields (GstStructure * structure,
+    const GstIdStr * fieldname, ...)
+{
+  va_list varargs;
+
+  g_return_if_fail (structure != NULL);
+  g_return_if_fail (fieldname != NULL);
+  /* mutability checked in remove_field */
+
+  va_start (varargs, fieldname);
+  gst_structure_id_str_remove_fields_valist (structure, fieldname, varargs);
+  va_end (varargs);
+}
+
+/**
+ * gst_structure_id_str_remove_fields_valist:
+ * @structure: a #GstStructure
+ * @fieldname: the name of the field to remove
+ * @varargs: %NULL-terminated list of more fieldnames to remove
+ *
+ * va_list form of gst_structure_id_str_remove_fields().
+ *
+ * Since: 1.26
+ */
+void
+gst_structure_id_str_remove_fields_valist (GstStructure * structure,
+    const GstIdStr * fieldname, va_list varargs)
+{
+  const GstIdStr *field = fieldname;
+
+  g_return_if_fail (structure != NULL);
+  g_return_if_fail (fieldname != NULL);
+  /* mutability checked in remove_field */
+
+  while (field) {
+    gst_structure_id_str_remove_field (structure, field);
+    field = va_arg (varargs, const GstIdStr *);
+  }
+}
+
+/**
  * gst_structure_remove_all_fields:
  * @structure: a #GstStructure
  *
@@ -1916,6 +2004,32 @@ gst_structure_nth_field_name (const GstStructure * structure, guint index)
   field = GST_STRUCTURE_FIELD (structure, index);
 
   return gst_id_str_as_str (&field->name);
+}
+
+/**
+ * gst_structure_id_str_nth_field_name:
+ * @structure: a #GstStructure
+ * @index: the index to get the name of
+ *
+ * Get the name (as a GstIdStr) of the given field number,
+ * counting from 0 onwards.
+ *
+ * Returns: the name of the given field number
+ *
+ * Since: 1.26
+ */
+const GstIdStr *
+gst_structure_id_str_nth_field_name (const GstStructure * structure,
+    guint index)
+{
+  GstStructureField *field;
+
+  g_return_val_if_fail (structure != NULL, NULL);
+  g_return_val_if_fail (index < GST_STRUCTURE_LEN (structure), NULL);
+
+  field = GST_STRUCTURE_FIELD (structure, index);
+
+  return &field->name;
 }
 
 typedef struct
@@ -3860,10 +3974,9 @@ gst_structure_id_get_valist (const GstStructure * structure,
 
     expected_type = va_arg (args, GType);
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
     val = gst_structure_id_get_value (structure, field_id);
-#pragma GCC diagnostic pop
+    G_GNUC_END_IGNORE_DEPRECATIONS;
 
     if (val == NULL)
       goto no_such_field;
@@ -3892,15 +4005,14 @@ no_such_field:
   }
 wrong_type:
   {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
     GST_DEBUG ("Expected field '%s' in structure to be of type '%s', but "
         "field was of type '%s': %" GST_PTR_FORMAT,
         g_quark_to_string (field_id),
         GST_STR_NULL (g_type_name (expected_type)),
         G_VALUE_TYPE_NAME (gst_structure_id_get_value (structure, field_id)),
         structure);
-#pragma GCC diagnostic pop
+    G_GNUC_END_IGNORE_DEPRECATIONS;
     return FALSE;
   }
 }
@@ -4020,10 +4132,9 @@ gst_structure_id_get (const GstStructure * structure, GQuark first_field_id,
   g_return_val_if_fail (first_field_id != 0, FALSE);
 
   va_start (args, first_field_id);
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
   ret = gst_structure_id_get_valist (structure, first_field_id, args);
-#pragma GCC diagnostic pop
+  G_GNUC_END_IGNORE_DEPRECATIONS;
   va_end (args);
 
   return ret;
