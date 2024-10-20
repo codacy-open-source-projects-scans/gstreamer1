@@ -70,6 +70,9 @@ gboolean          gst_v4l2_decoder_set_sink_fmt (GstV4l2Decoder * self, guint32 
 GstCaps *         gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self,
                                                      GstStaticCaps * static_filter);
 
+GstCaps *         gst_v4l2_decoder_enum_all_src_formats (GstV4l2Decoder * self,
+                                                         GstStaticCaps * static_filter);
+
 gboolean          gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self,
                                                       GstCaps * caps,
                                                       GstVideoInfo * vinfo,
@@ -85,6 +88,15 @@ GstVideoCodecState * gst_v4l2_decoder_set_output_state (GstVideoDecoder * decode
 gint              gst_v4l2_decoder_request_buffers (GstV4l2Decoder * self,
                                                     GstPadDirection direction,
                                                     guint num_buffers);
+
+gint              gst_v4l2_decoder_create_buffers (GstV4l2Decoder * self,
+                                                   GstPadDirection direction,
+						   guint num_buffers);
+
+gint              gst_v4l2_decoder_remove_buffers (GstV4l2Decoder * self,
+		                                   GstPadDirection direction,
+                                                   guint index,
+						   guint num_buffers);
 
 gboolean          gst_v4l2_decoder_export_buffer (GstV4l2Decoder * self,
                                                   GstPadDirection directon,
@@ -141,6 +153,7 @@ void              gst_v4l2_decoder_set_render_delay (GstV4l2Decoder * self,
 
 guint             gst_v4l2_decoder_get_render_delay (GstV4l2Decoder * self);
 
+gboolean	  gst_v4l2_decoder_has_remove_bufs (GstV4l2Decoder * self);
 
 GstV4l2Request *  gst_v4l2_request_ref (GstV4l2Request * request);
 

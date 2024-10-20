@@ -717,11 +717,28 @@ gst_uri_source_bin_get_property (GObject * object, guint prop_id,
   }
 }
 
+typedef struct
+{
+  GstPad *target_pad;
+  gboolean rewrite_stream_start;
+} CopyEventData;
+
 static gboolean
 copy_sticky_events (GstPad * pad, GstEvent ** event, gpointer user_data)
 {
-  GstPad *gpad = GST_PAD_CAST (user_data);
+  CopyEventData *data = user_data;
+  GstPad *gpad = data->target_pad;
 
+  if (data->rewrite_stream_start &&
+      GST_EVENT_TYPE (*event) == GST_EVENT_STREAM_START) {
+    GstStructure *s;
+    /* This is a temporary hack to notify downstream decodebin3 to *not*
+     * plug in an extra parsebin */
+    *event = gst_event_make_writable (*event);
+    s = (GstStructure *) gst_event_get_structure (*event);
+    gst_structure_set (s, "urisourcebin-parsed-data", G_TYPE_BOOLEAN, TRUE,
+        NULL);
+  }
   GST_DEBUG_OBJECT (gpad,
       "store sticky event from %" GST_PTR_FORMAT " %" GST_PTR_FORMAT, pad,
       *event);
@@ -866,11 +883,6 @@ new_demuxer_pad_added_cb (GstElement * element, GstPad * pad,
      as-is directly. We still add an event probe to deal with EOS */
   slot = new_output_slot (info, pad);
   output_pad = gst_object_ref (slot->output_pad);
-
-  slot->demuxer_event_probe_id =
-      gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM |
-      GST_PAD_PROBE_TYPE_EVENT_FLUSH, (GstPadProbeCallback) demux_pad_events,
-      slot, NULL);
 
   GST_URI_SOURCE_BIN_UNLOCK (urisrc);
   expose_output_pad (urisrc, output_pad);
@@ -1208,19 +1220,6 @@ setup_multiqueue (GstURISourceBin * urisrc, ChildSrcPadInfo * info,
   gst_element_sync_state_with_parent (info->multiqueue);
 }
 
-static gboolean
-mark_stream_start_parsed (GstPad * pad, GstEvent ** event, gpointer user_data)
-{
-  if (GST_EVENT_TYPE (*event) == GST_EVENT_STREAM_START) {
-    GstStructure *s;
-    *event = gst_event_make_writable (*event);
-    s = (GstStructure *) gst_event_get_structure (*event);
-    gst_structure_set (s, "urisourcebin-parsed-data", G_TYPE_BOOLEAN, TRUE,
-        NULL);
-  }
-  return TRUE;
-}
-
 /* Called with lock held */
 static OutputSlotInfo *
 new_output_slot (ChildSrcPadInfo * info, GstPad * originating_pad)
@@ -1231,6 +1230,7 @@ new_output_slot (ChildSrcPadInfo * info, GstPad * originating_pad)
   GstElement *queue = NULL;
   const gchar *elem_name;
   gboolean use_downloadbuffer;
+  CopyEventData copy_data = { 0, };
 
   GST_DEBUG_OBJECT (urisrc,
       "use_queue2:%d use_downloadbuffer:%d, demuxer:%d, originating_pad:%"
@@ -1260,17 +1260,28 @@ new_output_slot (ChildSrcPadInfo * info, GstPad * originating_pad)
     slot->queue_sinkpad =
         gst_element_request_pad_simple (info->multiqueue, "sink_%u");
     srcpad = gst_pad_get_single_internal_link (slot->queue_sinkpad);
-    if (urisrc->is_adaptive || (slot->linked_info
-            && slot->linked_info->demuxer_is_parsebin)) {
-      /* This is a temporary hack to notify downstream decodebin3 to *not*
-       * plug in an extra parsebin */
-      gst_pad_sticky_events_foreach (originating_pad, mark_stream_start_parsed,
-          NULL);
+    if (urisrc->is_adaptive || (info->demuxer_is_parsebin)) {
+      copy_data.rewrite_stream_start = TRUE;
     }
-    gst_pad_sticky_events_foreach (originating_pad, copy_sticky_events, srcpad);
+    copy_data.target_pad = slot->queue_sinkpad;
+    gst_pad_sticky_events_foreach (originating_pad, copy_sticky_events,
+        &copy_data);
+    copy_data.target_pad = srcpad;
+    gst_pad_sticky_events_foreach (originating_pad, copy_sticky_events,
+        &copy_data);
+
+    if (info->demuxer) {
+      /* Make sure we add the event probe *before* linking */
+      slot->demuxer_event_probe_id =
+          gst_pad_add_probe (originating_pad,
+          GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM | GST_PAD_PROBE_TYPE_EVENT_FLUSH,
+          (GstPadProbeCallback) demux_pad_events, slot, NULL);
+    }
+
     slot->output_pad = create_output_pad (slot, srcpad);
     gst_object_unref (srcpad);
     gst_pad_link (originating_pad, slot->queue_sinkpad);
+    GST_PAD_STREAM_UNLOCK (originating_pad);
   }
   /* If buffering is required, create the element. If downloadbuffer is
    * required, it will take precedence over queue2 */
@@ -1467,6 +1478,7 @@ static void
 expose_output_pad (GstURISourceBin * urisrc, GstPad * pad)
 {
   GstPad *target;
+  CopyEventData copy_data = { 0, };
 
   if (gst_object_has_as_parent (GST_OBJECT (pad), GST_OBJECT (urisrc)))
     return;                     /* Pad is already exposed */
@@ -1474,7 +1486,8 @@ expose_output_pad (GstURISourceBin * urisrc, GstPad * pad)
   target = gst_ghost_pad_get_target (GST_GHOST_PAD (pad));
 
   gst_pad_set_active (pad, TRUE);
-  gst_pad_sticky_events_foreach (target, copy_sticky_events, pad);
+  copy_data.target_pad = pad;
+  gst_pad_sticky_events_foreach (target, copy_sticky_events, &copy_data);
   gst_object_unref (target);
 
   GST_URI_SOURCE_BIN_LOCK (urisrc);
@@ -1512,8 +1525,10 @@ demuxer_pad_removed_cb (GstElement * element, GstPad * pad,
   slot = output_slot_for_originating_pad (info, pad);
   g_assert (slot);
 
-  gst_pad_remove_probe (pad, slot->demuxer_event_probe_id);
-  slot->demuxer_event_probe_id = 0;
+  if (slot->demuxer_event_probe_id) {
+    gst_pad_remove_probe (pad, slot->demuxer_event_probe_id);
+    slot->demuxer_event_probe_id = 0;
+  }
 
   if (slot->pending_pad) {
     /* Switch over to pending pad */

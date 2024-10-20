@@ -65,11 +65,6 @@ GST_STATIC_PAD_TEMPLATE (GST_VIDEO_DECODER_SINK_NAME,
 static GstStaticCaps static_src_caps = GST_STATIC_CAPS (SRC_CAPS);
 static GstStaticCaps static_src_caps_no_drm = GST_STATIC_CAPS (SRC_CAPS_NO_DRM);
 
-static GstStaticPadTemplate src_template =
-GST_STATIC_PAD_TEMPLATE (GST_VIDEO_DECODER_SRC_NAME,
-    GST_PAD_SRC, GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (SRC_CAPS));
-
 struct _GstV4l2CodecVp9Dec
 {
   GstVp9Decoder parent;
@@ -86,6 +81,7 @@ struct _GstV4l2CodecVp9Dec
   gboolean has_videometa;
   gboolean streaming;
   gboolean copy_frames;
+  gboolean need_negotiation;
 
   struct v4l2_ctrl_vp9_frame v4l2_vp9_frame;
   struct v4l2_ctrl_vp9_compressed_hdr v4l2_delta_probs;
@@ -400,9 +396,8 @@ gst_v4l2_codec_vp9_dec_open (GstVideoDecoder * decoder)
       gst_v4l2_decoder_query_control_size (self->decoder,
       V4L2_CID_STATELESS_VP9_COMPRESSED_HDR, NULL);
 
-  /* V4L2 does not support non-keyframe resolution change, this will ask the
-   * base class to drop frame until the next keyframe as a workaround. */
-  gst_vp9_decoder_set_non_keyframe_format_change_support (vp9dec, FALSE);
+  gst_vp9_decoder_set_non_keyframe_format_change_support (vp9dec,
+      gst_v4l2_decoder_has_remove_bufs (self->decoder));
 
   return TRUE;
 }
@@ -477,8 +472,10 @@ gst_v4l2_codec_vp9_dec_negotiate (GstVideoDecoder * decoder)
   GstStaticCaps *static_filter;
 
   /* Ignore downstream renegotiation request. */
-  if (self->streaming)
+  if (!self->need_negotiation)
     goto done;
+
+  self->need_negotiation = FALSE;
 
   GST_DEBUG_OBJECT (self, "Negotiate");
 
@@ -571,11 +568,6 @@ gst_v4l2_codec_vp9_dec_decide_allocation (GstVideoDecoder * decoder,
   guint min = 0;
   guint num_bitstream;
 
-  /* If we are streaming here, then it means there is nothing allocation
-   * related in the new state and allocation can be ignored */
-  if (self->streaming)
-    goto no_internal_changes;
-
   g_clear_object (&self->src_pool);
   g_clear_object (&self->src_allocator);
 
@@ -621,7 +613,6 @@ gst_v4l2_codec_vp9_dec_decide_allocation (GstVideoDecoder * decoder,
 
   self->src_pool = gst_v4l2_codec_pool_new (self->src_allocator, &self->vinfo);
 
-no_internal_changes:
   /* Our buffer pool is internal, we will let the base class create a video
    * pool, and use it if we are running out of buffers or if downstream does
    * not support GstVideoMeta */
@@ -629,23 +620,21 @@ no_internal_changes:
       (decoder, query);
 }
 
-static GstFlowReturn
-gst_v4l2_codec_vp9_dec_new_sequence (GstVp9Decoder * decoder,
-    const GstVp9FrameHeader * frame_hdr, gint max_dpb_size)
+static gboolean
+gst_v4l2_codec_vp9_dec_is_format_change (GstV4l2CodecVp9Dec * self,
+    const GstVp9FrameHeader * frame_hdr)
 {
-  GstV4l2CodecVp9Dec *self = GST_V4L2_CODEC_VP9_DEC (decoder);
-  gboolean negotiation_needed = FALSE;
+  gboolean ret = FALSE;
 
   if (self->vinfo.finfo->format == GST_VIDEO_FORMAT_UNKNOWN)
-    negotiation_needed = TRUE;
+    ret = TRUE;
 
-  /* TODO Check if current buffers are large enough, and reuse them */
   if (self->width != frame_hdr->width || self->height != frame_hdr->height) {
     self->width = frame_hdr->width;
     self->height = frame_hdr->height;
-    negotiation_needed = TRUE;
-    GST_INFO_OBJECT (self, "Resolution changed to %dx%d",
+    GST_DEBUG_OBJECT (self, "Resolution changed to %dx%d",
         self->width, self->height);
+    ret = TRUE;
   }
 
   if (self->subsampling_x != frame_hdr->subsampling_x ||
@@ -656,7 +645,7 @@ gst_v4l2_codec_vp9_dec_new_sequence (GstVp9Decoder * decoder,
         frame_hdr->subsampling_x, frame_hdr->subsampling_y);
     self->subsampling_x = frame_hdr->subsampling_x;
     self->subsampling_y = frame_hdr->subsampling_y;
-    negotiation_needed = TRUE;
+    ret = TRUE;
   }
 
   if (frame_hdr->color_space != GST_VP9_CS_UNKNOWN &&
@@ -665,14 +654,14 @@ gst_v4l2_codec_vp9_dec_new_sequence (GstVp9Decoder * decoder,
     GST_DEBUG_OBJECT (self, "colorspace changed from %d to %d",
         self->color_space, frame_hdr->color_space);
     self->color_space = frame_hdr->color_space;
-    negotiation_needed = TRUE;
+    ret = TRUE;
   }
 
   if (frame_hdr->color_range != self->color_range) {
     GST_DEBUG_OBJECT (self, "color range changed from %d to %d",
         self->color_range, frame_hdr->color_range);
     self->color_range = frame_hdr->color_range;
-    negotiation_needed = TRUE;
+    ret = TRUE;
   }
 
   if (frame_hdr->profile != GST_VP9_PROFILE_UNDEFINED &&
@@ -680,23 +669,61 @@ gst_v4l2_codec_vp9_dec_new_sequence (GstVp9Decoder * decoder,
     GST_DEBUG_OBJECT (self, "profile changed from %d to %d", self->profile,
         frame_hdr->profile);
     self->profile = frame_hdr->profile;
-    negotiation_needed = TRUE;
+    ret = TRUE;
   }
 
   if (frame_hdr->bit_depth != self->bit_depth) {
     GST_DEBUG_OBJECT (self, "bit-depth changed from %d to %d",
         self->bit_depth, frame_hdr->bit_depth);
     self->bit_depth = frame_hdr->bit_depth;
-    negotiation_needed = TRUE;
+    ret = TRUE;
   }
+
+  return ret;
+}
+
+static GstFlowReturn
+gst_v4l2_codec_vp9_dec_new_picture (GstVp9Decoder * decoder,
+    GstVideoCodecFrame * frame, GstVp9Picture * picture)
+{
+  GstV4l2CodecVp9Dec *self = GST_V4L2_CODEC_VP9_DEC (decoder);
+
+  self->need_negotiation =
+      gst_v4l2_codec_vp9_dec_is_format_change (self, &picture->frame_hdr);
+
+  if (!self->need_negotiation)
+    return GST_FLOW_OK;
+
+  if (!gst_video_decoder_negotiate (GST_VIDEO_DECODER (self))) {
+    GST_ERROR_OBJECT (self, "Failed to negotiate with downstream");
+    return GST_FLOW_ERROR;
+  }
+
+  return GST_FLOW_OK;
+}
+
+static GstFlowReturn
+gst_v4l2_codec_vp9_dec_new_sequence (GstVp9Decoder * decoder,
+    const GstVp9FrameHeader * frame_hdr, gint max_dpb_size)
+{
+  GstV4l2CodecVp9Dec *self = GST_V4L2_CODEC_VP9_DEC (decoder);
+
+  /* TODO Check if current buffers are large enough, and reuse them */
+  self->need_negotiation =
+      gst_v4l2_codec_vp9_dec_is_format_change (self, frame_hdr);
 
   gst_v4l2_codec_vp9_dec_fill_dec_params (self, frame_hdr, NULL);
 
   if (decoder->parse_compressed_headers)
     gst_v4l2_codec_vp9_dec_fill_prob_updates (self, frame_hdr);
 
-  if (negotiation_needed) {
-    gst_v4l2_codec_vp9_dec_streamoff (self);
+  if (self->need_negotiation) {
+    /* If the negotiation request occurs on a key frame or
+     * remove buffer isn't supported do a stream off */
+    if ((frame_hdr->frame_type == GST_VP9_KEY_FRAME)
+        || !gst_v4l2_decoder_has_remove_bufs (self->decoder)) {
+      gst_v4l2_codec_vp9_dec_streamoff (self);
+    }
     if (!gst_video_decoder_negotiate (GST_VIDEO_DECODER (self))) {
       GST_ERROR_OBJECT (self, "Failed to negotiate with downstream");
       return GST_FLOW_ERROR;
@@ -1131,6 +1158,7 @@ gst_v4l2_codec_vp9_dec_get_property (GObject * object, guint prop_id,
 static void
 gst_v4l2_codec_vp9_dec_init (GstV4l2CodecVp9Dec * self)
 {
+  self->need_negotiation = TRUE;
 }
 
 static void
@@ -1177,7 +1205,10 @@ gst_v4l2_codec_vp9_dec_subclass_init (GstV4l2CodecVp9DecClass * klass,
       "Daniel Almeida <daniel.almeida@collabora.com>");
 
   gst_element_class_add_static_pad_template (element_class, &sink_template);
-  gst_element_class_add_static_pad_template (element_class, &src_template);
+  gst_element_class_add_pad_template (element_class,
+      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
+          device->src_caps));
+
   element_class->change_state =
       GST_DEBUG_FUNCPTR (gst_v4l2_codec_vp9_dec_change_state);
 
@@ -1194,6 +1225,8 @@ gst_v4l2_codec_vp9_dec_subclass_init (GstV4l2CodecVp9DecClass * klass,
 
   vp9decoder_class->new_sequence =
       GST_DEBUG_FUNCPTR (gst_v4l2_codec_vp9_dec_new_sequence);
+  vp9decoder_class->new_picture =
+      GST_DEBUG_FUNCPTR (gst_v4l2_codec_vp9_dec_new_picture);
   vp9decoder_class->start_picture =
       GST_DEBUG_FUNCPTR (gst_v4l2_codec_vp9_dec_start_picture);
   vp9decoder_class->decode_picture =
@@ -1240,6 +1273,8 @@ gst_v4l2_codec_vp9_dec_register (GstPlugin * plugin, GstV4l2Decoder * decoder,
   if (!gst_v4l2_decoder_set_sink_fmt (decoder, V4L2_PIX_FMT_VP9_FRAME,
           320, 240, 8))
     return;
+
+  /* Make sure that decoder support stateless VP9 */
   src_caps = gst_v4l2_decoder_enum_src_formats (decoder, &static_src_caps);
 
   if (gst_caps_is_empty (src_caps)) {
@@ -1247,6 +1282,10 @@ gst_v4l2_codec_vp9_dec_register (GstPlugin * plugin, GstV4l2Decoder * decoder,
         "supported format");
     goto done;
   }
+
+  /* Get all supported pixel formats for VP9 */
+  device->src_caps =
+      gst_v4l2_decoder_enum_all_src_formats (decoder, &static_src_caps);
 
   gst_v4l2_decoder_register (plugin, GST_TYPE_V4L2_CODEC_VP9_DEC,
       (GClassInitFunc) gst_v4l2_codec_vp9_dec_subclass_init,
@@ -1259,7 +1298,7 @@ gst_v4l2_codec_vp9_dec_register (GstPlugin * plugin, GstV4l2Decoder * decoder,
 
   alpha_caps = gst_caps_from_string ("video/x-raw,format={I420, NV12}");
 
-  if (gst_caps_can_intersect (src_caps, alpha_caps))
+  if (gst_caps_can_intersect (device->src_caps, alpha_caps))
     gst_v4l2_codec_alpha_decode_bin_register (plugin,
         (GClassInitFunc) gst_v4l2_codec_vp9_alpha_decode_bin_subclass_init,
         element_name, "v4l2slvp9%salphadecodebin", device, rank);
