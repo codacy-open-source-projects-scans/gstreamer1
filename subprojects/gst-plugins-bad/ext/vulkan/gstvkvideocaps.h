@@ -1,8 +1,5 @@
-/*
- * GStreamer gstreamer-ml
- * Copyright (C) 2021 Collabora Ltd
- *
- * gstml.h
+/* GStreamer
+ * Copyright (C) 2025 Igalia, S.L.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -19,23 +16,16 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
-#ifndef __GST_ML_H__
-#define __GST_ML_H__
 
+#pragma once
 
-/**
- * GstMlInputImageFormat:
- *
- * @GST_ML_INPUT_IMAGE_FORMAT_HWC Height Width Channel (a.k.a. interleaved) format
- * @GST_ML_INPUT_IMAGE_FORMAT_CHW Channel Height Width  (a.k.a. planar) format
- *
- * Since: 1.20
- */
-typedef enum {
-  GST_ML_INPUT_IMAGE_FORMAT_HWC,
-  GST_ML_INPUT_IMAGE_FORMAT_CHW,
-} GstMlInputImageFormat;
+#include <gst/vulkan/vulkan.h>
 
+G_BEGIN_DECLS
 
+gboolean                gst_vulkan_physical_device_codec_caps   (GstVulkanPhysicalDevice * device,
+                                                                 VkVideoCodecOperationFlagBitsKHR codec,
+                                                                 GstCaps ** codec_caps,
+                                                                 GstCaps ** raw_caps);
 
-#endif
+G_END_DECLS

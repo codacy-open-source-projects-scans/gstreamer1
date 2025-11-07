@@ -21,10 +21,11 @@
 #include "vkav1dec.h"
 
 #include <gst/video/video.h>
-#include <gst/vulkan/vulkan.h>
-#include <gst/codecparsers/gstav1parser.h>
-#include "gst/vulkan/gstvkphysicaldevice-private.h"
+#include <gst/codecs/gstav1decoder.h>
+
 #include "gst/vulkan/gstvkdecoder-private.h"
+#include "gst/vulkan/gstvkphysicaldevice-private.h"
+#include "gstvkvideocaps.h"
 #include "gstvulkanelements.h"
 
 #define GST_VULKAN_AV1_DECODER(obj)            ((GstVulkanAV1Decoder *) obj)
@@ -77,16 +78,6 @@ struct _GstVulkanAV1DecoderClass
 };
 
 static GstElementClass *parent_class = NULL;
-
-static GstStaticPadTemplate gst_vulkan_av1dec_sink_template =
-GST_STATIC_PAD_TEMPLATE (GST_VIDEO_DECODER_SINK_NAME,
-    GST_PAD_SINK, GST_PAD_ALWAYS,
-    GST_STATIC_CAPS ("video/x-av1, alignment=frame"));
-
-static GstStaticPadTemplate gst_vulkan_av1dec_src_template =
-GST_STATIC_PAD_TEMPLATE ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE_WITH_FEATURES
-        (GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, "NV12")));
 
 GST_DEBUG_CATEGORY (gst_vulkan_av1_decoder_debug);
 #define GST_CAT_DEFAULT gst_vulkan_av1_decoder_debug
@@ -947,7 +938,6 @@ gst_vulkan_av1_decoder_start_picture (GstAV1Decoder * decoder,
     .qm_v = qp->qm_v,
   };
 
-
   pic->loop_filter = (StdVideoAV1LoopFilter) {
     .flags = (StdVideoAV1LoopFilterFlags) {
       .loop_filter_delta_enabled = lf->loop_filter_delta_enabled,
@@ -960,11 +950,9 @@ gst_vulkan_av1_decoder_start_picture (GstAV1Decoder * decoder,
   for (i = 0; i < STD_VIDEO_AV1_TOTAL_REFS_PER_FRAME; i++)
     pic->loop_filter.loop_filter_ref_deltas[i] = lf->loop_filter_ref_deltas[i];
 
-
   for (i = 0; i < STD_VIDEO_AV1_LOOP_FILTER_ADJUSTMENTS; i++)
     pic->loop_filter.loop_filter_mode_deltas[i] =
         lf->loop_filter_mode_deltas[i];
-
 
   for (i = 0; i < STD_VIDEO_AV1_MAX_LOOP_FILTER_STRENGTHS; i++)
     pic->loop_filter.loop_filter_level[i] = lf->loop_filter_level[i];
@@ -1056,46 +1044,46 @@ gst_vulkan_av1_decoder_start_picture (GstAV1Decoder * decoder,
   }
   /* *INDENT-OFF* */
   pic->std_av1pic = (StdVideoDecodeAV1PictureInfo) {
-    .flags = (StdVideoDecodeAV1PictureInfoFlags) {
-            .error_resilient_mode = fh->error_resilient_mode,
-            .disable_cdf_update = fh->disable_cdf_update,
-            .use_superres = fh->use_superres,
-            .render_and_frame_size_different = fh->render_and_frame_size_different,
-            .allow_screen_content_tools = fh->allow_screen_content_tools,
-            .is_filter_switchable = fh->is_filter_switchable,
-            .force_integer_mv = fh->force_integer_mv,
-            .frame_size_override_flag = fh->frame_size_override_flag,
-            .buffer_removal_time_present_flag = fh->buffer_removal_time_present_flag,
-            .allow_intrabc = fh->allow_intrabc,
-            .frame_refs_short_signaling = fh->frame_refs_short_signaling,
-            .allow_high_precision_mv = fh->allow_high_precision_mv,
-            .is_motion_mode_switchable = fh->is_motion_mode_switchable,
-            .use_ref_frame_mvs = fh->use_ref_frame_mvs,
-            .disable_frame_end_update_cdf = fh->disable_frame_end_update_cdf,
-            .allow_warped_motion = fh->allow_warped_motion,
-            .reduced_tx_set = fh->reduced_tx_set,
-            .reference_select = fh->reference_select,
-            .skip_mode_present = fh->skip_mode_present,
-            .delta_q_present = qp->delta_q_present,
-            .delta_lf_present = lf->delta_lf_present,
-            .delta_lf_multi = lf->delta_lf_multi,
-            .segmentation_enabled = seg->segmentation_enabled,
-            .segmentation_update_map = seg->segmentation_update_map,
-            .segmentation_temporal_update = seg->segmentation_temporal_update,
-            .segmentation_update_data = seg->segmentation_update_data,
-            .UsesLr = lr->uses_lr,
+    .flags = (StdVideoDecodeAV1PictureInfoFlags){
+      .error_resilient_mode = fh->error_resilient_mode,
+      .disable_cdf_update = fh->disable_cdf_update,
+      .use_superres = fh->use_superres,
+      .render_and_frame_size_different = fh->render_and_frame_size_different,
+      .allow_screen_content_tools = fh->allow_screen_content_tools,
+      .is_filter_switchable = fh->is_filter_switchable,
+      .force_integer_mv = fh->force_integer_mv,
+      .frame_size_override_flag = fh->frame_size_override_flag,
+      .buffer_removal_time_present_flag = fh->buffer_removal_time_present_flag,
+      .allow_intrabc = fh->allow_intrabc,
+      .frame_refs_short_signaling = fh->frame_refs_short_signaling,
+      .allow_high_precision_mv = fh->allow_high_precision_mv,
+      .is_motion_mode_switchable = fh->is_motion_mode_switchable,
+      .use_ref_frame_mvs = fh->use_ref_frame_mvs,
+      .disable_frame_end_update_cdf = fh->disable_frame_end_update_cdf,
+      .allow_warped_motion = fh->allow_warped_motion,
+      .reduced_tx_set = fh->reduced_tx_set,
+      .reference_select = fh->reference_select,
+      .skip_mode_present = fh->skip_mode_present,
+      .delta_q_present = qp->delta_q_present,
+      .delta_lf_present = lf->delta_lf_present,
+      .delta_lf_multi = lf->delta_lf_multi,
+      .segmentation_enabled = seg->segmentation_enabled,
+      .segmentation_update_map = seg->segmentation_update_map,
+      .segmentation_temporal_update = seg->segmentation_temporal_update,
+      .segmentation_update_data = seg->segmentation_update_data,
+      .UsesLr = lr->uses_lr,
     },
-    .frame_type = (StdVideoAV1FrameType) fh->frame_type,
+    .frame_type = (StdVideoAV1FrameType)fh->frame_type,
     .current_frame_id = fh->current_frame_id,
     .OrderHint = fh->order_hint,
     .primary_ref_frame = fh->primary_ref_frame,
     .refresh_frame_flags = fh->refresh_frame_flags,
-    .interpolation_filter = (StdVideoAV1InterpolationFilter) fh->interpolation_filter,
+    .interpolation_filter =
+        (StdVideoAV1InterpolationFilter) fh->interpolation_filter,
     .TxMode = (StdVideoAV1TxMode) fh->tx_mode,
     .delta_q_res = qp->delta_q_res,
     .delta_lf_res = lf->delta_lf_res,
-    .SkipModeFrame[0] = fh->skip_mode_frame[0],
-    .SkipModeFrame[1] = fh->skip_mode_frame[1],
+    .SkipModeFrame = { fh->skip_mode_frame[0], fh->skip_mode_frame[1], },
     .coded_denom = fh->use_superres ? fh->superres_denom - 9 : 0,
     /* .OrderHints (filled below) */
     .pTileInfo = &pic->tile_info,
@@ -1107,10 +1095,12 @@ gst_vulkan_av1_decoder_start_picture (GstAV1Decoder * decoder,
     .pGlobalMotion = &pic->global_motion,
     .pFilmGrain = &pic->film_grain,
   };
+  /* *INDENT-ON* */
 
   for (i = 0; i < VK_MAX_VIDEO_AV1_REFERENCES_PER_FRAME_KHR; i++)
     pic->std_av1pic.OrderHints[i] = fh->order_hints[i];
 
+  /* *INDENT-OFF* */
   pic->vk_av1pic = (VkVideoDecodeAV1PictureInfoKHR) {
     .sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PICTURE_INFO_KHR,
     .pStdPictureInfo = &pic->std_av1pic,
@@ -1122,7 +1112,6 @@ gst_vulkan_av1_decoder_start_picture (GstAV1Decoder * decoder,
      * const uint32_t*                        pTileOffsets;
      * const uint32_t*                        pTileSizes;
      */
-
   };
   /* *INDENT-ON* */
 
@@ -1189,7 +1178,7 @@ gst_vulkan_av1_decoder_start_picture (GstAV1Decoder * decoder,
     .pReferenceSlots = (const VkVideoReferenceSlotInfoKHR *) &pic->base.slots,
     .dstPictureResource = {
       .sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR,
-    // .codedOffset = {0, 0} /* is there any cropping rectangle in AV1? */
+      // .codedOffset = {0, 0} /* is there any cropping rectangle in AV1? */
       .codedExtent = { self->coded_width, self->coded_height },
       .baseArrayLayer = 0,
       .imageViewBinding = pic->base.img_view_out->view,
@@ -1346,6 +1335,8 @@ struct CData
 {
   gchar *description;
   gint device_index;
+  GstCaps *codec;
+  GstCaps *raw;
 };
 
 static void
@@ -1359,7 +1350,8 @@ gst_vulkan_av1_decoder_class_init (gpointer klass, gpointer class_data)
   struct CData *cdata = class_data;
   gchar *long_name;
   const gchar *name;
-
+  GstPadTemplate *sink_pad_template, *src_pad_template;
+  GstCaps *sink_doc_caps, *src_doc_caps;
 
   name = "Vulkan AV1 decoder";
   if (cdata->description)
@@ -1375,11 +1367,25 @@ gst_vulkan_av1_decoder_class_init (gpointer klass, gpointer class_data)
 
   parent_class = g_type_class_peek_parent (klass);
 
-  gst_element_class_add_static_pad_template (element_class,
-      &gst_vulkan_av1dec_sink_template);
+  sink_doc_caps = gst_caps_from_string ("video/x-av1, "
+      "profile = (string) { main, high }, alignment = (string) frame");
+  src_doc_caps =
+      gst_caps_from_string (GST_VIDEO_CAPS_MAKE_WITH_FEATURES
+      (GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, "NV12"));
 
-  gst_element_class_add_static_pad_template (element_class,
-      &gst_vulkan_av1dec_src_template);
+  sink_pad_template =
+      gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS, cdata->codec);
+  gst_element_class_add_pad_template (element_class, sink_pad_template);
+
+  src_pad_template =
+      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS, cdata->raw);
+  gst_element_class_add_pad_template (element_class, src_pad_template);
+
+  gst_pad_template_set_documentation_caps (sink_pad_template, sink_doc_caps);
+  gst_caps_unref (sink_doc_caps);
+
+  gst_pad_template_set_documentation_caps (src_pad_template, src_doc_caps);
+  gst_caps_unref (src_doc_caps);
 
   element_class->set_context =
       GST_DEBUG_FUNCPTR (gst_vulkan_av1_decoder_set_context);
@@ -1432,12 +1438,27 @@ gst_vulkan_av1_decoder_register (GstPlugin * plugin, GstVulkanDevice * device,
   struct CData *cdata;
   gboolean ret;
   gchar *type_name, *feature_name;
+  GstCaps *codec = NULL, *raw = NULL;
+
+  g_return_val_if_fail (GST_IS_PLUGIN (plugin), FALSE);
+  g_return_val_if_fail (GST_IS_VULKAN_DEVICE (device), FALSE);
+
+  if (!gst_vulkan_physical_device_codec_caps (device->physical_device,
+          VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR, &codec, &raw)) {
+    gst_plugin_add_status_warning (plugin,
+        "Unable to query AV1 decoder properties");
+    return FALSE;
+  }
 
   cdata = g_new (struct CData, 1);
   cdata->description = NULL;
   cdata->device_index = device->physical_device->device_index;
+  cdata->codec = codec;
+  cdata->raw = raw;
 
-  g_return_val_if_fail (GST_IS_PLUGIN (plugin), FALSE);
+  /* class data will be leaked if the element never gets instantiated */
+  GST_MINI_OBJECT_FLAG_SET (cdata->codec, GST_MINI_OBJECT_FLAG_MAY_BE_LEAKED);
+  GST_MINI_OBJECT_FLAG_SET (cdata->raw, GST_MINI_OBJECT_FLAG_MAY_BE_LEAKED);
 
   gst_vulkan_create_feature_name (device, "GstVulkanAV1Decoder",
       "GstVulkanAV1Device%dDecoder", &type_name, "vulkanav1dec",
