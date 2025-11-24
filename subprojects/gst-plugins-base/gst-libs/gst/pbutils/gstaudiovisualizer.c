@@ -1082,20 +1082,20 @@ gst_audio_visualizer_chain (GstPad * pad, GstObject * parent,
   bpf = GST_AUDIO_INFO_BPF (&scope->ainfo);
 
   if (bpf == 0) {
-    ret = GST_FLOW_NOT_NEGOTIATED;
-    goto beach;
+    goto not_negotiated;
   }
-
-  gst_adapter_push (scope->priv->adapter, buffer);
 
   g_mutex_lock (&scope->priv->config_lock);
 
-  /* this is what we want */
-  sbpf = scope->req_spf * bpf;
-
   inbuf = scope->priv->inbuf;
+
   /* FIXME: the timestamp in the adapter would be different */
   gst_buffer_copy_into (inbuf, buffer, GST_BUFFER_COPY_METADATA, 0, -1);
+
+  gst_adapter_push (scope->priv->adapter, buffer);
+
+  /* this is what we want */
+  sbpf = scope->req_spf * bpf;
 
   /* this is what we have */
   avail = gst_adapter_available (scope->priv->adapter);
@@ -1195,7 +1195,7 @@ gst_audio_visualizer_chain (GstPad * pad, GstObject * parent,
       if (!klass->render (scope, inbuf, &outframe)) {
         ret = GST_FLOW_ERROR;
         gst_video_frame_unmap (&outframe);
-        goto beach;
+        break;
       } else {
         /* run various post processing (shading and geometric transformation) */
         /* FIXME: SHADER assumes 32bpp */
@@ -1219,11 +1219,9 @@ gst_audio_visualizer_chain (GstPad * pad, GstObject * parent,
     /* we want to take less or more, depending on spf : req_spf */
     if (avail - sbpf >= sbpf) {
       gst_adapter_flush (scope->priv->adapter, sbpf);
-      gst_adapter_unmap (scope->priv->adapter);
     } else if (avail >= sbpf) {
       /* just flush a bit and stop */
       gst_adapter_flush (scope->priv->adapter, (avail - sbpf));
-      gst_adapter_unmap (scope->priv->adapter);
       break;
     }
     avail = gst_adapter_available (scope->priv->adapter);
@@ -1234,13 +1232,13 @@ gst_audio_visualizer_chain (GstPad * pad, GstObject * parent,
 
   g_mutex_unlock (&scope->priv->config_lock);
 
-beach:
   return ret;
 
   /* ERRORS */
 not_negotiated:
   {
     GST_DEBUG_OBJECT (scope, "Failed to renegotiate");
+    gst_buffer_unref (buffer);
     return GST_FLOW_NOT_NEGOTIATED;
   }
 }
