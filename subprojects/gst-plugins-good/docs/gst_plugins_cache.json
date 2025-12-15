@@ -6980,7 +6980,7 @@
                 "long-name": "FLAC audio encoder",
                 "pad-templates": {
                     "sink": {
-                        "caps": "audio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 1\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 2\n   channel-mask: 0x0000000000000003\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 3\n   channel-mask: 0x0000000000000007\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 4\n   channel-mask: 0x0000000000000033\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 5\n   channel-mask: 0x0000000000000037\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 6\n   channel-mask: 0x000000000000003f\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 7\n   channel-mask: 0x000000000000013f\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 8\n   channel-mask: 0x0000000000000c3f\n",
+                        "caps": "audio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 1\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 2\n   channel-mask: 0x0000000000000003\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 3\n   channel-mask: 0x0000000000000007\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 4\n   channel-mask: 0x0000000000000033\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 5\n   channel-mask: 0x0000000000000037\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 6\n   channel-mask: 0x000000000000003f\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 7\n   channel-mask: 0x0000000000000d0f\naudio/x-raw:\n         format: { S8, S16LE, S24LE, S24_32LE, S32LE }\n         layout: interleaved\n           rate: [ 1, 655350 ]\n       channels: 8\n   channel-mask: 0x0000000000000c3f\n",
                         "direction": "sink",
                         "presence": "always"
                     },
@@ -12613,6 +12613,80 @@
                     },
                     "widget": {
                         "blurb": "The QQuickItem to place the input video in the object hierarchy",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gpointer",
+                        "writable": true
+                    }
+                },
+                "rank": "none",
+                "signals": {
+                    "qml-scene-destroyed": {
+                        "args": [],
+                        "return-type": "void",
+                        "when": "last"
+                    },
+                    "qml-scene-initialized": {
+                        "args": [],
+                        "return-type": "void",
+                        "when": "last"
+                    }
+                }
+            },
+            "qml6glrendersrc": {
+                "author": "Matthew Waters <matthew@centricular.com>",
+                "description": "A video src that renders a QML scene",
+                "hierarchy": [
+                    "GstQml6GLRenderSrc",
+                    "GstGLBaseSrc",
+                    "GstPushSrc",
+                    "GstBaseSrc",
+                    "GstElement",
+                    "GstObject",
+                    "GInitiallyUnowned",
+                    "GObject"
+                ],
+                "klass": "Source/Video",
+                "pad-templates": {
+                    "src": {
+                        "caps": "video/x-raw(memory:GLMemory):\n         format: RGBA\n          width: [ 1, 2147483647 ]\n         height: [ 1, 2147483647 ]\n      framerate: [ 0/1, 2147483647/1 ]\n texture-target: 2D\n",
+                        "direction": "src",
+                        "presence": "always"
+                    }
+                },
+                "properties": {
+                    "max-framerate": {
+                        "blurb": "The maximum framerate to render when running with a variable framerate",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "25/1",
+                        "max": "2147483647/1",
+                        "min": "0/2147483647",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "GstFraction",
+                        "writable": true
+                    },
+                    "qml-scene": {
+                        "blurb": "The contents of the QML scene",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "NULL",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "gchararray",
+                        "writable": true
+                    },
+                    "root-item": {
+                        "blurb": "Provides the 'QQuickItem *' to render.",
                         "conditionally-available": false,
                         "construct": false,
                         "construct-only": false,

@@ -3064,9 +3064,14 @@ priv_gst_structure_append_to_gstring (const GstStructure * structure,
     g_string_append_len (s, ", ", 2);
     /* FIXME: do we need to escape fieldnames? */
     g_string_append (s, gst_id_str_as_str (&field->name));
-    g_string_append_len (s, "=(", 2);
-    g_string_append (s, _priv_gst_value_gtype_to_abbr (type));
-    g_string_append_c (s, ')');
+
+    if (t != NULL && t[0] == '(') {
+      g_string_append_len (s, "=", 1);
+    } else {
+      g_string_append_len (s, "=(", 2);
+      g_string_append (s, _priv_gst_value_gtype_to_abbr (type));
+      g_string_append_c (s, ')');
+    }
     if (nested_structs_brackets
         && G_VALUE_TYPE (&field->value) == GST_TYPE_STRUCTURE) {
       const GstStructure *substruct = gst_value_get_structure (&field->value);
@@ -3289,7 +3294,7 @@ gst_structure_parse_field (gchar * str,
   while (g_ascii_isspace (*s) || (s[0] == '\\' && g_ascii_isspace (s[1])))
     s++;
   name = s;
-  if (G_UNLIKELY (!_priv_gst_value_parse_simple_string (s, &name_end))) {
+  if (G_UNLIKELY (!_priv_gst_value_parse_simple_string (s, &name_end, '\0'))) {
     GST_WARNING ("failed to parse simple string, str=%s", str);
     return FALSE;
   }

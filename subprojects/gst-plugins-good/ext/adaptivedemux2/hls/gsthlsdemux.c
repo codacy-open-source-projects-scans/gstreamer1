@@ -220,6 +220,7 @@ static void
 gst_hls_demux2_init (GstHLSDemux * demux)
 {
   demux->keys = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+  demux->start_bitrate = DEFAULT_START_BITRATE;
   g_mutex_init (&demux->keys_lock);
 }
 
@@ -296,11 +297,17 @@ gst_hls_demux_wait_for_variant_playlist (GstHLSDemux * hlsdemux)
 
   while ((flow_ret = gst_hls_demux_check_variant_playlist_loaded (hlsdemux)
           == GST_ADAPTIVE_DEMUX_FLOW_BUSY)) {
-    if (!gst_adaptive_demux2_stream_wait_prepared (GST_ADAPTIVE_DEMUX2_STREAM
-            (hlsdemux->main_stream))) {
-      GST_DEBUG_OBJECT (hlsdemux,
-          "Interrupted waiting for stream to be prepared");
-      return GST_FLOW_FLUSHING;
+    GstAdaptiveDemux2Stream *stream =
+        GST_ADAPTIVE_DEMUX2_STREAM (hlsdemux->main_stream);
+
+    if (stream->state != GST_ADAPTIVE_DEMUX2_STREAM_STATE_STOPPED) {
+      stream->state = GST_ADAPTIVE_DEMUX2_STREAM_STATE_WAITING_PREPARE;
+
+      if (!gst_adaptive_demux2_stream_wait_prepared (stream)) {
+        GST_DEBUG_OBJECT (hlsdemux,
+            "Interrupted waiting for stream to be prepared");
+        return GST_FLOW_FLUSHING;
+      }
     }
   }
 
@@ -451,7 +458,9 @@ create_main_variant_stream (GstHLSDemux * demux)
 
   gst_hls_demux_stream_set_playlist_uri (hlsdemux_stream,
       demux->current_variant->uri);
-  gst_hls_demux_stream_start_playlist_loading (hlsdemux_stream);
+
+  /* Start this stream, which will trigger a playlist load */
+  gst_adaptive_demux2_stream_start (stream);
 }
 
 GstAdaptiveDemuxTrack *
@@ -550,7 +559,8 @@ existing_rendition_stream (GList * streams, GstHLSRenditionStream * media)
     if (demux_stream->rendition_type == stream_type) {
       if (!g_strcmp0 (demux_stream->name, media->name))
         return demux_stream;
-      if (media->lang && !g_strcmp0 (demux_stream->lang, media->lang))
+      if (media->name == NULL && media->lang
+          && !g_strcmp0 (demux_stream->lang, media->lang))
         return demux_stream;
     }
   }

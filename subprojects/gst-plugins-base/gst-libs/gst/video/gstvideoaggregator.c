@@ -545,6 +545,9 @@ gst_video_aggregator_convert_pad_prepare_frame (GstVideoAggregatorPad * vpad,
     converted_size = converted_size > outsize ? converted_size : outsize;
     converted_buf = gst_buffer_new_allocate (NULL, converted_size, &params);
 
+    gst_video_converter_transform_metas (pad->priv->convert, buffer,
+        converted_buf);
+
     if (!gst_video_frame_map (&converted_frame, &(pad->priv->conversion_info),
             converted_buf, GST_MAP_READWRITE)) {
       GST_WARNING_OBJECT (vagg, "Could not map converted frame");
@@ -854,6 +857,9 @@ static void
     outsize = GST_VIDEO_INFO_SIZE (&vagg->info);
     converted_size = converted_size > outsize ? converted_size : outsize;
     converted_buf = gst_buffer_new_allocate (NULL, converted_size, &params);
+
+    gst_video_converter_transform_metas (pad->priv->convert, buffer,
+        converted_buf);
 
     if (!gst_video_frame_map (prepared_frame, &(pad->priv->conversion_info),
             converted_buf, GST_MAP_READWRITE)) {
@@ -2822,9 +2828,15 @@ gst_video_aggregator_decide_allocation (GstAggregator * agg, GstQuery * query)
 
     /* If change are not acceptable, fallback to generic pool */
     if (!gst_buffer_pool_config_validate_params (config, caps, size, min, max)) {
+      gst_structure_free (config);
+      gst_clear_object (&pool);
+    } else if (!gst_buffer_pool_set_config (pool, config)) {
+      gst_clear_object (&pool);
+    }
+
+    if (!pool) {
       GST_DEBUG_OBJECT (agg, "unsupported pool, making new pool");
 
-      gst_object_unref (pool);
       pool = gst_video_buffer_pool_new ();
       {
         gchar *name =
@@ -2832,6 +2844,7 @@ gst_video_aggregator_decide_allocation (GstAggregator * agg, GstQuery * query)
         g_object_set (pool, "name", name, NULL);
         g_free (name);
       }
+      config = gst_buffer_pool_get_config (pool);
       gst_buffer_pool_config_set_params (config, caps, size, min, max);
       gst_buffer_pool_config_set_allocator (config, allocator, &params);
 
@@ -2839,10 +2852,10 @@ gst_video_aggregator_decide_allocation (GstAggregator * agg, GstQuery * query)
         gst_buffer_pool_config_add_option (config,
             GST_BUFFER_POOL_OPTION_VIDEO_META);
       }
-    }
 
-    if (!gst_buffer_pool_set_config (pool, config))
-      goto config_failed;
+      if (!gst_buffer_pool_set_config (pool, config))
+        goto config_failed;
+    }
   }
 
   if (update)
@@ -3107,9 +3120,6 @@ gst_video_aggregator_setup_task_pool (GstVideoAggregator * vagg)
 
   GST_OBJECT_LOCK (vagg);
   if (!vagg->priv->task_pool) {
-    GstContext *context;
-    GstMessage *msg;
-
     /* Create default task pool if none provided */
     vagg->priv->task_pool = gst_shared_task_pool_new ();
     gst_shared_task_pool_set_max_threads (GST_SHARED_TASK_POOL (vagg->
@@ -3118,23 +3128,11 @@ gst_video_aggregator_setup_task_pool (GstVideoAggregator * vagg)
     vagg->priv->task_pool_from_context = FALSE;
     GST_DEBUG_OBJECT (vagg, "Created default task pool with %d threads",
         g_get_num_processors ());
-
-    /* Post have-context message to let the application know about the pool */
-    context = gst_context_new (GST_TASK_POOL_CONTEXT_TYPE, FALSE);
-    gst_context_set_task_pool (context, vagg->priv->task_pool);
-    pool = gst_object_ref (vagg->priv->task_pool);
-    GST_OBJECT_UNLOCK (vagg);
-
-    msg = gst_message_new_have_context (GST_OBJECT_CAST (vagg), context);
-    gst_element_post_message (GST_ELEMENT (vagg), msg);
-
-    goto done;
-  } else {
-    pool = gst_object_ref (vagg->priv->task_pool);
   }
+
+  pool = gst_object_ref (vagg->priv->task_pool);
   GST_OBJECT_UNLOCK (vagg);
 
-done:
   return pool;
 }
 
