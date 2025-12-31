@@ -26,7 +26,13 @@
  */
 
 #ifdef HAVE_CONFIG_H
+#include "config.h"
 #endif
+
+#ifdef HAVE_VALGRIND
+# include <valgrind/valgrind.h>
+#endif
+
 #include <gst/gst.h>
 #include <gst/check/gstcheck.h>
 #include <gst/app/app.h>
@@ -45,16 +51,17 @@ push_buffers (GstAppSrc * src)
   char *data;
   GstClockTime pts = 0;
 
-  g_assert (src != NULL);
+  g_assert_nonnull (src);
+  gst_object_ref (src);
 
   caps = gst_app_src_get_caps (src);
   fail_unless (caps != NULL);
   s = gst_caps_get_structure (caps, 0);
-  g_assert (s != NULL);
-  g_assert (gst_structure_get_int (s, "id", &id));
-  g_assert (id < 256);
+  g_assert_nonnull (s);
+  fail_unless (gst_structure_get_int (s, "id", &id));
+  fail_unless (id < 256);
 
-  gst_object_ref (src);
+  gst_caps_unref (caps);
 
   while (TRUE) {
     g_usleep (BUFFER_INTERVAL);
@@ -67,7 +74,7 @@ push_buffers (GstAppSrc * src)
     if (gst_app_src_push_buffer (src, buffer) != GST_FLOW_OK)
       break;
 
-    g_print ("Pushed buffer to src %d\n", id);
+    GST_DEBUG_OBJECT (src, "Pushed buffer to src %d", id);
 
     pts += (GstClockTime) BUFFER_INTERVAL;
   }
@@ -83,26 +90,33 @@ switch_sinkpads (GstElement * selector)
   gchar active_pad_id = 0;
   gchar active_pad_name[] = "sink_0";
   GstPad *pad;
+  gulong delay = SWITCH_INTERVAL;
+
+#ifdef HAVE_VALGRIND
+  if (RUNNING_ON_VALGRIND) {
+    delay *= 20;
+  }
+#endif
 
   gst_object_ref (selector);
 
   while (TRUE) {
-    g_usleep (SWITCH_INTERVAL);
+    g_usleep (delay);
     state_change_ret =
         gst_element_get_state (GST_ELEMENT (selector), &state, NULL,
         GST_CLOCK_TIME_NONE);
     if (state_change_ret != GST_STATE_CHANGE_SUCCESS
         || state < GST_STATE_PAUSED) {
-      g_print ("Exiting switch_sinkpads loop");
+      GST_DEBUG_OBJECT (selector, "Exiting switch_sinkpads loop");
       break;
     }
 
     active_pad_id = (active_pad_id + 1) % 2;
     g_snprintf (active_pad_name, sizeof (active_pad_name), "sink_%d",
         active_pad_id);
-    g_print ("switching to pad %s\n", active_pad_name);
+    GST_DEBUG_OBJECT (selector, "switching to pad %s", active_pad_name);
     pad = gst_element_get_static_pad (selector, active_pad_name);
-    g_assert (pad != NULL);
+    g_assert_nonnull (pad);
 
     g_object_set (selector, "active-pad", pad, NULL);
 
@@ -162,6 +176,7 @@ GST_START_TEST (stress_test)
   fail_unless (bus != NULL);
 
   g_signal_connect (bus, "message", (GCallback) message_cb, NULL);
+  gst_object_unref (bus);
 
   fail_if (gst_element_set_state (pipeline,
           GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE);
@@ -194,7 +209,7 @@ GST_START_TEST (stress_test)
 
     sample = gst_app_sink_pull_sample (GST_APP_SINK (sink));
     if (sample == NULL) {
-      g_print ("eos\n");
+      GST_DEBUG ("eos");
       break;
     }
 
@@ -203,7 +218,7 @@ GST_START_TEST (stress_test)
     s = gst_caps_get_structure (caps, 0);
     fail_unless (s != NULL);
     fail_unless (gst_structure_get_int (s, "id", &id));
-    g_assert (id < 256);
+    fail_unless (id < 256);
 
     buffer = gst_sample_get_buffer (sample);
     fail_unless (buffer != NULL);
@@ -215,9 +230,9 @@ GST_START_TEST (stress_test)
     gst_sample_unref (sample);
 
     count[id] += 1;
-    g_print ("Pulled buffer from src %d, count: %d\n", id, count[id]);
+    GST_DEBUG ("Pulled buffer from src %d, count: %d", id, count[id]);
     if (count[0] > MIN_COUNT && count[1] > MIN_COUNT) {
-      g_print ("Reached min count, sending eos...\n");
+      GST_DEBUG ("Reached min count, sending eos...");
       fail_unless (gst_element_send_event (pipeline, gst_event_new_eos ()));
     }
   }
@@ -228,6 +243,8 @@ GST_START_TEST (stress_test)
   g_thread_join (switch_thrd);
   g_thread_join (src_0_thrd);
   g_thread_join (src_1_thrd);
+
+  gst_object_unref (pipeline);
 }
 
 GST_END_TEST;
