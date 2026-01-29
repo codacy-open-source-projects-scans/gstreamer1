@@ -94,6 +94,7 @@ static gboolean gst_vtdec_set_format (GstVideoDecoder * decoder,
     GstVideoCodecState * state);
 static gboolean gst_vtdec_flush (GstVideoDecoder * decoder);
 static GstFlowReturn gst_vtdec_finish (GstVideoDecoder * decoder);
+static GstFlowReturn gst_vtdec_drain (GstVideoDecoder * decoder);
 static gboolean gst_vtdec_sink_event (GstVideoDecoder * decoder,
     GstEvent * event);
 static GstStateChangeReturn gst_vtdec_change_state (GstElement * element,
@@ -216,6 +217,7 @@ gst_vtdec_class_init (GstVtdecClass * klass)
   video_decoder_class->set_format = GST_DEBUG_FUNCPTR (gst_vtdec_set_format);
   video_decoder_class->flush = GST_DEBUG_FUNCPTR (gst_vtdec_flush);
   video_decoder_class->finish = GST_DEBUG_FUNCPTR (gst_vtdec_finish);
+  video_decoder_class->drain = GST_DEBUG_FUNCPTR (gst_vtdec_drain);
   video_decoder_class->handle_frame =
       GST_DEBUG_FUNCPTR (gst_vtdec_handle_frame);
   video_decoder_class->sink_event = GST_DEBUG_FUNCPTR (gst_vtdec_sink_event);
@@ -373,6 +375,7 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
         GST_TRACE_OBJECT (vtdec, "pushing frame %d",
             frame->system_frame_number);
         ret = gst_video_decoder_finish_frame (decoder, frame);
+        GST_TRACE_OBJECT (vtdec, "frame push ret %s", gst_flow_get_name (ret));
       }
 
       GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
@@ -798,8 +801,11 @@ gst_vtdec_flush (GstVideoDecoder * decoder)
 
   GST_DEBUG_OBJECT (vtdec, "flush");
 
-  return gst_vtdec_drain_decoder (GST_VIDEO_DECODER_CAST (vtdec),
-      TRUE) == GST_FLOW_OK;
+  gst_vtdec_drain_decoder (GST_VIDEO_DECODER_CAST (vtdec), TRUE);
+
+  vtdec->downstream_ret = GST_FLOW_OK;
+
+  return GST_FLOW_OK;
 }
 
 static GstFlowReturn
@@ -810,6 +816,19 @@ gst_vtdec_finish (GstVideoDecoder * decoder)
   GST_DEBUG_OBJECT (vtdec, "finish");
 
   return gst_vtdec_drain_decoder (GST_VIDEO_DECODER_CAST (vtdec), FALSE);
+}
+
+static GstFlowReturn
+gst_vtdec_drain (GstVideoDecoder * decoder)
+{
+  GstVtdec *vtdec = GST_VTDEC (decoder);
+
+  GST_DEBUG_OBJECT (vtdec, "drain");
+
+  gst_vtdec_finish (decoder);
+  gst_vtdec_flush (decoder);
+
+  return GST_FLOW_OK;
 }
 
 static gboolean
@@ -877,7 +896,6 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   GstFlowReturn ret = GST_FLOW_OK;
   int decode_frame_number = frame->decode_frame_number;
   GstTaskState task_state;
-  gboolean is_flushing;
 
   if (vtdec->format_description == NULL) {
     ret = GST_FLOW_NOT_NEGOTIATED;
@@ -959,13 +977,13 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
     /* ...or if it stopped because of the flushing flag while the queue
      * was empty, in which case we didn't get GST_FLOW_FLUSHING... */
     g_mutex_lock (&vtdec->queue_mutex);
-    is_flushing = vtdec->is_flushing;
-    g_mutex_unlock (&vtdec->queue_mutex);
-    if (is_flushing) {
+    if (vtdec->is_flushing) {
+      g_mutex_unlock (&vtdec->queue_mutex);
       GST_DEBUG_OBJECT (vtdec, "Flushing flag set, ignoring frame");
       ret = GST_FLOW_FLUSHING;
       goto drop;
     }
+    g_mutex_unlock (&vtdec->queue_mutex);
 
     /* .. or if it refuses to resume - e.g. it was stopped instead of paused */
     if (!gst_vtdec_ensure_output_loop (vtdec)) {
@@ -1600,9 +1618,9 @@ gst_vtdec_drain_decoder (GstVideoDecoder * decoder, gboolean flush)
 
   GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
 
-  /* Only reset the draining flag here,
-   * is_flushing will be reset in sink_event() */
-  if (vtdec->is_draining)
+  if (flush)
+    vtdec->is_flushing = FALSE;
+  else
     vtdec->is_draining = FALSE;
 
   if (vtdec->downstream_ret == GST_FLOW_OK)

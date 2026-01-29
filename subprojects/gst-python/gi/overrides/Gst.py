@@ -244,31 +244,25 @@ class Caps(MiniObjectMixin, Gst.Caps):  # type: ignore[misc]
     def __nonzero__(self):
         return not self.is_empty()
 
-    def __new__(cls, *args):
-        if not args:
-            return Caps.new_empty()
-        if len(args) > 1:
-            raise TypeError("wrong arguments when creating GstCaps object")
-
-        assert len(args) == 1
-        if isinstance(args[0], str):
-            return Caps.from_string(args[0])
-        elif isinstance(args[0], Caps):
-            return args[0].copy()
-        elif isinstance(args[0], Structure):
+    @staticmethod
+    def __new__(cls: type[Self], arg: typing.Optional[typing.Union[str, Caps, Structure, list[Structure], tuple[Structure, ...]]] = None) -> Self:
+        if not arg:
+            return Caps.new_empty()  # type: ignore[return-value]
+        elif isinstance(arg, str):
+            return Caps.from_string(arg)  # type: ignore[return-value]
+        elif isinstance(arg, Caps):
+            return arg.copy()  # type: ignore[return-value]
+        elif isinstance(arg, Structure):
             res = Caps.new_empty()
-            res.append_structure(args[0])
-            return res
-        elif isinstance(args[0], (list, tuple)):
+            res.append_structure(arg)
+            return res  # type: ignore[return-value]
+        elif isinstance(arg, (list, tuple)):
             res = Caps.new_empty()
-            for e in args[0]:
+            for e in arg:
                 res.append_structure(e)
-            return res
+            return res  # type: ignore[return-value]
 
-        raise TypeError("wrong arguments when creating GstCaps object")
-
-    def __init__(self, *args, **kwargs):
-        return super(Caps, self).__init__()
+        raise TypeError(f"wrong arguments when creating GstCaps object")
 
     def __str__(self) -> str:
         return self.to_string()
@@ -518,32 +512,21 @@ __all__.append('StructureContextManager')
 
 
 class Structure(Gst.Structure):
-    def __new__(cls, *args, **kwargs):
-        if not args:
-            if kwargs:
-                raise TypeError("wrong arguments when creating GstStructure, first argument"
-                                " must be the structure name.")
-            struct = Structure.new_empty()
-            return struct
-        elif len(args) > 1:
-            raise TypeError("wrong arguments when creating GstStructure object")
-        elif isinstance(args[0], str):
+    @staticmethod
+    def __new__(cls: type[Self], arg: typing.Union[str, Structure], **kwargs) -> Self:
+        if isinstance(arg, str):
             if not kwargs:
-                struct = Structure.from_string(args[0])[0]
-                return struct
-            struct = Structure.new_empty(args[0])
+                struct = Structure.from_string(arg)[0]
+                return struct  # type: ignore[return-value]
+            struct = Structure.new_empty(arg)
             for k, v in kwargs.items():
                 struct[k] = v
-
-            return struct
-        elif isinstance(args[0], Structure):
-            struct = args[0].copy()
-            return struct
+            return struct  # type: ignore[return-value]
+        elif isinstance(arg, Structure):
+            struct = arg.copy()
+            return struct  # type: ignore[return-value]
 
         raise TypeError("wrong arguments when creating GstStructure object")
-
-    def __init__(self, *args, **kwargs):
-        pass
 
     def __ptr__(self):
         return _gi_gst._get_object_ptr(self)
@@ -770,6 +753,8 @@ class Int64Range(Gst.Int64Range):
 
 
 class Bitmask(Gst.Bitmask):
+    v: int
+
     def __init__(self, v: int) -> None:
         if not isinstance(v, int):
             raise TypeError(f"{type(v)} is not an int.")
@@ -792,7 +777,10 @@ __all__.append('Int64Range')
 
 
 class DoubleRange(Gst.DoubleRange):
-    def __init__(self, start: int | float, stop: int | float):
+    start: float
+    stop: float
+
+    def __init__(self, start: float, stop: float):
         self.start = float(start)
         self.stop = float(stop)
 
@@ -811,6 +799,9 @@ __all__.append('DoubleRange')
 
 
 class FractionRange(Gst.FractionRange):
+    start: Fraction
+    stop: Fraction
+
     def __init__(self, start: Fraction, stop: Fraction):
         if not isinstance(start, Fraction):
             raise TypeError(f"{type(start)} is not a Gst.Fraction.")
@@ -978,13 +969,18 @@ def pairwise(iterable: typing.Iterable[Element]) -> typing.Iterator[tuple[Elemen
 
 
 class MapInfo:
+    memory: typing.Optional[Memory]
+    flags: MapFlags
+    size: int
+    maxsize: int
+    data: typing.Optional[memoryview]
+
     def __init__(self):
         self.memory = None
         self.flags = Gst.MapFlags(0)
         self.size = 0
         self.maxsize = 0
         self.data = None
-        self.user_data = None
         self.__parent__ = None
 
     def __iter__(self):

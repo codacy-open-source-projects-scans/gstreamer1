@@ -1293,7 +1293,8 @@ gst_qtdemux_do_push_seek (GstQTDemux * qtdemux, GstPad * pad, GstEvent * event)
   gint64 original_stop;
   guint32 seqnum;
 
-  GST_DEBUG_OBJECT (qtdemux, "doing push-based seek");
+  GST_DEBUG_OBJECT (qtdemux,
+      "doing push-based seek with event %" GST_PTR_FORMAT, event);
 
   gst_event_parse_seek (event, &rate, &format, &flags,
       &cur_type, &cur, &stop_type, &stop);
@@ -1498,7 +1499,7 @@ gst_qtdemux_do_seek (GstQTDemux * qtdemux, GstPad * pad, GstEvent * event)
   GstEvent *flush_event;
   gboolean ret;
 
-  GST_DEBUG_OBJECT (qtdemux, "doing seek with event");
+  GST_DEBUG_OBJECT (qtdemux, "doing seek with event %" GST_PTR_FORMAT, event);
 
   gst_event_parse_seek (event, &rate, &format, &flags,
       &cur_type, &cur, &stop_type, &stop);
@@ -1563,13 +1564,19 @@ gst_qtdemux_do_seek (GstQTDemux * qtdemux, GstPad * pad, GstEvent * event)
 
   /* configure the segment with the seek variables */
   GST_DEBUG_OBJECT (qtdemux, "configuring seek");
-  if (!gst_segment_do_seek (&seeksegment, rate, format, flags,
-          cur_type, cur, stop_type, stop, &update)) {
+  GST_DEBUG_OBJECT (qtdemux, "Previous segment was %" GST_SEGMENT_FORMAT,
+      &seeksegment);
+  if (!gst_segment_do_seek (&seeksegment, rate, format, flags, cur_type, cur,
+          stop_type, stop, &update)) {
     ret = FALSE;
     GST_ERROR_OBJECT (qtdemux, "inconsistent seek values, doing nothing");
   } else {
     /* now do the seek */
+    GST_DEBUG_OBJECT (qtdemux, "New segment is %" GST_SEGMENT_FORMAT,
+        &seeksegment);
     ret = gst_qtdemux_perform_seek (qtdemux, &seeksegment, seqnum, flags);
+    GST_DEBUG_OBJECT (qtdemux, "Adjusted segment is %" GST_SEGMENT_FORMAT,
+        &seeksegment);
   }
 
   /* prepare for streaming again */
@@ -5247,7 +5254,7 @@ gst_qtdemux_seek_to_previous_keyframe (GstQTDemux * qtdemux)
 {
   guint32 seg_idx = 0, k_index = 0;
   guint32 ref_seg_idx, ref_k_index;
-  GstClockTime k_pos = 0, last_stop = 0;
+  GstClockTime k_pos = 0, position = 0;
   QtDemuxSegment *seg = NULL;
   QtDemuxStream *ref_str = NULL;
   guint64 seg_media_start_mov;  /* segment media start time in mov format */
@@ -5330,7 +5337,7 @@ gst_qtdemux_seek_to_previous_keyframe (GstQTDemux * qtdemux)
   k_pos =
       QTSTREAMTIME_TO_GSTTIME (ref_str,
       target_ts - seg->trak_media_start) + seg->time;
-  last_stop =
+  position =
       QTSTREAMTIME_TO_GSTTIME (ref_str,
       ref_str->samples[ref_str->from_sample].timestamp -
       seg->trak_media_start) + seg->time;
@@ -5339,12 +5346,12 @@ gst_qtdemux_seek_to_previous_keyframe (GstQTDemux * qtdemux)
       "now going to sample %u (pts %" GST_TIME_FORMAT ")", ref_str->from_sample,
       k_index, GST_TIME_ARGS (k_pos));
 
-  /* Set last_stop with the keyframe timestamp we pushed of that stream */
-  qtdemux->segment.position = last_stop;
-  GST_DEBUG_OBJECT (qtdemux, "last_stop now is %" GST_TIME_FORMAT,
-      GST_TIME_ARGS (last_stop));
+  /* Set position with the keyframe timestamp we pushed of that stream */
+  qtdemux->segment.position = position;
+  GST_DEBUG_OBJECT (qtdemux, "segment position now is %" GST_TIME_FORMAT,
+      GST_TIME_ARGS (position));
 
-  if (G_UNLIKELY (last_stop < qtdemux->segment.start)) {
+  if (G_UNLIKELY (position < qtdemux->segment.start)) {
     GST_DEBUG_OBJECT (qtdemux, "reached the beginning of segment");
     goto eos;
   }
@@ -5416,6 +5423,10 @@ gst_qtdemux_seek_to_previous_keyframe (GstQTDemux * qtdemux)
   return GST_FLOW_OK;
 
 eos:
+  /* Set position to the beginning of the seek segment now */
+  qtdemux->segment.position = qtdemux->segment.start;
+  GST_DEBUG_OBJECT (qtdemux, "segment position now is %" GST_TIME_FORMAT,
+      GST_TIME_ARGS (qtdemux->segment.start));
   return GST_FLOW_EOS;
 }
 
@@ -7594,6 +7605,15 @@ pause:
         } else {
           GstMessage *message;
           GstEvent *event;
+
+          if (qtdemux->segment.position != qtdemux->segment.start) {
+            GST_DEBUG_OBJECT (qtdemux,
+                "End of segment, updating segment.position from %"
+                GST_TIME_FORMAT " to start %" GST_TIME_FORMAT,
+                GST_TIME_ARGS (qtdemux->segment.position),
+                GST_TIME_ARGS (qtdemux->segment.start));
+            qtdemux->segment.position = qtdemux->segment.start;
+          }
 
           /*  For Reverse Playback */
           GST_LOG_OBJECT (qtdemux, "Sending segment done, at start of segment");

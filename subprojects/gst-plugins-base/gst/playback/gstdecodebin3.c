@@ -2032,13 +2032,20 @@ sink_event_function (GstPad * sinkpad, GstDecodebin3 * dbin, GstEvent * event)
       gst_event_parse_stream (event, &stream);
       if (stream) {
         const gchar *stream_id = gst_stream_get_stream_id (stream);
-        if (input->collection != NULL
-            && !stream_in_collection (input->collection, stream_id)) {
+        if (dbin->input_collection && dbin->input_collection->collection &&
+            !stream_in_collection (dbin->input_collection->collection,
+                stream_id)) {
+          GstMessage *msg;
           GST_DEBUG_OBJECT (sinkpad,
               "Stream %" GST_PTR_FORMAT
               " is from a new collection on this input", stream);
           /* This is a stream from a new collection. Invalidate the old collection */
-          gst_clear_object (&input->collection);
+          msg = handle_stream_collection_locked (dbin, NULL, input);
+          if (msg) {
+            INPUT_UNLOCK (dbin);
+            gst_element_post_message ((GstElement *) dbin, msg);
+            INPUT_LOCK (dbin);
+          }
         }
         gst_object_unref (stream);
       }
@@ -2734,10 +2741,8 @@ handle_stream_collection_locked (GstDecodebin3 * dbin,
   }
 
   /* Replace collection in input */
-  if (input->collection)
-    gst_object_unref (input->collection);
-  if (collection)
-    input->collection = gst_object_ref (collection);
+  gst_object_replace ((GstObject **) & input->collection,
+      (GstObject *) collection);
   GST_DEBUG_OBJECT (dbin, "Setting collection %p on input %p", collection,
       input);
 
