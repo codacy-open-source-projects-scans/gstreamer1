@@ -5400,7 +5400,19 @@ gst_qtdemux_seek_to_previous_keyframe (GstQTDemux * qtdemux)
     }
 
     /* Remember until where we want to go */
-    if (str->from_sample == 0) {
+    if (str->from_sample == k_index) {
+      if (str == ref_str) {
+        GST_ERROR_OBJECT (qtdemux,
+            "track-id %u ended up at same sample %u for reference track",
+            str->track_id, k_index);
+        return GST_FLOW_ERROR;
+      }
+
+      GST_LOG_OBJECT (qtdemux,
+          "track-id %u not outputting same samples from %u again",
+          str->track_id, k_index);
+      continue;
+    } else if (str->from_sample == 0) {
       GST_LOG_OBJECT (qtdemux, "already at sample 0");
       str->to_sample = 0;
     } else {
@@ -6960,9 +6972,14 @@ gst_qtdemux_decorate_and_push_buffer (GstQTDemux * qtdemux,
     if (CUR_STREAM (stream)->needs_reorder)
       buffer = gst_qtdemux_reorder_audio_channels (qtdemux, stream, buffer);
 
-    gst_pad_push (stream->pad, buffer);
+    ret = gst_pad_push (stream->pad, buffer);
 
     stream->buffers = g_slist_delete_link (stream->buffers, stream->buffers);
+
+    if (ret != GST_FLOW_OK) {
+      gst_buffer_unref (buf);
+      goto exit;
+    }
   }
 
   /* we're going to modify the metadata */

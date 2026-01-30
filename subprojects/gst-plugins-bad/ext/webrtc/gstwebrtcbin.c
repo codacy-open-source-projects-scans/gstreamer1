@@ -9490,6 +9490,15 @@ gst_webrtc_bin_class_init (GstWebRTCBinClass * klass)
    *  "local-id"            G_TYPE_STRING               identifier for the associated RTCInboundRTPSTreamStats
    *  "remote-timestamp"    G_TYPE_DOUBLE               remote timestamp the statistics were sent by the remote
    *
+   * RTCTransportStats supported fields (https://www.w3.org/TR/webrtc-stats/#transportstats-dict*)
+   *
+   * "selected-candidate-pair-id" G_TYPE_STRING         identifier for the associated RTCIceCandidatePairStats
+   * "dtls-role"            GST_TYPE_WEBRTC_DTLS_ROLE   "client" or "server" depending on the DTLS role. "unknown" before the DTLS negotiation starts. (Since: 1.28)
+   * "dtls-state"           GST_TYPE_WEBRTC_DTLS_TRANSPORT_STATE current value of the state attribute of the underlying RTCDtlsTransport (Since: 1.28)
+   * "tls-version"          G_TYPE_STRING               for components where DTLS is negotiated, the TLS version agreed. Only exists after DTLS negotiation is complete (Since: 1.30)
+   * "dtls-cipher"          G_TYPE_STRING               descriptive name of the cipher suite used for the DTLS transport (Since: 1.30)
+   * "srtp-cipher"          G_TYPE_STRING               descriptive name of the protection profile used for the SRTP transport (Since: 1.30)
+   *
    * RTCPeerConnectionStats supported fields (https://w3c.github.io/webrtc-stats/#pcstats-dict*) (Since: 1.24)
    *
    *  "data-channels-opened"  G_TYPE_UINT               number of unique data channels that have entered the 'open' state
@@ -9515,6 +9524,11 @@ gst_webrtc_bin_class_init (GstWebRTCBinClass * klass)
    *
    *  "local-candidate-id"  G_TYPE_STRING               unique identifier that is associated to the object that was inspected to produce the RTCIceCandidateStats for the local candidate associated with this candidate pair.
    *  "remote-candidate-id" G_TYPE_STRING               unique identifier that is associated to the object that was inspected to produce the RTCIceCandidateStats for the remote candidate associated with this candidate pair.
+   *
+   * RTCCertificateStats supported fields (https://www.w3.org/TR/webrtc-stats/#certificatestats-dict*) (Since: 1.30)
+   *  "fingerprint"           G_TYPE_STRING             The fingerprint of the certificate. Only use the fingerprint value as defined in Section 5 of [RFC4572].
+   *  "fingerprint-algorithm" G_TYPE_STRING             The hash function used to compute the certificate fingerprint.
+   *  "base64-certificate"    G_TYPE_STRING             The DER-encoded base-64 representation of the certificate.
    */
   gst_webrtc_bin_signals[GET_STATS_SIGNAL] =
       g_signal_new_class_handler ("get-stats",
