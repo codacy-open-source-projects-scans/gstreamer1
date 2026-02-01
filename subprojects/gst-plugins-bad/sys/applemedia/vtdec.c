@@ -338,7 +338,11 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
     g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
   }
 
-  if (vtdec->pause_task) {
+  /* If we're currently draining/flushing, make sure to not pause before we output all the frames */
+  if (vtdec->pause_task &&
+      ((!vtdec->is_flushing && !vtdec->is_draining) ||
+          gst_vec_deque_is_empty (vtdec->reorder_queue))) {
+    GST_DEBUG_OBJECT (vtdec, "pausing output loop as requested");
     g_mutex_unlock (&vtdec->queue_mutex);
     gst_pad_pause_task (GST_VIDEO_DECODER_SRC_PAD (decoder));
     return;
@@ -372,10 +376,11 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
         GST_LOG_OBJECT (vtdec, "dropping frame %d", frame->system_frame_number);
         gst_video_decoder_drop_frame (decoder, frame);
       } else {
-        GST_TRACE_OBJECT (vtdec, "pushing frame %d",
-            frame->system_frame_number);
+        guint32 frame_num = frame->system_frame_number;
+        GST_TRACE_OBJECT (vtdec, "pushing frame %d", frame_num);
         ret = gst_video_decoder_finish_frame (decoder, frame);
-        GST_TRACE_OBJECT (vtdec, "frame push ret %s", gst_flow_get_name (ret));
+        GST_TRACE_OBJECT (vtdec, "frame %d push ret %s", frame_num,
+            gst_flow_get_name (ret));
       }
 
       GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
@@ -410,7 +415,7 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
   GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
 
   if (ret != GST_FLOW_OK) {
-    GST_DEBUG_OBJECT (vtdec, "pausing output task: %s",
+    GST_DEBUG_OBJECT (vtdec, "pausing output task because of downstream: %s",
         gst_flow_get_name (ret));
     gst_pad_pause_task (GST_VIDEO_DECODER_SRC_PAD (decoder));
   }
@@ -537,6 +542,8 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
 #if defined(APPLEMEDIA_MOLTENVK)
   gboolean output_vulkan = FALSE;
 #endif
+
+  GST_DEBUG_OBJECT (decoder, "negotiating");
 
   vtdec = GST_VTDEC (decoder);
   if (vtdec->session)
@@ -1624,10 +1631,13 @@ gst_vtdec_drain_decoder (GstVideoDecoder * decoder, gboolean flush)
   }
 
   g_mutex_lock (&vtdec->queue_mutex);
-  if (flush)
+  if (flush) {
+    GST_DEBUG_OBJECT (vtdec, "setting flushing flag");
     vtdec->is_flushing = TRUE;
-  else
+  } else {
+    GST_DEBUG_OBJECT (vtdec, "setting draining flag");
     vtdec->is_draining = TRUE;
+  }
   g_cond_signal (&vtdec->queue_cond);
   g_mutex_unlock (&vtdec->queue_mutex);
 
@@ -1636,6 +1646,7 @@ gst_vtdec_drain_decoder (GstVideoDecoder * decoder, gboolean flush)
     return GST_FLOW_ERROR;
   }
 
+  GST_DEBUG_OBJECT (vtdec, "draining VT session");
   GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
   vt_status = VTDecompressionSessionWaitForAsynchronousFrames (vtdec->session);
   if (vt_status != noErr) {
@@ -1644,19 +1655,18 @@ gst_vtdec_drain_decoder (GstVideoDecoder * decoder, gboolean flush)
         (int) vt_status);
   }
 
+  /* This will only pause after all frames are out because is_flushing/is_draining=TRUE */
   gst_vtdec_pause_output_loop (vtdec);
-
-  /* Ensure the output loop runs once more in case it got paused before
-   * handling frames pushed by gst_vtdec_session_output_callback. */
-  if (!flush)
-    gst_vtdec_output_loop (vtdec);
 
   GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
 
-  if (flush)
+  if (flush) {
+    GST_DEBUG_OBJECT (vtdec, "clearing flushing flag");
     vtdec->is_flushing = FALSE;
-  else
+  } else {
+    GST_DEBUG_OBJECT (vtdec, "clearing draining flag");
     vtdec->is_draining = FALSE;
+  }
 
   if (vtdec->downstream_ret == GST_FLOW_OK)
     GST_DEBUG_OBJECT (vtdec, "buffer queue cleaned");
