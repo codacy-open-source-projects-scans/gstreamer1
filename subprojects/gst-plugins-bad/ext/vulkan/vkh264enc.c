@@ -371,7 +371,7 @@ gst_vulkan_h264_level_idc (int level_idc)
   return STD_VIDEO_H264_LEVEL_IDC_INVALID;
 }
 
-static GstH264Level
+static gint
 gst_h264_level_idc_from_vk (StdVideoH264LevelIdc vk_level_idc)
 {
   for (guint i = 0; i < G_N_ELEMENTS (H264LevelMap); i++) {
@@ -684,6 +684,7 @@ gst_vulkan_h264_encoder_new_sequence (GstH264Encoder * encoder,
   GstVulkanVideoCapabilities vk_caps;
   VkVideoEncodeH264CapabilitiesKHR *vk_h264_caps;
   GstVulkanEncoderQualityProperties quality_props;
+  StdVideoH264LevelIdc vk_max_level;
 
   if (!self->encoder) {
     GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
@@ -885,6 +886,14 @@ gst_vulkan_h264_encoder_new_sequence (GstH264Encoder * encoder,
     return GST_FLOW_NOT_NEGOTIATED;
   }
 
+  /* gallium drivers always reply 1.0 level idc  */
+  vk_max_level = vk_caps.encoder.codec.h264.maxLevelIdc;
+  if (vk_max_level > STD_VIDEO_H264_LEVEL_IDC_1_0 && *level > 0) {
+    gint max_level = gst_h264_level_idc_from_vk (vk_max_level);
+    if (max_level >= 0)
+      *level = MIN (max_level, *level);
+  }
+
   gst_h264_encoder_set_max_num_references (encoder,
       vk_h264_caps->maxPPictureL0ReferenceCount,
       vk_h264_caps->maxL1ReferenceCount);
@@ -1076,15 +1085,17 @@ gst_vulkan_h264_encoder_new_parameters (GstH264Encoder * encoder,
   self->pps.sequence = &self->sps;
 
   {
+    GstVideoEncoder *vencoder = GST_VIDEO_ENCODER_CAST (self);
     GstCaps *caps;
     GstVideoInfo *info = &self->in_state->info;
     const char *profile, *level;
     GstVideoCodecState *out_state;
 
     profile = gst_vulkan_h264_profile_name (self->params.sps.profile_idc);
+    if (!profile)
+      return GST_FLOW_ERROR;
     level = gst_vulkan_h264_level_name (self->params.sps.level_idc);
-
-    if (!(profile && level))
+    if (!level)
       return GST_FLOW_ERROR;
 
     caps = gst_caps_new_simple ("video/x-h264", "profile", G_TYPE_STRING,
@@ -1093,9 +1104,21 @@ gst_vulkan_h264_encoder_new_parameters (GstH264Encoder * encoder,
         GST_VIDEO_INFO_HEIGHT (info), "alignment", G_TYPE_STRING, "au",
         "stream-format", G_TYPE_STRING, "byte-stream", NULL);
 
+    out_state = gst_video_encoder_get_output_state (vencoder);
+    if (out_state) {
+      gboolean early_return = FALSE;
+
+      if (out_state->caps)
+        early_return = gst_caps_is_subset (out_state->caps, caps);
+      gst_video_codec_state_unref (out_state);
+      if (early_return) {
+        gst_caps_unref (caps);
+        return GST_FLOW_OK;
+      }
+    }
+
     out_state =
-        gst_video_encoder_set_output_state (GST_VIDEO_ENCODER_CAST (self),
-        caps, self->in_state);
+        gst_video_encoder_set_output_state (vencoder, caps, self->in_state);
     gst_video_codec_state_unref (out_state);
   }
 
