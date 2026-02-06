@@ -27,12 +27,13 @@
 #include <gst/codecparsers/gsth264parser.h>
 #include <gst/video/gstvideoencoder.h>
 
+#include "gsth26xgopmapper.h"
+
 G_BEGIN_DECLS
 
 typedef struct _GstH264Encoder GstH264Encoder;
 typedef struct _GstH264EncoderClass GstH264EncoderClass;
 typedef struct _GstH264EncoderFrame GstH264EncoderFrame;
-typedef struct _GstH264GOPFrame GstH264GOPFrame;
 
 typedef struct _GstH264LevelDescriptor GstH264LevelDescriptor;
 
@@ -47,7 +48,7 @@ typedef struct _GstH264LevelDescriptor GstH264LevelDescriptor;
  * @max_cpb: maximum CPB size
  * @min_cr: minimum compression ration
  *
- * Since: 1.28
+ * Since: 1.30
  */
 struct _GstH264LevelDescriptor
 {
@@ -71,8 +72,16 @@ struct _GstH264LevelDescriptor
 _GLIB_DEFINE_AUTOPTR_CHAINUP (GstH264Encoder, GstVideoEncoder)
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GstH264EncoderClass, g_type_class_unref)
 
+/**
+ * GstH264Encoder:
+ *
+ * Opaque #GstH264Encoder data structure.
+ *
+ * Since: 1.30
+ */
 struct _GstH264Encoder
 {
+  /*< private >*/
   GstVideoEncoder parent_instance;
 };
 
@@ -81,24 +90,27 @@ struct _GstH264Encoder
  *
  * The opaque #GstH264EncoderClass data structure.
  *
- * Since: 1.28
+ * Since: 1.30
  */
 struct _GstH264EncoderClass
 {
+  /*< private >*/
   GstVideoEncoderClass parent_class;
 
   /**
-   * GstH264Encoder::negotiate:
+   * GstH264EncoderClass::negotiate:
    * @encoder: a #GstH264Encoder
    * @in_state: (transfer none): the input #GstVideoCodecState
-   * @profile: (out): the negotiated profile
-   * @level: (out): the negotiated level
+   * @profile: (out) (type gint): the negotiated profile
+   * @level: (out) (type gint): the negotiated level
    *
    * Optional. Allows the subclass to negotiate downstream the @profile and
    * @level. The default implementation will choose the most advanced profile
    * allowed. If the callee returns @level to zero, it will be guessed later.
    *
-   * Since: 1.28
+   * Returns: #GstFlowReturn accordingly
+   *
+   * Since: 1.30
    */
   GstFlowReturn      (*negotiate)                            (GstH264Encoder * encoder,
                                                               GstVideoCodecState * in_state,
@@ -106,7 +118,7 @@ struct _GstH264EncoderClass
                                                               GstH264Level * level);
 
   /**
-   * GstH264Encoder::new_sequence:
+   * GstH264EncoderClass::new_sequence:
    * @encoder: a #GstH264Encoder
    * @in_state: (transfer none): the input #GstVideoCodecState
    * @profile:  the negotiated profile
@@ -117,7 +129,9 @@ struct _GstH264EncoderClass
    * @in_state), @profile and @level, and to verify the accelerator limitations.
    * If the callee returns @level to zero, it will be guessed later.
    *
-   * Since: 1.28
+   * Returns: #GstFlowReturn accordingly
+   *
+   * Since: 1.30
    */
   GstFlowReturn      (*new_sequence)                         (GstH264Encoder * encoder,
                                                               GstVideoCodecState * in_state,
@@ -125,9 +139,8 @@ struct _GstH264EncoderClass
                                                               GstH264Level * level);
 
   /**
-   * GstH264Encoder::new_parameters:
+   * GstH264EncoderClass::new_parameters:
    * @encoder: a #GstH264Encoder
-   * @input_state: (transfer none): the input #GstVideoCodecState
    * @sps: (transfer none): a #GstH264SPS
    * @pps: (transfer none): a #GstH264PPS
    *
@@ -138,7 +151,9 @@ struct _GstH264EncoderClass
    * to call gst_video_encoder_set_output(), if needed, to (re)negotiate
    * downstream.
    *
-   * Since: 1.28
+   * Returns: #GstFlowReturn accordingly
+   *
+   * Since: 1.30
    */
   GstFlowReturn      (*new_parameters)                       (GstH264Encoder * encoder,
                                                               GstH264SPS * sps,
@@ -154,7 +169,9 @@ struct _GstH264EncoderClass
    * can set implementation specific user data on #GstH264EncoderFrame via
    * gst_h264_encoder_frame_set_user_data()
    *
-   * Since: 1.28
+   * Returns: #GstFlowReturn accordingly
+   *
+   * Since: 1.30
    */
   GstFlowReturn      (*new_output)                           (GstH264Encoder * encoder,
                                                               GstVideoCodecFrame * frame,
@@ -175,7 +192,9 @@ struct _GstH264EncoderClass
    * accelerated haven't completed the encoding, the callee can return
    * @GST_FLOW_OUTPUT_NOT_READY
    *
-   * Since: 1.28
+   * Returns: #GstFlowReturn accordingly
+   *
+   * Since: 1.30
    */
   GstFlowReturn      (*encode_frame)                         (GstH264Encoder * encoder,
                                                               GstVideoCodecFrame * frame,
@@ -192,7 +211,9 @@ struct _GstH264EncoderClass
    * Optional. It's called before pushing @frame downstream. It's intended to
    * add metadata, and prepend other units, to @frame and its user's data.
    *
-   * Since: 1.28
+   * Returns: #GstFlowReturn accordingly
+   *
+   * Since: 1.30
    */
   GstFlowReturn       (*prepare_output)                      (GstH264Encoder * encoder,
                                                               GstVideoCodecFrame * frame);
@@ -204,7 +225,7 @@ struct _GstH264EncoderClass
    * Optional. It's called when resetting the global state of the encoder.
    * Allows the subclass to re-initialize its internal variables.
    *
-   * Since: 1.28
+   * Since: 1.30
    */
   void                (*reset)                               (GstH264Encoder * encoder);
 
@@ -236,11 +257,12 @@ gboolean             gst_h264_encoder_gop_is_b_pyramid       (GstH264Encoder * s
 const GstH264LevelDescriptor *gst_h264_get_level_descriptor  (GstH264Profile profile,
                                                               guint64 bitrate,
                                                               GstVideoInfo * in_info,
+
                                                               int max_dec_frame_buffering);
 
 guint                gst_h264_get_cpb_nal_factor             (GstH264Profile profile);
 
-gsize                gst_h264_calculate_coded_size           (GstH264SPS * sps,
+gsize                gst_h264_calculate_coded_size           (const GstH264SPS * sps,
                                                               guint num_slices);
 
 /* H264 encoder frame */
@@ -250,37 +272,18 @@ gsize                gst_h264_calculate_coded_size           (GstH264SPS * sps,
 #define GST_H264_ENCODER_FRAME(obj)    ((GstH264EncoderFrame *)obj)
 
 /**
- * GstH264GOPFrame:
- *
- * Description of an H.264 frame in the Group Of Pictures (GOP).
- *
- * Since: 1.28
- */
-struct _GstH264GOPFrame
-{
-  /*< private >*/
-  GstH264SliceType slice_type;
-  gboolean is_ref;
-  guint8 pyramid_level;
-
-  /* Only for b pyramid */
-  gint left_ref_poc_diff;
-  gint right_ref_poc_diff;
-};
-
-/**
  * GstH264EncoderFrame:
  *
  * Represents a frame that is going to be encoded with H.264
  *
- * Since: 1.28
+ * Since: 1.30
  */
 struct _GstH264EncoderFrame
 {
+  /*< private >*/
   GstMiniObject parent;
 
-  /*< private >*/
-  GstH264GOPFrame type;
+  GstH26XGOP gop;
 
   /* Number of ref frames within current GOP. H264's frame number. */
   guint16 gop_frame_num;
@@ -299,7 +302,7 @@ struct _GstH264EncoderFrame
 
 GType                gst_h264_encoder_frame_get_type         (void);
 
-GstH264EncoderFrame *gst_h264_encoder_frame_new              (void);
+GstH264EncoderFrame *gst_h264_encoder_frame_new              (void) G_GNUC_WARN_UNUSED_RESULT;
 
 void                 gst_h264_encoder_frame_set_user_data    (GstH264EncoderFrame * frame,
                                                               gpointer user_data,
