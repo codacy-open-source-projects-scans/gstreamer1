@@ -42,11 +42,14 @@ applemedia_args = [
     '-DGST_USE_UNSTABLE_API'
 ]
 
-avfoundation_sources = [
+avcapturedevice_sources = [
   'avfvideosrc.m',
+  'avfdeviceprovider.m',
+]
+
+avfoundation_sources = [
   'avfassetsrc.m',
   'avsamplevideosink.m',
-  'avfdeviceprovider.m',
 ]
 
 vt_sources = [
@@ -54,8 +57,11 @@ vt_sources = [
   'vtdec.c'
 ]
 
-ios_sources = [
+ios_deprecated_sources = [
   'iosassetsrc.m',
+]
+
+ios_sources = [
   'iosglmemory.c',
 ]
 
@@ -69,7 +75,7 @@ vulkan_sources = [
 ]
 
 doc_sources = []
-foreach s: applemedia_sources + avfoundation_sources + vt_sources + ios_sources + non_ios_sources + vulkan_sources + applemedia_headers
+foreach s: applemedia_sources + avcapturedevice_sources + avfoundation_sources + vt_sources + ios_sources + ios_deprecated_sources + non_ios_sources + vulkan_sources + applemedia_headers
   doc_sources += meson.current_source_dir() / s
 endforeach
 
@@ -80,7 +86,7 @@ plugin_sources += {
 applemedia_objc_args = []
 applemedia_found_deps = false
 applemedia_option = get_option('applemedia')
-if not ['darwin', 'ios'].contains(host_system) or applemedia_option.disabled()
+if host_system != 'darwin' or applemedia_option.disabled()
   subdir_done()
 endif
 
@@ -101,6 +107,9 @@ applemedia_frameworks += [corefoundation_dep, coremedia_dep, corevideo_dep]
 avfoundation_dep = dependency('AVFoundation', required : applemedia_option)
 if avfoundation_dep.found()
     applemedia_sources += avfoundation_sources
+    if cdata.get('HAVE_AVCAPTUREDEVICE') == 1
+      applemedia_sources += avcapturedevice_sources
+    endif
     applemedia_frameworks += [avfoundation_dep]
 endif
 
@@ -110,19 +119,23 @@ if videotoolbox_dep.found()
     applemedia_frameworks += [videotoolbox_dep]
 endif
 
-if host_system == 'ios'
-    applemedia_sources += ios_sources
-    applemedia_objc_args += ['-fobjc-abi-version=2', '-fobjc-legacy-dispatch']
-
-    ios_media_dep = dependency('appleframeworks', modules : ['Foundation', 'AssetsLibrary'], required : applemedia_option)
-    iosurface_dep = dependency('IOSurface', required : applemedia_option)
-    applemedia_frameworks += [ios_media_dep, iosurface_dep]
-else
+if subsystem == 'macos'
     applemedia_sources += non_ios_sources
     cocoa_dep = dependency('Cocoa', required : applemedia_option)
     iosurface_dep = dependency('IOSurface', required : applemedia_option)
     applemedia_opengl_dep = dependency('appleframeworks', modules : ['OpenGL'], required : applemedia_option)
     applemedia_frameworks += [cocoa_dep, applemedia_opengl_dep, iosurface_dep]
+else
+    applemedia_sources += ios_sources
+    if subsystem.startswith('ios')
+      applemedia_sources += ios_deprecated_sources
+      ios_media_dep = dependency('appleframeworks', modules : ['Foundation', 'AssetsLibrary'], required : applemedia_option)
+    else
+      ios_media_dep = dependency('appleframeworks', modules : ['Foundation'], required : applemedia_option)
+    endif
+    iosurface_dep = dependency('IOSurface', required : applemedia_option)
+    applemedia_frameworks += [ios_media_dep, iosurface_dep]
+    applemedia_objc_args += ['-fobjc-abi-version=2', '-fobjc-legacy-dispatch']
 endif
 
 applemedia_found_deps = true
