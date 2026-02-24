@@ -134,7 +134,10 @@ struct _GstMXFDemuxEssenceTrack
   GstTagList *tags;
 
   GstCaps *caps;
+  gboolean is_video;
   gboolean intra_only;
+  gboolean is_audio;
+  gboolean need_reorder;
 
   MXFEssenceWrapping wrapping;
 
@@ -221,6 +224,16 @@ struct _GstMXFDemuxPad
   /* Current essence track and position (in edit units) */
   GstMXFDemuxEssenceTrack *current_essence_track;
   guint64 current_essence_track_position;
+
+  /* reverse playback related */
+  gboolean chunk_complete;
+  GstClockTime prev_chunk_min_stream_time;
+  GstClockTime cur_chunk_min_stream_time;
+
+  /* reverse playback queue for unencoded stream
+   * buffers & gap events are prepended to this queue
+   * and pushed on DISCONT or at the end of current chunk */
+  GQueue reorder_queue;
 };
 
 struct _GstMXFDemuxPadClass
@@ -261,6 +274,8 @@ struct _GstMXFDemux
   /* MXF file state */
   GList *partitions;
   GstMXFDemuxPartition *current_partition;
+  /* for reverse playback */
+  guint64 chunk_start_ts;
 
   GPtrArray *essence_tracks;
 

@@ -465,27 +465,6 @@ if host_system == 'darwin'
   if not have_objc
     error('Building on MacOS/iOS/etc requires an ObjC compiler')
   endif
-
-  avfoundation_dep = dependency('AVFoundation', required : false)
-  if avfoundation_dep.found()
-      cdata.set('HAVE_AVFOUNDATION', 1)
-      # TODO: Needs tvOS 17.0, but we only support 12.0 at present
-      if subsystem.startswith('tvos') or subsystem.startswith('watchos')
-        cdata.set('HAVE_AVCAPTUREDEVICE', 0)
-      else
-        cdata.set('HAVE_AVCAPTUREDEVICE', 1)
-      endif
-  endif
-
-  videotoolbox_dep = dependency('VideoToolbox', required : false)
-  if videotoolbox_dep.found()
-      cdata.set('HAVE_VIDEOTOOLBOX', 1)
-  endif
-
-#  FIXME: framework.version() returns 'unknown'
-#  if videotoolbox_dep.version().version_compare('>=10.9.6')
-#    cdata.set('HAVE_VIDEOTOOLBOX_10_9_6', 1)
-#  endif
 endif
 
 have_orcc = false
