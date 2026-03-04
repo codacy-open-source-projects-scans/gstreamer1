@@ -10112,7 +10112,7 @@
                 },
                 "properties": {
                     "max-backtrack-distance": {
-                        "blurb": "Maximum backtrack distance in seconds when seeking without and index in pull mode and search for a keyframe (0 = disable backtracking).",
+                        "blurb": "Maximum backtrack distance in seconds when seeking without an index in pull mode and search for a keyframe (0 = disable backtracking).",
                         "conditionally-available": false,
                         "construct": false,
                         "construct-only": false,
@@ -10132,6 +10132,20 @@
                         "construct-only": false,
                         "controllable": false,
                         "default": "2000000000",
+                        "max": "18446744073709551615",
+                        "min": "0",
+                        "mutable": "null",
+                        "readable": true,
+                        "type": "guint64",
+                        "writable": true
+                    },
+                    "min-index-interval": {
+                        "blurb": "Minimum interval between index entries (in nanoseconds) when building a dynamic seek table",
+                        "conditionally-available": false,
+                        "construct": false,
+                        "construct-only": false,
+                        "controllable": false,
+                        "default": "500000000",
                         "max": "18446744073709551615",
                         "min": "0",
                         "mutable": "null",
@@ -17156,34 +17170,6 @@
                     },
                     "src": {
                         "caps": "audio/qcelp:\n       channels: 1\n           rate: 8000\n",
-                        "direction": "src",
-                        "presence": "always"
-                    }
-                },
-                "properties": {},
-                "rank": "secondary"
-            },
-            "rtpqdm2depay": {
-                "author": "Edward Hervey <bilboed@bilboed.com>",
-                "description": "Extracts QDM2 audio from RTP packets (no RFC)",
-                "hierarchy": [
-                    "GstRtpQDM2Depay",
-                    "GstRTPBaseDepayload",
-                    "GstElement",
-                    "GstObject",
-                    "GInitiallyUnowned",
-                    "GObject"
-                ],
-                "klass": "Codec/Depayloader/Network/RTP",
-                "long-name": "RTP QDM2 depayloader",
-                "pad-templates": {
-                    "sink": {
-                        "caps": "application/x-rtp:\n          media: audio\n  encoding-name: X-QDM\n",
-                        "direction": "sink",
-                        "presence": "always"
-                    },
-                    "src": {
-                        "caps": "audio/x-qdm2:\n",
                         "direction": "src",
                         "presence": "always"
                     }

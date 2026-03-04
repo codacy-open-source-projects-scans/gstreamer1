@@ -599,7 +599,7 @@ gst_qtdemux_src_convert (GstQTDemux * qtdemux, GstPad * pad,
   QtDemuxStream *stream = gst_pad_get_element_private (pad);
   gint32 index;
 
-  if (stream->subtype != FOURCC_vide) {
+  if (stream->subtype != FOURCC_vide || stream->subtype != FOURCC_pict) {
     res = FALSE;
     goto done;
   }
@@ -3036,7 +3036,7 @@ qtdemux_parse_piff (GstQTDemux * qtdemux, const guint8 * buffer, gint length,
 }
 
 static void
-qtdemux_parse_uuid (GstQTDemux * qtdemux, const guint8 * buffer, gint length)
+qtdemux_parse_uuid (GstQTDemux * qtdemux, const guint8 * buffer, gsize length)
 {
   static const guint8 xmp_uuid[] = { 0xBE, 0x7A, 0xCF, 0xCB,
     0x97, 0xA9, 0x42, 0xE8,
@@ -3080,16 +3080,18 @@ qtdemux_parse_uuid (GstQTDemux * qtdemux, const guint8 * buffer, gint length)
     qtdemux_handle_xmp_taglist (qtdemux, qtdemux->tag_list, taglist);
 
   } else if (memcmp (buffer + offset, playready_uuid, 16) == 0) {
-    int len;
-    const gunichar2 *s_utf16;
-    char *contents;
+    if (length >= offset + 0x30 + 2) {
+      guint16 len = GST_READ_UINT16_LE (buffer + offset + 0x30);
 
-    len = GST_READ_UINT16_LE (buffer + offset + 0x30);
-    s_utf16 = (const gunichar2 *) (buffer + offset + 0x32);
-    contents = g_utf16_to_utf8 (s_utf16, len / 2, NULL, NULL, NULL);
-    GST_ERROR_OBJECT (qtdemux, "contents: %s", contents);
+      if (length >= offset + 0x30 + 2 + len) {
+        const gunichar2 *s_utf16 = (const gunichar2 *) (buffer + offset + 0x32);
+        char *contents = g_utf16_to_utf8 (s_utf16, len / 2, NULL, NULL, NULL);
 
-    g_free (contents);
+        GST_ERROR_OBJECT (qtdemux, "contents: %s", GST_STR_NULL (contents));
+
+        g_free (contents);
+      }
+    }
 
     GST_ELEMENT_ERROR (qtdemux, STREAM, DECRYPT,
         (_("Cannot play stream because it is encrypted with PlayReady DRM.")),
@@ -5330,7 +5332,7 @@ gst_qtdemux_seek_to_previous_keyframe (GstQTDemux * qtdemux)
     }
 
     /* So that stream has a segment, we prefer video streams */
-    if (str->subtype == FOURCC_vide) {
+    if (str->subtype == FOURCC_vide || str->subtype == FOURCC_pict) {
       ref_str = str;
       break;
     }
@@ -5349,7 +5351,7 @@ gst_qtdemux_seek_to_previous_keyframe (GstQTDemux * qtdemux)
   /* So that stream has been playing from from_sample to to_sample. We will
    * get the timestamp of the previous sample and search for a keyframe before
    * that. For audio streams we do an arbitrary jump in the past (10 samples) */
-  if (ref_str->subtype == FOURCC_vide) {
+  if (ref_str->subtype == FOURCC_vide || ref_str->subtype == FOURCC_pict) {
     k_index = gst_qtdemux_find_keyframe (qtdemux, ref_str,
         ref_str->from_sample - 1, FALSE);
   } else {
@@ -6125,7 +6127,7 @@ gst_qtdemux_clip_buffer (GstQTDemux * qtdemux, QtDemuxStream * stream,
     num_rate = GST_SECOND;
     denom_rate = (gint) CUR_STREAM (stream)->rate;
     clip_data = TRUE;
-  } else if (stream->subtype == FOURCC_vide) {
+  } else if (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_pict) {
     frame_size = size;
     num_rate = CUR_STREAM (stream)->fps_n;
     denom_rate = CUR_STREAM (stream)->fps_d;
@@ -7169,7 +7171,8 @@ gst_qtdemux_do_fragmented_seek (GstQTDemux * qtdemux)
     if (stream->ra_entries == NULL)
       continue;
 
-    if (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_soun)
+    if (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_soun
+        || stream->subtype == FOURCC_pict)
       is_audio_or_video = TRUE;
     else
       is_audio_or_video = FALSE;
@@ -7385,7 +7388,7 @@ gst_qtdemux_loop_state_movie (GstQTDemux * qtdemux)
   /* If we're doing a keyframe-only trickmode, only push keyframes on video streams */
   if (G_UNLIKELY (qtdemux->segment.
           flags & GST_SEGMENT_FLAG_TRICKMODE_KEY_UNITS)) {
-    if (stream->subtype == FOURCC_vide) {
+    if (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_pict) {
       if (!keyframe) {
         GST_LOG_OBJECT (qtdemux, "Skipping non-keyframe on track-id %u",
             stream->track_id);
@@ -8792,7 +8795,8 @@ gst_qtdemux_process_adapter (GstQTDemux * demux, gboolean force)
             ret = GST_FLOW_EOS;
           } else if ((demux->segment.flags &
                   GST_SEGMENT_FLAG_TRICKMODE_KEY_UNITS) != 0 &&
-              stream->subtype == FOURCC_vide && !keyframe) {
+              (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_pict)
+              && !keyframe) {
             GST_LOG_OBJECT (demux, "Skipping non-keyframe on track-id %u",
                 stream->track_id);
             gst_adapter_flush (demux->adapter, demux->neededbytes);
@@ -9969,7 +9973,7 @@ gst_qtdemux_guess_framerate (GstQTDemux * qtdemux, QtDemuxStream * stream)
 static gboolean
 gst_qtdemux_configure_stream (GstQTDemux * qtdemux, QtDemuxStream * stream)
 {
-  if (stream->subtype == FOURCC_vide) {
+  if (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_pict) {
     gboolean fps_available = gst_qtdemux_guess_framerate (qtdemux, stream);
 
     if (CUR_STREAM (stream)->caps) {
@@ -15081,7 +15085,7 @@ qtdemux_parse_trak (GstQTDemux * qtdemux, GNode * trak, guint32 * mvhd_matrix)
     goto corrupt_file;
 
   /* parse rest of tkhd */
-  if (stream->subtype == FOURCC_vide) {
+  if (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_pict) {
     guint32 tkhd_matrix[9];
     guint32 matrix[9];
 
@@ -15181,7 +15185,7 @@ qtdemux_parse_trak (GstQTDemux * qtdemux, GNode * trak, guint32 * mvhd_matrix)
       }
     }
 
-    if (stream->subtype == FOURCC_vide) {
+    if (stream->subtype == FOURCC_vide || stream->subtype == FOURCC_pict) {
       GNode *colr;
       GNode *fiel;
       GNode *pasp;
@@ -17725,6 +17729,7 @@ gst_qtdemux_guess_bitrate (GstQTDemux * qtdemux)
     switch (str->subtype) {
       case FOURCC_soun:
       case FOURCC_vide:
+      case FOURCC_pict:
         GST_DEBUG_OBJECT (qtdemux, "checking bitrate for %" GST_PTR_FORMAT,
             CUR_STREAM (str)->caps);
         /* retrieve bitrate, prefer avg then max */
