@@ -583,6 +583,10 @@ class LauncherConfig(Loggable):
         dir_group.add_argument("--part-index", dest="part_index",
                                help="The index of the part to be run (starts at 1).",
                                type=int, default=1)
+        dir_group.add_argument("--dedicated-part", dest="dedicated_part",
+                               help="Regex pattern for tests to assign to the last part exclusively. "
+                               "Matching tests go to the last part, the rest are split across parts 1..N-1.",
+                               type=str, default=None)
 
         http_server_group = parser.add_argument_group(
             "Handle the HTTP server to be created")
@@ -666,6 +670,12 @@ def main(libsdir):
     res, options, tests_launcher = setup_launcher_from_args(sys.argv[1:])
     if res is False:
         return 1
+
+    if options.update_media_info or options.generate_info:
+        if tests_launcher.httpsrv:
+            tests_launcher.httpsrv.stop()
+        printc("Media info files have been updated", Colors.OKGREEN)
+        return 0
 
     if options.list_tests:
         if tests_launcher.list_tests() == -1:

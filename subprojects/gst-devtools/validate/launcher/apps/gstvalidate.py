@@ -28,6 +28,7 @@ import shlex
 import socket
 import subprocess
 import configparser
+import xml.etree.ElementTree as ET
 import json
 import glob
 import math
@@ -1184,7 +1185,17 @@ not been tested and explicitly activated if you set use --wanted-tests ALL""")
                     self._add_media(media_info, uri, media_file_path=media_file_path)
                     continue
                 elif fpath.endswith(GstValidateMediaDescriptor.STREAM_INFO_EXT) and not is_skipped:
-                    self._add_media(fpath)
+                    if self.options.update_media_info:
+                        media_xml = ET.parse(fpath).getroot()
+                        stream_uri = media_xml.attrib['uri']
+                        include_frames = bool(int(media_xml.attrib.get("frame-detection", 0)))
+                        stream_args = GstValidateBaseTestManager.MEDIA_CHECK_COMMAND.split(" ")
+                        stream_args.extend([stream_uri, "--output-file", fpath])
+                        if include_frames:
+                            stream_args.append("--full")
+                        subprocess.check_output(stream_args, stderr=open(os.devnull))
+                    else:
+                        self._add_media(fpath)
                     continue
                 elif not self.options.generate_info and not self.options.update_media_info and not self.options.validate_uris:
                     continue
@@ -1244,11 +1255,19 @@ not been tested and explicitly activated if you set use --wanted-tests ALL""")
                             fpath = os.path.abspath(os.path.join(root, f))
                             if os.path.isdir(fpath) or \
                                     fpath.endswith(GstValidateMediaDescriptor.MEDIA_INFO_EXT) or\
-                                    fpath.endswith(ScenarioManager.FILE_EXTENSION):
+                                    fpath.endswith(ScenarioManager.FILE_EXTENSION) or \
+                                    (self.options.media_info_dir and fpath.endswith(GstValidateMediaDescriptor.STREAM_INFO_EXT)):
                                 continue
                             else:
                                 self._discover_file(path2url(fpath), fpath,
                                                     media_root=path)
+
+            if self.options.media_info_dir and os.path.isdir(self.options.media_info_dir):
+                for root, dirs, files in os.walk(self.options.media_info_dir):
+                    for f in files:
+                        fpath = os.path.abspath(os.path.join(root, f))
+                        if fpath.endswith(GstValidateMediaDescriptor.STREAM_INFO_EXT):
+                            self._discover_file(path2url(fpath), fpath)
 
         self.debug("Uris found: %s", self._uris)
 

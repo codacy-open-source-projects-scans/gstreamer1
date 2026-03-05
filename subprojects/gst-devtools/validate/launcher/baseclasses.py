@@ -2054,9 +2054,14 @@ class _TestsLauncher(Loggable):
         if self.options.check_bugs_status:
             printc("OK", Colors.OKGREEN)
 
-        if self.needs_http_server() or options.httponly is True:
+        if options.update_media_info or options.generate_info:
             self.httpsrv = HTTPServer(options)
             self.httpsrv.start()
+
+        if self.needs_http_server() or options.httponly is True:
+            if not self.httpsrv:
+                self.httpsrv = HTTPServer(options)
+                self.httpsrv.start()
             configsdir = Path(options.logsdir) / "_validate_test_extra_configs"
             os.makedirs(configsdir, exist_ok=True)
             with open(configsdir / "http_server_port.var", "w") as f:
@@ -2135,6 +2140,27 @@ class _TestsLauncher(Loggable):
         return testlist_changed
 
     def _split_tests(self, num_groups):
+        dedicated_pattern = None
+        if self.options.dedicated_part:
+            dedicated_pattern = re.compile(self.options.dedicated_part)
+
+        if dedicated_pattern and num_groups > 1:
+            dedicated = []
+            rest = []
+            for test in self.tests:
+                if dedicated_pattern.findall(test.classname):
+                    dedicated.append(test)
+                else:
+                    rest.append(test)
+
+            # Distribute non-dedicated tests across parts 1..N-1
+            groups = [[] for _ in range(num_groups)]
+            group = cycle(groups[:-1])
+            for test in rest:
+                next(group).append(test)
+            groups[-1] = dedicated
+            return groups
+
         groups = [[] for x in range(num_groups)]
         group = cycle(groups)
         for test in self.tests:
