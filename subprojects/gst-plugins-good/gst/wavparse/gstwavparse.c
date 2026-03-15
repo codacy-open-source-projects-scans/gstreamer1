@@ -549,10 +549,12 @@ gst_wavparse_perform_seek (GstWavParse * wav, GstEvent * event)
     if (!gst_wavparse_time_to_bytepos (wav, stop, (gint64 *) & wav->end_offset))
       wav->end_offset = stop;
     GST_LOG_OBJECT (wav, "end_offset=%" G_GUINT64_FORMAT, wav->end_offset);
-    wav->end_offset -= (wav->end_offset % wav->bytes_per_sample);
-    GST_LOG_OBJECT (wav, "end_offset=%" G_GUINT64_FORMAT, wav->end_offset);
-    wav->end_offset += wav->datastart;
-    GST_LOG_OBJECT (wav, "end_offset=%" G_GUINT64_FORMAT, wav->end_offset);
+    if (wav->end_offset != -1) {
+      wav->end_offset -= (wav->end_offset % wav->bytes_per_sample);
+      GST_LOG_OBJECT (wav, "end_offset=%" G_GUINT64_FORMAT, wav->end_offset);
+      wav->end_offset += wav->datastart;
+      GST_LOG_OBJECT (wav, "end_offset=%" G_GUINT64_FORMAT, wav->end_offset);
+    }
   } else {
     GST_LOG_OBJECT (wav, "continue to end_offset=%" G_GUINT64_FORMAT,
         wav->end_offset);
@@ -564,12 +566,16 @@ gst_wavparse_perform_seek (GstWavParse * wav, GstEvent * event)
   if (gst_pad_peer_query_duration (wav->sinkpad, bformat, &upstream_size))
     wav->end_offset = MIN (wav->end_offset, upstream_size);
 
-  if (wav->datasize > 0 && wav->end_offset > wav->datastart + wav->datasize)
+  if (wav->datasize > 0 && (wav->end_offset != -1
+          || wav->end_offset > wav->datastart + wav->datasize))
     wav->end_offset = wav->datastart + wav->datasize;
 
   /* this is the range of bytes we will use for playback */
   wav->offset = MIN (wav->offset, wav->end_offset);
-  wav->dataleft = wav->end_offset - wav->offset;
+  if (wav->end_offset == -1)
+    wav->dataleft = 0;
+  else
+    wav->dataleft = wav->end_offset - wav->offset;
 
   GST_DEBUG_OBJECT (wav,
       "seek: rate %lf, offset %" G_GUINT64_FORMAT ", end %" G_GUINT64_FORMAT
@@ -1346,7 +1352,8 @@ gst_wavparse_stream_headers (GstWavParse * wav)
         "Got TAG: %" GST_FOURCC_FORMAT ", offset %" G_GUINT64_FORMAT ", size %"
         G_GUINT32_FORMAT, GST_FOURCC_ARGS (tag), wav->offset, size);
 
-    if (size > MAX_CHUNK_SIZE) {
+    /* Ignore size limit for data chunks to support RF64 and RIFF files above 2GiB */
+    if (tag != GST_RIFF_TAG_data && size > MAX_CHUNK_SIZE) {
       GST_WARNING_OBJECT (wav, "Invalid size, clipping to %u", MAX_CHUNK_SIZE);
       size = MAX_CHUNK_SIZE;
     }
@@ -1380,7 +1387,7 @@ gst_wavparse_stream_headers (GstWavParse * wav)
         wav->offset += 8;
         wav->datastart = wav->offset;
         /* use size from ds64 chunk if available */
-        if (size64 == -1 && wav->datasize > 0) {
+        if (size64 == G_MAXUINT32 && wav->datasize > 0) {
           GST_DEBUG_OBJECT (wav, "Using ds64 datasize");
           size64 = wav->datasize;
         }
