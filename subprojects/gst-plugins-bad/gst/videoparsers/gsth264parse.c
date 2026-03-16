@@ -334,7 +334,7 @@ gst_h264_parse_start (GstBaseParse * parse)
   h264parse->dts = GST_CLOCK_TIME_NONE;
   h264parse->ts_trn_nb = GST_CLOCK_TIME_NONE;
   h264parse->sei_pic_struct_pres_flag = FALSE;
-  h264parse->sei_pic_struct = 0;
+  h264parse->sei_pic_struct = GST_H264_SEI_PIC_STRUCT_FRAME;
   h264parse->field_pic_flag = 0;
   h264parse->aud_needed = TRUE;
   h264parse->aud_insert = FALSE;
@@ -581,6 +581,26 @@ _nal_name (GstH264NalUnitType nal_type)
     return nal_names[nal_type];
   return "Invalid";
 }
+
+static const gchar *pic_struct_name[] = {
+  "Frame",
+  "Top Field",
+  "Bottom Field",
+  "Top-Bottom",
+  "Bottom-Top",
+  "Top-Bottom-Top",
+  "Bottom-Top-Bottom",
+  "Doubling",
+  "Tripling"
+};
+
+static const gchar *
+_pic_struct_name (GstH264SEIPicStructType pic_type)
+{
+  if (pic_type <= GST_H264_SEI_PIC_STRUCT_FRAME_TRIPLING)
+    return pic_struct_name[pic_type];
+  return "Invalid";
+}
 #endif
 
 static void
@@ -657,6 +677,9 @@ gst_h264_parse_process_sei (GstH264Parse * h264parse, GstH264NalUnit * nalu)
             sei.payload.pic_timing.cpb_removal_delay;
         if (h264parse->sei_pic_struct_pres_flag) {
           h264parse->sei_pic_struct = sei.payload.pic_timing.pic_struct;
+          GST_DEBUG_OBJECT (h264parse, "SEI Picture type %d (%s)",
+              h264parse->sei_pic_struct,
+              _pic_struct_name (h264parse->sei_pic_struct));
         }
 
         h264parse->num_clock_timestamp = 0;
@@ -2235,7 +2258,7 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
     caps = gst_caps_copy (sink_caps);
   } else {
     gint crop_width, crop_height;
-    gint fps_num, fps_den;
+    gint fps_num = 0, fps_den = 1;
     gint par_n, par_d;
     GstH264VUIParams *vui = &sps->vui_parameters;
     gchar *colorimetry = NULL;
@@ -2269,8 +2292,14 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
 
     /* 0/1 is set as the default in the codec parser, we will set
      * it in case we have no info */
-    gst_h264_video_calculate_framerate (sps, h264parse->field_pic_flag,
-        h264parse->sei_pic_struct, &fps_num, &fps_den);
+    if (sps && sps->vui_parameters_present_flag
+        && sps->vui_parameters.timing_info_present_flag) {
+      const GstH264VUIParams *vui = &sps->vui_parameters;
+      /* The framerate is solely based on the timing information */
+      fps_num = vui->time_scale;
+      /* We need a framerate, this is a field rate */
+      fps_den = vui->num_units_in_tick * 2;
+    }
 
     /* Checks whether given framerate makes sense or not
      * See also A.3.4 Effect of level limits on frame rate (informative)
@@ -2389,6 +2418,22 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
           /* Assume par_n/par_d of 1/1 for calcs below, but don't set into caps */
           par_n = par_d = 1;
         }
+      }
+
+      if (s && !gst_structure_has_field (s, "interlace-mode")) {
+        const gchar *interlace_mode;
+        /* If a picture timing is present, and upstream didn't specify the
+         * interlace mode, we are in mixed mode (i.e. we are not guaranteed we
+         * will either be always interlaced or always progressive)
+         */
+        if (vui->pic_struct_present_flag)
+          interlace_mode = "mixed";
+        else
+          interlace_mode = "progressive";
+        GST_DEBUG_OBJECT (h264parse, "Setting interlace-mode : %s",
+            interlace_mode);
+        gst_caps_set_simple (caps, "interlace-mode", G_TYPE_STRING,
+            interlace_mode, NULL);
       }
 
       /* Pass through or set output stereo/multiview config */
@@ -2674,14 +2719,7 @@ gst_h264_parse_get_duration (GstH264Parse * h264parse, gboolean frame)
     goto fps_duration;
   }
 
-  if (h264parse->sei_pic_struct_pres_flag &&
-      h264parse->sei_pic_struct != (guint8) - 1) {
-    /* Note that when h264parse->sei_pic_struct == -1 (unspecified), there
-     * are ways to infer its value. This is related to computing the
-     * TopFieldOrderCnt and BottomFieldOrderCnt, which looks
-     * complicated and thus not implemented for the time being. Yet
-     * the value we have here is correct for many applications
-     */
+  if (h264parse->sei_pic_struct_pres_flag) {
     switch (h264parse->sei_pic_struct) {
       case GST_H264_SEI_PIC_STRUCT_TOP_FIELD:
       case GST_H264_SEI_PIC_STRUCT_BOTTOM_FIELD:
@@ -2773,14 +2811,7 @@ gst_h264_parse_get_timestamp (GstH264Parse * h264parse,
     goto exit;
   }
 
-  if (h264parse->sei_pic_struct_pres_flag &&
-      h264parse->sei_pic_struct != (guint8) - 1) {
-    /* Note that when h264parse->sei_pic_struct == -1 (unspecified), there
-     * are ways to infer its value. This is related to computing the
-     * TopFieldOrderCnt and BottomFieldOrderCnt, which looks
-     * complicated and thus not implemented for the time being. Yet
-     * the value we have here is correct for many applications
-     */
+  if (h264parse->sei_pic_struct_pres_flag) {
     switch (h264parse->sei_pic_struct) {
       case GST_H264_SEI_PIC_STRUCT_TOP_FIELD:
       case GST_H264_SEI_PIC_STRUCT_BOTTOM_FIELD:
@@ -3365,7 +3396,6 @@ gst_h264_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
   GstBuffer *new_buf;
   GstEvent *event;
   GstBuffer *parse_buffer = NULL;
-  gboolean is_interlaced = FALSE;
   GstH264SPS *sps;
 
   h264parse = GST_H264_PARSE (parse);
@@ -3619,7 +3649,6 @@ gst_h264_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
 
       if (tim->ct_type == GST_H264_CT_TYPE_INTERLACED) {
         flags |= GST_VIDEO_TIME_CODE_FLAGS_INTERLACED;
-        is_interlaced = TRUE;
       }
 
       /* Equation D-1 (without and tOffset)
@@ -3680,10 +3709,51 @@ gst_h264_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
     h264parse->num_clock_timestamp = 0;
   }
 
-  if (is_interlaced) {
-    GST_BUFFER_FLAG_SET (parse_buffer, GST_VIDEO_BUFFER_FLAG_INTERLACED);
-    if (h264parse->sei_pic_struct == GST_H264_SEI_PIC_STRUCT_TOP_FIELD)
+  if (h264parse->sei_pic_struct_pres_flag) {
+    gboolean interlaced = TRUE;
+    gboolean top_field_first = FALSE;
+    gboolean repeat_first_field = FALSE;
+
+    switch (h264parse->sei_pic_struct) {
+      case GST_H264_SEI_PIC_STRUCT_FRAME:
+      case GST_H264_SEI_PIC_STRUCT_FRAME_DOUBLING:
+      case GST_H264_SEI_PIC_STRUCT_FRAME_TRIPLING:
+        interlaced = FALSE;
+        break;
+      case GST_H264_SEI_PIC_STRUCT_TOP_FIELD:
+        top_field_first = TRUE;
+        /* NOTE: We *could* set GST_VIDEO_BUFFER_FLAG_ONEFIELD for this and the
+         * following but we don't since the usage of that flag is not 100%
+         * coherent accross elements. */
+        break;
+      case GST_H264_SEI_PIC_STRUCT_BOTTOM_FIELD:
+        break;
+      case GST_H264_SEI_PIC_STRUCT_TOP_BOTTOM:
+        top_field_first = TRUE;
+        break;
+      case GST_H264_SEI_PIC_STRUCT_BOTTOM_TOP:
+        /* All defaults */
+        break;
+      case GST_H264_SEI_PIC_STRUCT_TOP_BOTTOM_TOP:
+        top_field_first = TRUE;
+        repeat_first_field = TRUE;
+        break;
+      case GST_H264_SEI_PIC_STRUCT_BOTTOM_TOP_BOTTOM:
+        repeat_first_field = TRUE;
+        break;
+      default:
+        interlaced = FALSE;
+        break;
+    }
+
+    if (interlaced)
+      GST_BUFFER_FLAG_SET (parse_buffer, GST_VIDEO_BUFFER_FLAG_INTERLACED);
+
+    if (top_field_first)
       GST_BUFFER_FLAG_SET (parse_buffer, GST_VIDEO_BUFFER_FLAG_TFF);
+
+    if (repeat_first_field)
+      GST_BUFFER_FLAG_SET (parse_buffer, GST_VIDEO_BUFFER_FLAG_RFF);
   }
 
   gst_video_push_user_data ((GstElement *) h264parse, &h264parse->user_data,
