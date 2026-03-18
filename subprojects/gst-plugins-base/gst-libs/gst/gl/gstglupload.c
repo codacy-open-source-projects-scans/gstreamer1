@@ -1300,6 +1300,10 @@ _dma_buf_filter_egl_supported_formats (GstGLContext * context,
   GstVideoFormat gst_format;
   guint32 fourcc;
 
+  /* Until we have a context, simply assume all formats are supported */
+  if (!context)
+    return TRUE;
+
   all_formats = gst_structure_get_value (structure, "format");
   if (!all_formats)
     return FALSE;
@@ -1314,8 +1318,7 @@ _dma_buf_filter_egl_supported_formats (GstGLContext * context,
     if (fourcc == DRM_FORMAT_INVALID)
       return FALSE;
 
-    if (context &&
-        !gst_gl_context_egl_format_supports_modifier (context, fourcc,
+    if (!gst_gl_context_egl_format_supports_modifier (context, fourcc,
             DRM_FORMAT_MOD_LINEAR, include_external))
       return FALSE;
 
@@ -1337,8 +1340,7 @@ _dma_buf_filter_egl_supported_formats (GstGLContext * context,
       if (fourcc == DRM_FORMAT_INVALID)
         continue;
 
-      if (context &&
-          !gst_gl_context_egl_format_supports_modifier (context, fourcc,
+      if (!gst_gl_context_egl_format_supports_modifier (context, fourcc,
               DRM_FORMAT_MOD_LINEAR, include_external))
         continue;
 
@@ -1519,6 +1521,19 @@ _dma_buf_upload_transform_caps (gpointer impl, GstGLContext * context,
     }
     if (tmp)
       ret = gst_caps_merge (ret, tmp);
+
+    /* In case we don't have a context yet, we may endup linking gainst a narrow
+     * caps filter with dmabuf feature, make sure we allow linking, as this
+     * format may be supported as GLMemory with RGBA format (direct dmabuf
+     * uploads).
+     */
+    if (!ret && !context) {
+      ret = gst_caps_new_static_str_simple ("video/x-raw",
+          "format", G_TYPE_STRING, "RGBA", NULL);
+      gst_caps_set_features_simple (ret,
+          gst_caps_features_new_single_static_str
+          (GST_CAPS_FEATURE_MEMORY_GL_MEMORY));
+    }
 
     if (!ret) {
       GST_DEBUG_OBJECT (dmabuf->upload,
