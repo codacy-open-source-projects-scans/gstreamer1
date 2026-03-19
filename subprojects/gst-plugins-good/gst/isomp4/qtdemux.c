@@ -1908,6 +1908,7 @@ _create_stream (GstQTDemux * demux, guint32 track_id)
   stream->n_samples_moof = 0;
   stream->duration_moof = 0;
   stream->duration_last_moof = 0;
+  stream->trun_next_dts = 0;
   stream->alignment = 1;
   stream->needs_row_alignment = FALSE;
   stream->need_reorder = FALSE;
@@ -3521,48 +3522,38 @@ qtdemux_parse_trun (GstQTDemux * qtdemux, GstByteReader * trun,
   if (stream->samples == NULL)
     goto out_of_memory;
 
-  if (qtdemux->fragment_start != -1) {
+  if (has_tfdt) {
+    /* this specific fragment has a tfdt, use it. */
+    timestamp = decode_ts;
+    gst_ts = QTSTREAMTIME_TO_GSTTIME (stream, timestamp);
+    GST_INFO_OBJECT (qtdemux, "first sample ts %" GST_TIME_FORMAT
+        " (using tfdt)", GST_TIME_ARGS (gst_ts));
+  } else if (qtdemux->fragment_start != -1) {
+    /* adaptive streaming: haven't seen any tfdt since the start of the current
+     * segment, so we use the PTS from the manifest as a fallback. */
     timestamp = GSTTIME_TO_QTSTREAMTIME (stream, qtdemux->fragment_start);
     qtdemux->fragment_start = -1;
+    gst_ts = QTSTREAMTIME_TO_GSTTIME (stream, timestamp);
+    GST_INFO_OBJECT (qtdemux, "first sample ts %" GST_TIME_FORMAT
+        " (using upstream buffer PTS)", GST_TIME_ARGS (gst_ts));
+  } else if (stream->pending_seek != NULL) {
+    /* if we don't have a timestamp from a tfdt box, we'll use the one
+     * from the mfra seek table */
+    GST_INFO_OBJECT (stream->pad, "pending seek ts = %" GST_TIME_FORMAT,
+        GST_TIME_ARGS (stream->pending_seek->ts));
+
+    /* FIXME: this is not fully correct, the timestamp refers to the random
+     * access sample refered to in the tfra entry, which may not necessarily
+     * be the first sample in the tfrag/trun (but hopefully/usually is) */
+    timestamp = GSTTIME_TO_QTSTREAMTIME (stream, stream->pending_seek->ts);
   } else {
-    if (stream->n_samples == 0) {
-      if (decode_ts > 0) {
-        timestamp = decode_ts;
-      } else if (stream->pending_seek != NULL) {
-        /* if we don't have a timestamp from a tfdt box, we'll use the one
-         * from the mfra seek table */
-        GST_INFO_OBJECT (stream->pad, "pending seek ts = %" GST_TIME_FORMAT,
-            GST_TIME_ARGS (stream->pending_seek->ts));
-
-        /* FIXME: this is not fully correct, the timestamp refers to the random
-         * access sample refered to in the tfra entry, which may not necessarily
-         * be the first sample in the tfrag/trun (but hopefully/usually is) */
-        timestamp = GSTTIME_TO_QTSTREAMTIME (stream, stream->pending_seek->ts);
-      } else {
-        timestamp = 0;
-      }
-
-      gst_ts = QTSTREAMTIME_TO_GSTTIME (stream, timestamp);
-      GST_INFO_OBJECT (stream->pad, "first sample ts %" GST_TIME_FORMAT,
-          GST_TIME_ARGS (gst_ts));
-    } else {
-      /* If this is a GST_FORMAT_BYTES stream and we have a tfdt then use it
-       * instead of the sum of sample durations */
-      if (has_tfdt && !qtdemux->upstream_format_is_time) {
-        timestamp = decode_ts;
-        gst_ts = QTSTREAMTIME_TO_GSTTIME (stream, timestamp);
-        GST_INFO_OBJECT (qtdemux, "first sample ts %" GST_TIME_FORMAT
-            " (using tfdt)", GST_TIME_ARGS (gst_ts));
-      } else {
-        /* subsequent fragments extend stream */
-        timestamp =
-            stream->samples[stream->n_samples - 1].timestamp +
-            stream->samples[stream->n_samples - 1].duration;
-        gst_ts = QTSTREAMTIME_TO_GSTTIME (stream, timestamp);
-        GST_INFO_OBJECT (qtdemux, "first sample ts %" GST_TIME_FORMAT
-            " (extends previous samples)", GST_TIME_ARGS (gst_ts));
-      }
-    }
+    /* subsequent fragments extend the stream, be it the previous fragment or
+     * (in the case of the first fragment) the end of the non-fragmented part
+     * of the movie. */
+    timestamp = stream->trun_next_dts;
+    gst_ts = QTSTREAMTIME_TO_GSTTIME (stream, timestamp);
+    GST_INFO_OBJECT (qtdemux, "first sample ts %" GST_TIME_FORMAT "%s",
+        GST_TIME_ARGS (gst_ts), timestamp ? " (extends previous samples)" : "");
   }
 
   initial_offset = *running_offset;
@@ -3654,6 +3645,7 @@ qtdemux_parse_trun (GstQTDemux * qtdemux, GstByteReader * trun,
 
   stream->n_samples += samples_count;
   stream->n_samples_moof += samples_count;
+  stream->trun_next_dts = timestamp;
 
   if (stream->pending_seek != NULL)
     stream->pending_seek = NULL;
@@ -11400,6 +11392,9 @@ done:
           break;
     }
   }
+  /* fragments time start after the non-fragment part. */
+  if (stream->stts_time > stream->trun_next_dts)
+    stream->trun_next_dts = stream->stts_time;
   GST_OBJECT_UNLOCK (qtdemux);
 
   return TRUE;
@@ -16104,13 +16099,10 @@ qtdemux_parse_trak (GstQTDemux * qtdemux, GNode * trak, guint32 * mvhd_matrix)
             if (vpcC) {
               const guint8 *data = vpcC->data;
               guint32 size = QT_UINT32 (data);
-              const gchar *profile_str = NULL;
-              const gchar *level_str = NULL;
-              const gchar *chroma_format_str = NULL;
-              const gchar *chroma_site_str = NULL;
-              guint8 profile;
-              guint8 bitdepth;
-              guint8 chroma_format;
+              gint profile = -1;
+              gint level = -1;
+              gint bitdepth = -1;
+              gint chroma_format = -1;
               GstVideoColorimetry cinfo;
 
               /* parse, if found */
@@ -16145,69 +16137,22 @@ qtdemux_parse_trak (GstQTDemux * qtdemux, GNode * trak, guint32 * mvhd_matrix)
                 break;
               }
 
-              profile = data[12];
-              switch (profile) {
-                case 0:
-                  profile_str = "0";
-                  break;
-                case 1:
-                  profile_str = "1";
-                  break;
-                case 2:
-                  profile_str = "2";
-                  break;
-                case 3:
-                  profile_str = "3";
-                  break;
-                default:
-                  break;
-              }
-
-              if (profile_str) {
-                gst_caps_set_simple (entry->caps,
-                    "profile", G_TYPE_STRING, profile_str, NULL);
-              }
-
-              if ((level_str = gst_codec_utils_vp9_get_level (data[13]))) {
-                gst_caps_set_simple (entry->caps, "level", G_TYPE_STRING,
-                    level_str, NULL);
-              }
+              if (data[12] <= 3)
+                profile = data[12];
+              if (gst_codec_utils_vp9_get_level (data[13]) != NULL)
+                level = data[13];
 
               bitdepth = (data[14] & 0xf0) >> 4;
-              if (bitdepth == 8 || bitdepth == 10 || bitdepth == 12) {
-                gst_caps_set_simple (entry->caps,
-                    "bit-depth-luma", G_TYPE_UINT, bitdepth,
-                    "bit-depth-chroma", G_TYPE_UINT, bitdepth, NULL);
-              }
+              if (bitdepth != 8 && bitdepth != 10 && bitdepth != 12)
+                bitdepth = -1;
 
               chroma_format = (data[14] & 0xe) >> 1;
-              switch (chroma_format) {
-                case 0:
-                  chroma_site_str = "v-cosited";
-                  chroma_format_str = "4:2:0";
-                  break;
-                case 1:
-                  chroma_site_str = "cosited";
-                  chroma_format_str = "4:2:0";
-                  break;
-                case 2:
-                  chroma_format_str = "4:2:2";
-                  break;
-                case 3:
-                  chroma_format_str = "4:4:4";
-                  break;
-                default:
-                  break;
-              }
+              if (chroma_format < 0 || chroma_format > 3)
+                chroma_format = -1;
 
-              if (chroma_format_str) {
-                gst_caps_set_simple (entry->caps,
-                    "chroma-format", G_TYPE_STRING, chroma_format_str, NULL);
-              }
-
-              if (chroma_site_str) {
-                gst_caps_set_simple (entry->caps,
-                    "chroma-site", G_TYPE_STRING, chroma_site_str, NULL);
+              if (!gst_codec_utils_vpx_caps_set_format_fields (entry->caps,
+                      profile, level, bitdepth, chroma_format)) {
+                GST_DEBUG_OBJECT (qtdemux, "Invalid VPX vpcC format fields");
               }
 
               if ((data[14] & 0x1) != 0)

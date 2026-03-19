@@ -79,9 +79,13 @@ good_tests = [
   [ 'elements/y4mdec', get_option('y4m').disabled()],
   [ 'elements/y4menc', get_option('y4m').disabled()],
   [ 'pipelines/effectv', get_option('effectv').disabled()],
+  [ 'pipelines/av1c-qtmux-qtdemux', get_option('isomp4').disabled(),
+    [gstriff_dep, zlib_dep] ],
   [ 'elements/equalizer', get_option('equalizer').disabled()],
   [ 'pipelines/simple-launch-lines' ],
   [ 'pipelines/tagschecking' ],
+  [ 'pipelines/isomp4-vpcc', get_option('isomp4').disabled() ],
+  [ 'pipelines/vp9-codecprivate', get_option('matroska').disabled(), [gstriff_dep] ],
   [ 'generic/states' ],
 ]
 
