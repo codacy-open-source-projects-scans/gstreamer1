@@ -1,5 +1,5 @@
 project('gst-rtsp-server', 'c',
-  version : '1.29.0.1',
+  version : '1.29.1.1',
   meson_version : '>= 1.4',
   default_options : ['warning_level=1', 'buildtype=debugoptimized'])
 
@@ -229,7 +229,12 @@ endif
 
 configure_file(output: 'config.h', configuration: cdata)
 
-meson.add_dist_script('scripts/gen-changelog.py', meson.project_name(), '1.26.0', meson.project_version())
+meson.add_dist_script('scripts/gen-changelog.py', meson.project_name(), '1.28.0', meson.project_version())
+
+# dist common files from monorepo root
+if not meson.is_subproject()
+  meson.add_dist_script('scripts/dist-common-files.py', meson.project_version())
+endif
 
 plugin_names = []
 gst_plugins = []

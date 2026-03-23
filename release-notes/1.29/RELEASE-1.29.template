@@ -1,8 +1,8 @@
-This is GStreamer gst-python 1.29.0.1.
+This is GStreamer 1.29.x
 
 GStreamer 1.29 is the unstable development branch leading up to the next major
 stable version which will be 1.30.
- 
+
 The 1.29 development series adds new features on top of the 1.28 series and is
 part of the API and ABI-stable 1.x release series of the GStreamer multimedia
 framework.
