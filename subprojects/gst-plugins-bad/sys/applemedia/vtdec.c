@@ -186,15 +186,15 @@ CFSTR ("RequireHardwareAcceleratedVideoDecoder");
 #define VIDEO_SRC_CAPS_FORMATS "{ NV12, AYUV64, ARGB64_BE, P010_10LE }"
 
 #define VIDEO_SRC_CAPS_NATIVE                                           \
-    GST_VIDEO_CAPS_MAKE(VIDEO_SRC_CAPS_FORMATS) ";"                     \
     GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_GL_MEMORY,\
         VIDEO_SRC_CAPS_FORMATS) ", "                                    \
-    "texture-target = (string) rectangle "
+    "texture-target = (string) rectangle ;"                             \
+    GST_VIDEO_CAPS_MAKE(VIDEO_SRC_CAPS_FORMATS)
 
 #if defined(APPLEMEDIA_MOLTENVK)
-#define VIDEO_SRC_CAPS VIDEO_SRC_CAPS_NATIVE "; "                           \
+#define VIDEO_SRC_CAPS                                                      \
     GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, \
-        VIDEO_SRC_CAPS_FORMATS)
+        VIDEO_SRC_CAPS_FORMATS) ";" VIDEO_SRC_CAPS_NATIVE
 #else
 #define VIDEO_SRC_CAPS VIDEO_SRC_CAPS_NATIVE
 #endif
@@ -220,6 +220,7 @@ gst_vtdec_class_init (GstVtdecClass * klass)
       caps = gst_vtutil_caps_append_video_format (caps, "RGBA64_LE");
     gst_element_class_add_pad_template (element_class,
         gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS, caps));
+    gst_caps_unref (caps);
   }
 
   gst_element_class_set_static_metadata (element_class,
@@ -1290,11 +1291,17 @@ create_format_description_from_codec_data (GstVtdec * vtdec,
       gst_buffer_unmap (vtdec->av1_sequence_header_obu, &seq_map);
     if (!av1c) {
       GST_ERROR_OBJECT (vtdec, "Failed to build av1C from codec_data");
+      gst_buffer_unmap (codec_data, &map);
+      CFRelease (atoms);
+      CFRelease (extensions);
       return NULL;
     }
 
     if (!gst_buffer_map (av1c, &av1c_map, GST_MAP_READ)) {
       gst_buffer_unref (av1c);
+      gst_buffer_unmap (codec_data, &map);
+      CFRelease (atoms);
+      CFRelease (extensions);
       return NULL;
     }
 
@@ -1516,7 +1523,7 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
     state = gst_video_decoder_get_output_state (GST_VIDEO_DECODER (vtdec));
     if (state == NULL) {
       GST_WARNING_OBJECT (vtdec, "Output state not configured, release buffer");
-      frame->flags &= VTDEC_FRAME_FLAG_SKIP;
+      frame->flags |= VTDEC_FRAME_FLAG_SKIP;
     } else {
       buf =
           gst_core_video_buffer_new (image_buffer, &state->info,
