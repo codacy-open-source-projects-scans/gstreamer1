@@ -1,5 +1,5 @@
 /* GStreamer
- * Copyright (C) 2023 Seungha Yang <seungha@centricular.com>
+ * Copyright (C) 2026 Seungha Yang <seungha@centricular.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -19,21 +19,14 @@
 
 #pragma once
 
-#include "gstd3d12decoder.h"
+#include <gst/gst.h>
+#include <gst/base/gstaggregator.h>
 
 G_BEGIN_DECLS
 
-typedef struct
-{
-  GstCaps *sink_caps;
-  gchar *factory_name;
-} GstD3D12Vp9DecRegisterData;
-
-GstD3D12Vp9DecRegisterData * gst_d3d12_vp9_dec_register (GstPlugin * plugin,
-                                      GstD3D12Device * device,
-                                      ID3D12VideoDevice * video_device,
-                                      guint rank,
-                                      gboolean d3d11_interop);
+#define GST_TYPE_D3D12_ALPHA_COMBINE (gst_d3d12_alpha_combine_get_type())
+G_DECLARE_FINAL_TYPE (GstD3D12AlphaCombine, gst_d3d12_alpha_combine,
+    GST, D3D12_ALPHA_COMBINE, GstAggregator)
 
 G_END_DECLS
 
