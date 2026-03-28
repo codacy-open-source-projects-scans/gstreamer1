@@ -8227,8 +8227,9 @@ gst_qtdemux_chain (GstPad * sinkpad, GstObject * parent, GstBuffer * inbuf)
   gst_adapter_push (demux->adapter, inbuf);
 
   GST_DEBUG_OBJECT (demux,
-      "pushing in inbuf %p, neededbytes:%u, available:%" G_GSIZE_FORMAT, inbuf,
-      demux->neededbytes, gst_adapter_available (demux->adapter));
+      "pushing in inbuf %p, neededbytes:%" G_GUINT64_FORMAT ", available:%"
+      G_GSIZE_FORMAT, inbuf, demux->neededbytes,
+      gst_adapter_available (demux->adapter));
 
   return gst_qtdemux_process_adapter (demux, FALSE);
 }
@@ -8255,10 +8256,11 @@ gst_qtdemux_process_adapter (GstQTDemux * demux, gboolean force)
           gst_adapter_distance_from_discont (demux->adapter);
 
       GST_DEBUG_OBJECT (demux,
-          "state:%s , demux->neededbytes:%d, demux->offset:%" G_GUINT64_FORMAT
-          " adapter offset :%" G_GUINT64_FORMAT " (+ %" G_GUINT64_FORMAT
-          " bytes)", qt_demux_state_string (demux->state), demux->neededbytes,
-          demux->offset, discont_offset, distance_from_discont);
+          "state:%s , demux->neededbytes:%" G_GUINT64_FORMAT ", demux->offset:%"
+          G_GUINT64_FORMAT " adapter offset :%" G_GUINT64_FORMAT " (+ %"
+          G_GUINT64_FORMAT " bytes)", qt_demux_state_string (demux->state),
+          demux->neededbytes, demux->offset, discont_offset,
+          distance_from_discont);
     }
 #endif
 
@@ -8288,7 +8290,7 @@ gst_qtdemux_process_adapter (GstQTDemux * demux, gboolean force)
           break;
         }
         if (fourcc == FOURCC_mdat) {
-          gint next_entry = next_entry_size (demux);
+          guint64 next_entry = next_entry_size (demux);
           if (QTDEMUX_N_STREAMS (demux) > 0 && (next_entry != -1
                   || !demux->fragmented)) {
             /* we have the headers, start playback */
@@ -8836,7 +8838,8 @@ gst_qtdemux_process_adapter (GstQTDemux * demux, gboolean force)
         stream->offset_in_sample = 0;
 
         /* update current offset and figure out size of next buffer */
-        GST_LOG_OBJECT (demux, "increasing offset %" G_GUINT64_FORMAT " by %u",
+        GST_LOG_OBJECT (demux,
+            "increasing offset %" G_GUINT64_FORMAT " by %" G_GUINT64_FORMAT,
             demux->offset, demux->neededbytes);
         demux->offset += demux->neededbytes;
         GST_LOG_OBJECT (demux, "offset is now %" G_GUINT64_FORMAT,
@@ -10677,13 +10680,8 @@ qtdemux_stbl_init (GstQTDemux * qtdemux, QtDemuxStream * stream, GNode * stbl)
   GST_LOG_OBJECT (qtdemux, "%u timestamp blocks", stream->n_sample_times);
 
   /* make sure there's enough data */
-  if (!qt_atom_parser_has_chunks (&stream->stts, stream->n_sample_times, 8)) {
-    stream->n_sample_times = gst_byte_reader_get_remaining (&stream->stts) / 8;
-    GST_LOG_OBJECT (qtdemux, "overriding to %u timestamp blocks",
-        stream->n_sample_times);
-    if (!stream->n_sample_times)
-      goto corrupt_file;
-  }
+  if (!qt_atom_parser_has_chunks (&stream->stts, stream->n_sample_times, 8))
+    goto corrupt_file;
 
   /* sync sample atom */
   stream->stps_present = FALSE;
@@ -10746,6 +10744,11 @@ qtdemux_stbl_init (GstQTDemux * qtdemux, QtDemuxStream * stream, GNode * stbl)
   if (!stream->n_samples)
     goto no_samples;
 
+  if (stream->sample_size == 0) {
+    if (!qt_atom_parser_has_chunks (&stream->stsz, stream->n_samples, 4))
+      goto corrupt_file;
+  }
+
   /* sample-to-chunk atom */
   if (!qtdemux_tree_get_child_by_type_full (stbl, FOURCC_stsc, &stream->stsc))
     goto corrupt_file;
@@ -10766,7 +10769,6 @@ qtdemux_stbl_init (GstQTDemux * qtdemux, QtDemuxStream * stream, GNode * stbl)
   if (!qt_atom_parser_has_chunks (&stream->stsc, stream->n_samples_per_chunk,
           12))
     goto corrupt_file;
-
 
   /* chunk offset */
   if (qtdemux_tree_get_child_by_type_full (stbl, FOURCC_stco, &stream->stco))
@@ -10791,9 +10793,20 @@ qtdemux_stbl_init (GstQTDemux * qtdemux, QtDemuxStream * stream, GNode * stbl)
     /* treat chunks as samples */
     if (!gst_byte_reader_get_uint32_be (&stream->stco, &stream->n_samples))
       goto corrupt_file;
+
+    /* make sure there's enough data */
+    if (!qt_atom_parser_has_chunks (&stream->stco, stream->n_samples,
+            stream->co_size))
+      goto corrupt_file;
   } else {
-    /* skip number of entries */
-    if (!gst_byte_reader_skip (&stream->stco, 4))
+    guint32 num_entries;
+
+    if (!gst_byte_reader_get_uint32_be (&stream->stco, &num_entries))
+      goto corrupt_file;
+
+    /* make sure there's enough data */
+    if (!qt_atom_parser_has_chunks (&stream->stco, num_entries,
+            stream->co_size))
       goto corrupt_file;
 
     /* make sure there are enough data in the stsz atom */
@@ -11840,7 +11853,8 @@ qtdemux_transformation_matrix_is_simple (GstQTDemux * qtdemux, guint32 * m)
         break;
       default:
         /* 16.16 */
-        if (m[i] != 0U && m[i] != (1U << 16) && m[i] != (G_MAXUINT16 << 16))
+        if (m[i] != 0U && m[i] != (1U << 16)
+            && m[i] != (((guint32) G_MAXUINT16) << 16))
           return FALSE;
         break;
     }
@@ -11856,7 +11870,7 @@ qtdemux_mul_transformation_matrix (GstQTDemux * qtdemux,
 #define QTMUL_MATRIX(_a,_b) (((_a) == 0 || (_b) == 0) ? 0 : \
       ((_a) == (_b) ? 1 : -1))
 #define QTADD_MATRIX(_a,_b) ((_a) + (_b) > 0 ? (1U << 16) : \
-      ((_a) + (_b) < 0) ? (G_MAXUINT16 << 16) : 0u)
+      ((_a) + (_b) < 0) ? (((guint32) G_MAXUINT16) << 16) : 0u)
 
   if (!qtdemux_transformation_matrix_is_simple (qtdemux, a) ||
       !qtdemux_transformation_matrix_is_simple (qtdemux, b)) {
@@ -11891,8 +11905,8 @@ qtdemux_inspect_transformation_matrix (GstQTDemux * qtdemux,
  * This macro will only compare value abde, it expects cfi to have already
  * been checked
  */
-#define QTCHECK_MATRIX(m,a,b,d,e) ((m)[0] == (a << 16) && (m)[1] == (b << 16) && \
-                                   (m)[3] == (d << 16) && (m)[4] == (e << 16))
+#define QTCHECK_MATRIX(m,a,b,d,e) ((m)[0] == (((guint32) (a)) << 16) && (m)[1] == (((guint32) (b)) << 16) && \
+                                   (m)[3] == (((guint32) (d)) << 16) && (m)[4] == (((guint32) (e)) << 16))
 
   /* only handle the cases where the last column has standard values */
   if (matrix[2] == 0 && matrix[5] == 0 && matrix[8] == 1 << 30) {
