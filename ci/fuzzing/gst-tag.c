@@ -79,42 +79,27 @@ LLVMFuzzerTestOneInput (const guint8 * data, size_t size)
 
   /* Test 1: EXIF parsing without TIFF header */
   buffer =
-      gst_buffer_new_wrapped_full (0, (gpointer) data, size, 0, size, NULL,
-      NULL);
-  if (buffer) {
-    taglist = gst_tag_list_from_exif_buffer (buffer, G_LITTLE_ENDIAN, 0);
-    if (taglist != NULL) {
-      gst_tag_list_unref (taglist);
-      taglist = NULL;
-    }
-    gst_buffer_unref (buffer);
-  }
+      gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, (gpointer) data,
+      size, 0, size, NULL, NULL);
+  taglist = gst_tag_list_from_exif_buffer (buffer, G_LITTLE_ENDIAN, 0);
+  gst_clear_tag_list (&taglist);
+  gst_buffer_unref (buffer);
 
   /* Test 2: EXIF parsing with TIFF header */
   buffer =
-      gst_buffer_new_wrapped_full (0, (gpointer) data, size, 0, size, NULL,
-      NULL);
-  if (buffer) {
-    taglist = gst_tag_list_from_exif_buffer_with_tiff_header (buffer);
-    if (taglist != NULL) {
-      gst_tag_list_unref (taglist);
-      taglist = NULL;
-    }
-    gst_buffer_unref (buffer);
-  }
+      gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, (gpointer) data,
+      size, 0, size, NULL, NULL);
+  taglist = gst_tag_list_from_exif_buffer_with_tiff_header (buffer);
+  gst_clear_tag_list (&taglist);
+  gst_buffer_unref (buffer);
 
   /* Test 3: ID3v2 tag parsing */
   buffer =
-      gst_buffer_new_wrapped_full (0, (gpointer) data, size, 0, size, NULL,
-      NULL);
-  if (buffer) {
-    taglist = gst_tag_list_from_id3v2_tag (buffer);
-    if (taglist != NULL) {
-      gst_tag_list_unref (taglist);
-      taglist = NULL;
-    }
-    gst_buffer_unref (buffer);
-  }
+      gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, (gpointer) data,
+      size, 0, size, NULL, NULL);
+  taglist = gst_tag_list_from_id3v2_tag (buffer);
+  gst_clear_tag_list (&taglist);
+  gst_buffer_unref (buffer);
 
   /* Test 4: ID3v1 tag parsing (if size matches) */
   if (size >= 128) {
@@ -127,29 +112,19 @@ LLVMFuzzerTestOneInput (const guint8 * data, size_t size)
 
   /* Test 5: XMP tag parsing */
   buffer =
-      gst_buffer_new_wrapped_full (0, (gpointer) data, size, 0, size, NULL,
-      NULL);
-  if (buffer) {
-    taglist = gst_tag_list_from_xmp_buffer (buffer);
-    if (taglist != NULL) {
-      gst_tag_list_unref (taglist);
-      taglist = NULL;
-    }
-    gst_buffer_unref (buffer);
-  }
+      gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, (gpointer) data,
+      size, 0, size, NULL, NULL);
+  taglist = gst_tag_list_from_xmp_buffer (buffer);
+  gst_clear_tag_list (&taglist);
+  gst_buffer_unref (buffer);
 
   /* Test 6: Vorbis comment parsing */
   buffer =
-      gst_buffer_new_wrapped_full (0, (gpointer) data, size, 0, size, NULL,
-      NULL);
-  if (buffer) {
-    taglist = gst_tag_list_from_vorbiscomment_buffer (buffer, NULL, 0, NULL);
-    if (taglist != NULL) {
-      gst_tag_list_unref (taglist);
-      taglist = NULL;
-    }
-    gst_buffer_unref (buffer);
-  }
+      gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, (gpointer) data,
+      size, 0, size, NULL, NULL);
+  taglist = gst_tag_list_from_vorbiscomment_buffer (buffer, NULL, 0, NULL);
+  gst_clear_tag_list (&taglist);
+  gst_buffer_unref (buffer);
 
   return 0;
 }
