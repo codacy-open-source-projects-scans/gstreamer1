@@ -267,6 +267,7 @@ gst_vtdec_start (GstVideoDecoder * decoder)
   vtdec->is_flushing = FALSE;
   vtdec->is_draining = FALSE;
   vtdec->downstream_ret = GST_FLOW_OK;
+  g_atomic_int_set (&vtdec->require_reset, FALSE);
   vtdec->reorder_queue = gst_vec_deque_new (0);
 
   /* Create the output task, but pause it immediately */
@@ -855,6 +856,8 @@ gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
     gst_video_codec_state_unref (vtdec->input_state);
   vtdec->input_state = gst_video_codec_state_ref (state);
 
+  g_atomic_int_set (&vtdec->require_reset, FALSE);
+
   return negotiate_now ? gst_vtdec_negotiate (decoder) : TRUE;
 }
 
@@ -950,6 +953,51 @@ gst_vtdec_change_state (GstElement * element, GstStateChange transition)
       transition);
 }
 
+static gboolean
+gst_vtdec_reset_session (GstVtdec * vtdec)
+{
+  GstVideoDecoder *decoder = GST_VIDEO_DECODER_CAST (vtdec);
+  GstVideoCodecState *output_state;
+  GstVideoFormat format;
+  OSStatus status;
+
+  if (!vtdec->session) {
+    GST_ERROR_OBJECT (vtdec, "Cannot reset without a valid session!");
+    return FALSE;
+  }
+
+  output_state = gst_video_decoder_get_output_state (decoder);
+  if (!output_state) {
+    GST_ERROR_OBJECT (vtdec,
+        "Cannot reset session without a current output state!");
+    return FALSE;
+  }
+
+  gst_vtdec_invalidate_session (vtdec);
+
+  format = GST_VIDEO_INFO_FORMAT (&output_state->info);
+  gst_video_codec_state_unref (output_state);
+
+  status = gst_vtdec_create_session (vtdec, format, TRUE);
+  if (status == noErr) {
+    GST_INFO_OBJECT (vtdec, "reset session using hardware decoder");
+  } else if (status == kVTVideoDecoderNotAvailableNowErr) {
+    GST_WARNING_OBJECT (vtdec, "hw decoder not available after reset");
+    status = gst_vtdec_create_session (vtdec, format, FALSE);
+  }
+
+  if (status != noErr) {
+    GST_ERROR_OBJECT (vtdec,
+        "Could not reset decoder session, VTDecompressionSessionCreate returned %d",
+        (int) status);
+    return FALSE;
+  }
+
+  g_atomic_int_set (&vtdec->require_reset, FALSE);
+
+  return TRUE;
+}
+
 static GstFlowReturn
 gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
 {
@@ -964,6 +1012,17 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   if (vtdec->format_description == NULL) {
     ret = GST_FLOW_NOT_NEGOTIATED;
     goto drop;
+  }
+
+  if (g_atomic_int_get (&vtdec->require_reset)) {
+    GST_DEBUG_OBJECT (vtdec, "Resetting session due to decoder error");
+    gst_video_decoder_request_sync_point (decoder, frame,
+        GST_VIDEO_DECODER_REQUEST_SYNC_POINT_DISCARD_INPUT);
+
+    if (!gst_vtdec_reset_session (vtdec)) {
+      ret = GST_FLOW_ERROR;
+      goto drop;
+    }
   }
 
   /* Check if we need to extract AV1 sequence header for delayed initialization */
@@ -1076,6 +1135,32 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   status = VTDecompressionSessionDecodeFrame (vtdec->session, cm_sample_buffer,
       input_flags, frame, NULL);
   GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
+
+  GST_LOG_OBJECT (vtdec, "VTDecompressionSessionDecodeFrame returned: %d",
+      status);
+
+  /* kVTInvalidSessionErr is usually returned on iOS if the application goes
+   * into background mode, if so, we can reset the session and request an
+   * intra frame to continue decoding.
+   *
+   * kVTVideoDecoderMalfunctionErr is returned for some unknown reason. It is
+   * only seen on iOS so far, but could also happen on macOS.
+   */
+  if (status == kVTInvalidSessionErr ||
+#if TARGET_OS_OSX
+      status == codecErr ||
+#endif
+      status == kVTVideoDecoderMalfunctionErr) {
+    GST_WARNING_OBJECT (vtdec, "DecodeFrame returned %i, resetting session",
+        status);
+    if (!gst_vtdec_reset_session (vtdec))
+      return GST_FLOW_ERROR;
+
+    gst_video_decoder_request_sync_point (decoder, frame,
+        GST_VIDEO_DECODER_REQUEST_SYNC_POINT_DISCARD_INPUT);
+    gst_video_decoder_drop_frame (decoder, frame);
+    return GST_FLOW_OK;
+  }
 
   if (status != noErr) {
     GST_VIDEO_DECODER_ERROR (vtdec, 1, STREAM, DECODE,
@@ -1499,12 +1584,24 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
             frame->decode_frame_number);
         frame->flags |= VTDEC_FRAME_FLAG_ERROR;
         break;
+#if TARGET_OS_OSX
+      case codecErr:
+#endif
+      case kVTVideoDecoderMalfunctionErr:
+        GST_WARNING_OBJECT (vtdec,
+            "MalfunctionError when decoding frame %d, resetting",
+            frame->decode_frame_number);
+        frame->flags |= VTDEC_FRAME_FLAG_ERROR;
+        g_atomic_int_set (&vtdec->require_reset, TRUE);
+        break;
       default:
         GST_ERROR_OBJECT (vtdec, "Error decoding frame %d: %d",
             frame->decode_frame_number, (int) status);
         frame->flags |= VTDEC_FRAME_FLAG_ERROR;
         break;
     }
+  } else if (g_atomic_int_get (&vtdec->require_reset)) {
+    GST_INFO_OBJECT (vtdec, "Got decoded frame while reset is scheduled");
   }
 
   if (image_buffer) {
