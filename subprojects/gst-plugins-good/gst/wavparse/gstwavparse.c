@@ -796,6 +796,7 @@ gst_wavparse_cue_chunk (GstWavParse * wav, const guint8 * data, guint32 size)
   guint32 i, ncues;
   GList *cues = NULL;
   GstWavParseCue *cue;
+  guint32 expected_size;
 
   if (wav->cues) {
     GST_WARNING_OBJECT (wav, "found another cue's");
@@ -808,14 +809,15 @@ gst_wavparse_cue_chunk (GstWavParse * wav, const guint8 * data, guint32 size)
   }
 
   ncues = GST_READ_UINT32_LE (data);
+  size -= 4;
+  data += 4;
 
-  if (size < 4 + ncues * 24) {
+  if (!g_uint_checked_mul (&expected_size, ncues, 24) || size < expected_size) {
     GST_WARNING_OBJECT (wav, "broken file %d %d", size, ncues);
     return FALSE;
   }
 
   /* parse data */
-  data += 4;
   for (i = 0; i < ncues; i++) {
     cue = g_new0 (GstWavParseCue, 1);
     cue->id = GST_READ_UINT32_LE (data);
@@ -824,11 +826,11 @@ gst_wavparse_cue_chunk (GstWavParse * wav, const guint8 * data, guint32 size)
     cue->chunk_start = GST_READ_UINT32_LE (data + 12);
     cue->block_start = GST_READ_UINT32_LE (data + 16);
     cue->sample_offset = GST_READ_UINT32_LE (data + 20);
-    cues = g_list_append (cues, cue);
+    cues = g_list_prepend (cues, cue);
     data += 24;
   }
 
-  wav->cues = cues;
+  wav->cues = g_list_reverse (cues);
 
   return TRUE;
 }

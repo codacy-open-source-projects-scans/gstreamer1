@@ -73,6 +73,7 @@ enum
   PROP_RTC_AUTO_RESYNC,
   PROP_TIMECODE_OFFSET,
   PROP_ANCILLARY_META_LOCATIONS,
+  PROP_SCALE,
 };
 
 #define DEFAULT_SOURCE GST_TIME_CODE_STAMPER_SOURCE_INTERNAL
@@ -88,6 +89,7 @@ enum
 #define DEFAULT_LTC_EXTRA_LATENCY (150 * GST_MSECOND)
 #define DEFAULT_RTC_MAX_DRIFT 250000000
 #define DEFAULT_RTC_AUTO_RESYNC TRUE
+#define DEFAULT_SCALE FALSE
 #define DEFAULT_TIMECODE_OFFSET 0
 #define DEFAULT_ANCILLARY_META_LOCATIONS NULL
 
@@ -335,6 +337,19 @@ gst_timecodestamper_class_init (GstTimeCodeStamperClass * klass)
           "If true the RTC timecode will be automatically resynced if it drifts, "
           "otherwise it will only be counted up from the last known one",
           DEFAULT_RTC_AUTO_RESYNC, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  /**
+   * GstTimeCodeStamper:scale:
+   *
+   * Scale incoming timecode according to framerate conversion.
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (gobject_class, PROP_SCALE,
+      g_param_spec_boolean ("scale",
+          "Scale incoming timecode",
+          "If true the incoming timecode will be scaled according to framerate conversion. "
+          "Only valid for last known timecode settings",
+          DEFAULT_SCALE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (gobject_class, PROP_TIMECODE_OFFSET,
       g_param_spec_int ("timecode-offset",
           "Timecode Offset",
@@ -469,38 +484,18 @@ gst_timecodestamper_dispose (GObject * object)
 {
   GstTimeCodeStamper *timecodestamper = GST_TIME_CODE_STAMPER (object);
 
-  if (timecodestamper->ltc_daily_jam) {
-    g_date_time_unref (timecodestamper->ltc_daily_jam);
-    timecodestamper->ltc_daily_jam = NULL;
-  }
+  g_clear_pointer (&timecodestamper->ltc_daily_jam, g_date_time_unref);
+  g_clear_pointer (&timecodestamper->internal_tc, gst_video_time_code_free);
+  g_clear_pointer (&timecodestamper->set_internal_tc, gst_video_time_code_free);
+  g_clear_pointer (&timecodestamper->last_tc, gst_video_time_code_free);
+  g_clear_pointer (&timecodestamper->rtc_tc, gst_video_time_code_free);
+  g_clear_pointer (&timecodestamper->last_anc_tc, gst_video_time_code_free);
 
-  if (timecodestamper->internal_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->internal_tc);
-    timecodestamper->internal_tc = NULL;
-  }
-
-  if (timecodestamper->set_internal_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->set_internal_tc);
-    timecodestamper->set_internal_tc = NULL;
-  }
-
-  if (timecodestamper->last_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->last_tc);
-    timecodestamper->last_tc = NULL;
-  }
   timecodestamper->last_tc_running_time = GST_CLOCK_TIME_NONE;
-  if (timecodestamper->last_anc_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->last_anc_tc);
-    timecodestamper->last_anc_tc = NULL;
-  }
   timecodestamper->last_anc_tc_running_time = GST_CLOCK_TIME_NONE;
   g_free (timecodestamper->ancillary_meta_locations);
   timecodestamper->ancillary_meta_locations = NULL;
 
-  if (timecodestamper->rtc_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->rtc_tc);
-    timecodestamper->rtc_tc = NULL;
-  }
 #if HAVE_LTC
   g_mutex_lock (&timecodestamper->mutex);
   {
@@ -510,21 +505,10 @@ gst_timecodestamper_dispose (GObject * object)
       g_free (tc);
     }
   }
-  if (timecodestamper->ltc_internal_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->ltc_internal_tc);
-    timecodestamper->ltc_internal_tc = NULL;
-  }
-  timecodestamper->ltc_internal_running_time = GST_CLOCK_TIME_NONE;
 
-  if (timecodestamper->ltc_dec) {
-    ltc_decoder_free (timecodestamper->ltc_dec);
-    timecodestamper->ltc_dec = NULL;
-  }
-
-  if (timecodestamper->stream_align) {
-    gst_audio_stream_align_free (timecodestamper->stream_align);
-    timecodestamper->stream_align = NULL;
-  }
+  g_clear_pointer (&timecodestamper->ltc_internal_tc, gst_video_time_code_free);
+  g_clear_pointer (&timecodestamper->ltc_dec, ltc_decoder_free);
+  g_clear_pointer (&timecodestamper->stream_align, gst_audio_stream_align_free);
   g_mutex_unlock (&timecodestamper->mutex);
 #endif
 
@@ -558,8 +542,7 @@ gst_timecodestamper_set_property (GObject * object, guint prop_id,
       gst_timecodestamper_update_drop_frame (timecodestamper);
       break;
     case PROP_LTC_DAILY_JAM:
-      if (timecodestamper->ltc_daily_jam)
-        g_date_time_unref (timecodestamper->ltc_daily_jam);
+      g_clear_pointer (&timecodestamper->ltc_daily_jam, g_date_time_unref);
       timecodestamper->ltc_daily_jam = g_value_dup_boxed (value);
 
 #if HAVE_LTC
@@ -569,19 +552,16 @@ gst_timecodestamper_set_property (GObject * object, guint prop_id,
         for (l = timecodestamper->ltc_current_tcs.head; l; l = l->next) {
           TimestampedTimecode *tc = l->data;
 
-          if (tc->timecode.config.latest_daily_jam) {
-            g_date_time_unref (tc->timecode.config.latest_daily_jam);
-          }
+          g_clear_pointer (&tc->timecode.config.latest_daily_jam,
+              g_date_time_unref);
           tc->timecode.config.latest_daily_jam =
               g_date_time_ref (timecodestamper->ltc_daily_jam);
         }
       }
 
       if (timecodestamper->ltc_internal_tc) {
-        if (timecodestamper->ltc_internal_tc->config.latest_daily_jam) {
-          g_date_time_unref (timecodestamper->ltc_internal_tc->
-              config.latest_daily_jam);
-        }
+        g_clear_pointer (&timecodestamper->ltc_internal_tc->
+            config.latest_daily_jam, g_date_time_unref);
         timecodestamper->ltc_internal_tc->config.latest_daily_jam =
             g_date_time_ref (timecodestamper->ltc_daily_jam);
       }
@@ -591,16 +571,16 @@ gst_timecodestamper_set_property (GObject * object, guint prop_id,
       timecodestamper->post_messages = g_value_get_boolean (value);
       break;
     case PROP_SET_INTERNAL_TIMECODE:{
-      if (timecodestamper->set_internal_tc)
-        gst_video_time_code_free (timecodestamper->set_internal_tc);
+      g_clear_pointer (&timecodestamper->set_internal_tc,
+          gst_video_time_code_free);
       timecodestamper->set_internal_tc = g_value_dup_boxed (value);
 
       /* Reset the internal timecode on the next opportunity if a new
        * timecode was set here. If none was set we just continue counting
        * from the previous one */
-      if (timecodestamper->set_internal_tc && timecodestamper->internal_tc) {
-        gst_video_time_code_free (timecodestamper->internal_tc);
-        timecodestamper->internal_tc = NULL;
+      if (timecodestamper->set_internal_tc) {
+        g_clear_pointer (&timecodestamper->internal_tc,
+            gst_video_time_code_free);
       }
       break;
     }
@@ -618,6 +598,9 @@ gst_timecodestamper_set_property (GObject * object, guint prop_id,
       break;
     case PROP_RTC_AUTO_RESYNC:
       timecodestamper->rtc_auto_resync = g_value_get_boolean (value);
+      break;
+    case PROP_SCALE:
+      timecodestamper->scale = g_value_get_boolean (value);
       break;
     case PROP_TIMECODE_OFFSET:
       timecodestamper->timecode_offset = g_value_get_int (value);
@@ -681,6 +664,9 @@ gst_timecodestamper_get_property (GObject * object, guint prop_id,
     case PROP_RTC_AUTO_RESYNC:
       g_value_set_boolean (value, timecodestamper->rtc_auto_resync);
       break;
+    case PROP_SCALE:
+      g_value_set_boolean (value, timecodestamper->scale);
+      break;
     case PROP_TIMECODE_OFFSET:
       g_value_set_int (value, timecodestamper->timecode_offset);
       break;
@@ -715,20 +701,9 @@ gst_timecodestamper_stop (GstBaseTransform * trans)
   timecodestamper->fps_n = 0;
   timecodestamper->fps_d = 1;
 
-  if (timecodestamper->internal_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->internal_tc);
-    timecodestamper->internal_tc = NULL;
-  }
-
-  if (timecodestamper->rtc_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->rtc_tc);
-    timecodestamper->rtc_tc = NULL;
-  }
-
-  if (timecodestamper->last_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->last_tc);
-    timecodestamper->last_tc = NULL;
-  }
+  g_clear_pointer (&timecodestamper->internal_tc, gst_video_time_code_free);
+  g_clear_pointer (&timecodestamper->rtc_tc, gst_video_time_code_free);
+  g_clear_pointer (&timecodestamper->last_tc, gst_video_time_code_free);
   timecodestamper->last_tc_running_time = GST_CLOCK_TIME_NONE;
   if (timecodestamper->last_anc_tc != NULL) {
     gst_video_time_code_free (timecodestamper->last_anc_tc);
@@ -743,10 +718,7 @@ gst_timecodestamper_stop (GstBaseTransform * trans)
   timecodestamper->ltc_first_running_time = GST_CLOCK_TIME_NONE;
   timecodestamper->ltc_current_running_time = GST_CLOCK_TIME_NONE;
 
-  if (timecodestamper->ltc_internal_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->ltc_internal_tc);
-    timecodestamper->ltc_internal_tc = NULL;
-  }
+  g_clear_pointer (&timecodestamper->ltc_internal_tc, gst_video_time_code_free);
   timecodestamper->ltc_internal_running_time = GST_CLOCK_TIME_NONE;
 
   {
@@ -757,16 +729,8 @@ gst_timecodestamper_stop (GstBaseTransform * trans)
     }
   }
 
-  if (timecodestamper->ltc_dec) {
-    ltc_decoder_free (timecodestamper->ltc_dec);
-    timecodestamper->ltc_dec = NULL;
-  }
-
-  if (timecodestamper->stream_align) {
-    gst_audio_stream_align_free (timecodestamper->stream_align);
-    timecodestamper->stream_align = NULL;
-  }
-
+  g_clear_pointer (&timecodestamper->ltc_dec, ltc_decoder_free);
+  g_clear_pointer (&timecodestamper->stream_align, gst_audio_stream_align_free);
   timecodestamper->ltc_total = 0;
   g_mutex_unlock (&timecodestamper->mutex);
 #endif
@@ -793,12 +757,29 @@ gst_timecodestamper_start (GstBaseTransform * trans)
   return TRUE;
 }
 
+static gboolean
+is_drop_frame_fps (gint fps_n, gint fps_d)
+{
+  if (fps_d != 1001)
+    return FALSE;
+
+  switch (fps_n) {
+    case 30000:
+    case 60000:
+    case 120000:
+      return TRUE;
+
+    default:
+      return FALSE;
+  }
+}
+
 /* Must be called with object lock */
 static void
 gst_timecodestamper_update_drop_frame (GstTimeCodeStamper * timecodestamper)
 {
-  if (timecodestamper->drop_frame && timecodestamper->fps_d == 1001 &&
-      (timecodestamper->fps_n == 30000 || timecodestamper->fps_n == 60000)) {
+  if (timecodestamper->drop_frame &&
+      is_drop_frame_fps (timecodestamper->fps_n, timecodestamper->fps_d)) {
     if (timecodestamper->internal_tc)
       timecodestamper->internal_tc->config.flags |=
           GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME;
@@ -845,43 +826,37 @@ gst_timecodestamper_update_drop_frame (GstTimeCodeStamper * timecodestamper)
 
 static void
 gst_timecodestamper_update_timecode_framerate (GstTimeCodeStamper *
-    timecodestamper, gint fps_n, gint fps_d, GstVideoTimeCode * timecode,
-    gboolean is_ltc)
+    timecodestamper, gint fps_n, gint fps_d, GstVideoTimeCode * timecode)
 {
+  GstVideoTimeCodeFlags tc_flags = GST_VIDEO_TIME_CODE_FLAGS_NONE;
   guint64 nframes;
   GstClockTime time;
-  GDateTime *jam = NULL;
-  GstVideoTimeCodeFlags tc_flags = 0;
+  GDateTime *jam;
 
   if (!timecode)
+    return;
+
+  if (timecode->config.fps_n == 0 || timecode->config.fps_d == 0)
     return;
 
   if (timecodestamper->interlace_mode != GST_VIDEO_INTERLACE_MODE_PROGRESSIVE)
     tc_flags |= GST_VIDEO_TIME_CODE_FLAGS_INTERLACED;
 
-  if (timecodestamper->drop_frame && timecodestamper->fps_d == 1001 &&
-      (timecodestamper->fps_n == 30000 || timecodestamper->fps_n == 60000))
+  if (timecodestamper->drop_frame && is_drop_frame_fps (fps_n, fps_d))
     tc_flags |= GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME;
 
-  /* If this is an LTC timecode and we have no framerate yet in there then
-   * just do nothing. We're going to set the framerate at a later time */
-  if (timecode->config.fps_d != 0 || !is_ltc) {
-    nframes = gst_video_time_code_frames_since_daily_jam (timecode);
-    time =
-        gst_util_uint64_scale (nframes,
-        GST_SECOND * timecodestamper->fps_d, timecodestamper->fps_n);
-    jam =
-        timecode->config.latest_daily_jam ? g_date_time_ref (timecode->config.
-        latest_daily_jam) : NULL;
-    gst_video_time_code_clear (timecode);
-    gst_video_time_code_init (timecode, timecodestamper->fps_n,
-        timecodestamper->fps_d, jam, tc_flags, 0, 0, 0, 0, 0);
-    if (jam)
-      g_date_time_unref (jam);
+  nframes = gst_video_time_code_frames_since_daily_jam (timecode);
+  time = gst_util_uint64_scale_round (nframes,
+      GST_SECOND * timecode->config.fps_d, timecode->config.fps_n);
+  jam = timecode->config.latest_daily_jam ?
+      g_date_time_ref (timecode->config.latest_daily_jam) : NULL;
+  gst_video_time_code_clear (timecode);
+  gst_video_time_code_init (timecode, fps_n, fps_d, jam, tc_flags,
+      0, 0, 0, 0, 0);
+  g_clear_pointer (&jam, g_date_time_unref);
 
-    nframes = gst_util_uint64_scale (time, fps_n, GST_SECOND * fps_d);
-    gst_video_time_code_add_frames (timecode, nframes);
-  }
+  nframes = gst_util_uint64_scale_round (time, fps_n, GST_SECOND * fps_d);
+  gst_video_time_code_add_frames (timecode, nframes);
 }
 
 /* Must be called with object lock */
@@ -894,13 +869,13 @@ gst_timecodestamper_update_framerate (GstTimeCodeStamper * timecodestamper,
     return FALSE;
 
   gst_timecodestamper_update_timecode_framerate (timecodestamper, fps_n, fps_d,
-      timecodestamper->internal_tc, FALSE);
+      timecodestamper->internal_tc);
   gst_timecodestamper_update_timecode_framerate (timecodestamper, fps_n, fps_d,
-      timecodestamper->last_tc, FALSE);
+      timecodestamper->last_tc);
   gst_timecodestamper_update_timecode_framerate (timecodestamper, fps_n, fps_d,
-      timecodestamper->last_anc_tc, FALSE);
+      timecodestamper->last_anc_tc);
   gst_timecodestamper_update_timecode_framerate (timecodestamper, fps_n, fps_d,
-      timecodestamper->rtc_tc, FALSE);
+      timecodestamper->rtc_tc);
 
 #if HAVE_LTC
   {
@@ -910,11 +885,11 @@ gst_timecodestamper_update_framerate (GstTimeCodeStamper * timecodestamper,
       TimestampedTimecode *tc = l->data;
 
       gst_timecodestamper_update_timecode_framerate (timecodestamper, fps_n,
-          fps_d, &tc->timecode, TRUE);
+          fps_d, &tc->timecode);
     }
   }
   gst_timecodestamper_update_timecode_framerate (timecodestamper, fps_n, fps_d,
-      timecodestamper->ltc_internal_tc, FALSE);
+      timecodestamper->ltc_internal_tc);
 #endif
 
   return TRUE;
@@ -1409,6 +1384,17 @@ extract_ancillary_timecode (GstBuffer * buffer, GstMeta ** gmeta,
   return TRUE;
 }
 
+static void
+report_tc_update (GstTimeCodeStamper * timecodestamper, const gchar * op,
+    GstVideoTimeCode * tc)
+{
+  gchar *tc_str = NULL;
+
+  GST_DEBUG_OBJECT (timecodestamper, "%s timecode to %s", op,
+      (tc_str = gst_video_time_code_to_string (tc)));
+  g_free (tc_str);
+}
+
 static GstFlowReturn
 gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
     GstBuffer * buffer)
@@ -1423,7 +1409,7 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
   GstVideoTimeCode *anc_tc = NULL;
   GstVideoTimeCodeMeta *tc_meta;
   GstFlowReturn flow_ret = GST_FLOW_OK;
-  GstVideoTimeCodeFlags tc_flags = 0;
+  GstVideoTimeCodeFlags tc_flags = GST_VIDEO_TIME_CODE_FLAGS_NONE;
 
   if (timecodestamper->fps_n == 0 || timecodestamper->fps_d == 0) {
     /* This can't actually happen I think - the caps template requires a framerate,
@@ -1501,8 +1487,8 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
   if (timecodestamper->interlace_mode != GST_VIDEO_INTERLACE_MODE_PROGRESSIVE)
     tc_flags |= GST_VIDEO_TIME_CODE_FLAGS_INTERLACED;
 
-  if (timecodestamper->drop_frame && timecodestamper->fps_d == 1001 &&
-      (timecodestamper->fps_n == 30000 || timecodestamper->fps_n == 60000))
+  if (timecodestamper->drop_frame &&
+      is_drop_frame_fps (timecodestamper->fps_n, timecodestamper->fps_d))
     tc_flags |= GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME;
 
   /* If we don't have an internal timecode yet then either a new one was just
@@ -1510,10 +1496,7 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
    * increment it by one */
   if (!timecodestamper->internal_tc
       || timecodestamper->reset_internal_tc_from_seek) {
-    gchar *tc_str;
-
-    if (timecodestamper->internal_tc)
-      gst_video_time_code_free (timecodestamper->internal_tc);
+    g_clear_pointer (&timecodestamper->internal_tc, gst_video_time_code_free);
 
     timecodestamper->reset_internal_tc_from_seek = FALSE;
     if (timecodestamper->set_internal_tc) {
@@ -1540,61 +1523,124 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
       }
     }
 
-    tc_str = gst_video_time_code_to_string (timecodestamper->internal_tc);
-    GST_DEBUG_OBJECT (timecodestamper, "Initialized internal timecode to %s",
-        tc_str);
-    g_free (tc_str);
+    report_tc_update (timecodestamper, "Initialized internal",
+        timecodestamper->internal_tc);
   } else {
-    gchar *tc_str;
-
     gst_video_time_code_increment_frame (timecodestamper->internal_tc);
-    tc_str = gst_video_time_code_to_string (timecodestamper->internal_tc);
-    GST_DEBUG_OBJECT (timecodestamper, "Incremented internal timecode to %s",
-        tc_str);
-    g_free (tc_str);
+    report_tc_update (timecodestamper, "Incremented internal",
+        timecodestamper->internal_tc);
   }
 
   /* If we have a new timecode on the incoming frame, update our last known
    * timecode or otherwise increment it by one */
   if (tc_meta && (!timecodestamper->last_tc || timecodestamper->tc_auto_resync)) {
-    gchar *tc_str;
+    GstVideoTimeCode *upstream_tc = &tc_meta->tc, *scaled_tc;
+    GstVideoTimeCodeConfig *upstream_cfg = &upstream_tc->config;
 
-    if (timecodestamper->last_tc)
-      gst_video_time_code_free (timecodestamper->last_tc);
-    timecodestamper->last_tc = gst_video_time_code_copy (&tc_meta->tc);
-    timecodestamper->last_tc_running_time = running_time;
+    if (timecodestamper->scale) {
+      /* Rescale timecode to current FPS */
+      {
+        gchar *tc_str = NULL;
 
-    tc_str = gst_video_time_code_to_string (timecodestamper->last_tc);
-    GST_DEBUG_OBJECT (timecodestamper, "Updated upstream timecode to %s",
-        tc_str);
-    g_free (tc_str);
-  } else {
-    if (timecodestamper->last_tc) {
-      if (timecodestamper->tc_auto_resync
-          && timecodestamper->tc_timeout != GST_CLOCK_TIME_NONE
-          && (running_time + timecodestamper->tc_timeout <
-              timecodestamper->last_tc_running_time
-              || running_time >=
-              timecodestamper->last_tc_running_time +
-              timecodestamper->tc_timeout)) {
-        if (timecodestamper->last_tc)
-          gst_video_time_code_free (timecodestamper->last_tc);
-        timecodestamper->last_tc = NULL;
-        timecodestamper->last_tc_running_time = GST_CLOCK_TIME_NONE;
-        GST_DEBUG_OBJECT (timecodestamper, "Upstream timecode timed out");
-      } else {
-        gchar *tc_str;
-
-        gst_video_time_code_increment_frame (timecodestamper->last_tc);
-
-        tc_str = gst_video_time_code_to_string (timecodestamper->last_tc);
         GST_DEBUG_OBJECT (timecodestamper,
-            "Incremented upstream timecode to %s", tc_str);
+            "Rescaling upstream timecode %s from %d/%d to %d/%d FPS",
+            (tc_str = gst_video_time_code_to_string (upstream_tc)),
+            upstream_cfg->fps_n, upstream_cfg->fps_d,
+            timecodestamper->fps_n, timecodestamper->fps_d);
         g_free (tc_str);
       }
+
+      /* Rescale upstream timecode into our framerate */
+      scaled_tc = gst_video_time_code_copy (upstream_tc);
+      gst_timecodestamper_update_timecode_framerate (timecodestamper,
+          timecodestamper->fps_n, timecodestamper->fps_d, scaled_tc);
+
+      /* If we don't have a scaled timecode yet, directly initialize with this one */
+      if (!timecodestamper->last_tc) {
+        timecodestamper->last_tc = g_steal_pointer (&scaled_tc);
+        report_tc_update (timecodestamper, "Initialized scaled",
+            timecodestamper->last_tc);
+      } else {
+        GstClockTime upstream_since_jam, current_since_jam;
+        GstClockTimeDiff current_drift;
+        GstClockTime upstream_frame_duration, current_frame_duration;
+        GstClockTime max_drift;
+
+        /* Increment the old scaled timecode to this frame */
+        gst_video_time_code_increment_frame (timecodestamper->last_tc);
+
+        /* Check if we drifted too much and need to resync */
+        upstream_since_jam =
+            gst_video_time_code_nsec_since_daily_jam (upstream_tc);
+        current_since_jam =
+            gst_video_time_code_nsec_since_daily_jam (timecodestamper->last_tc);
+        current_drift = GST_CLOCK_DIFF (upstream_since_jam, current_since_jam);
+
+        upstream_frame_duration = gst_util_uint64_scale_int_ceil (GST_SECOND,
+            upstream_cfg->fps_d, upstream_cfg->fps_n);
+        current_frame_duration = gst_util_uint64_scale_int_ceil (GST_SECOND,
+            timecodestamper->fps_d, timecodestamper->fps_n);
+        max_drift = MAX (upstream_frame_duration, current_frame_duration);
+
+        GST_DEBUG_OBJECT (timecodestamper, "Scaled drift %" GST_STIME_FORMAT,
+            GST_STIME_ARGS (current_drift));
+
+        if (ABS (current_drift) > max_drift) {
+          gst_video_time_code_free (timecodestamper->last_tc);
+          timecodestamper->last_tc = g_steal_pointer (&scaled_tc);
+
+          report_tc_update (timecodestamper, "Reset scaled",
+              timecodestamper->last_tc);
+        } else {
+          /* No resync necessary */
+          report_tc_update (timecodestamper, "Incremented scaled",
+              timecodestamper->last_tc);
+        }
+      }
+
+      g_clear_pointer (&scaled_tc, gst_video_time_code_free);
     } else {
-      GST_DEBUG_OBJECT (timecodestamper, "Never saw an upstream timecode");
+      /* No rescaling */
+      if (timecodestamper->fps_n != upstream_cfg->fps_n ||
+          timecodestamper->fps_d != upstream_cfg->fps_d) {
+        GST_WARNING_OBJECT (timecodestamper,
+            "Upstream timecode framerate (%d/%d) "
+            "different from current framerate (%d/%d)",
+            upstream_cfg->fps_n, upstream_cfg->fps_d,
+            timecodestamper->fps_n, timecodestamper->fps_d);
+      }
+
+      if (timecodestamper->last_tc) {
+        gst_video_time_code_free (timecodestamper->last_tc);
+        timecodestamper->last_tc = gst_video_time_code_copy (upstream_tc);
+
+        report_tc_update (timecodestamper, "Updated upstream",
+            timecodestamper->last_tc);
+      } else {
+        timecodestamper->last_tc = gst_video_time_code_copy (upstream_tc);
+        report_tc_update (timecodestamper, "Initialized upstream",
+            timecodestamper->last_tc);
+      }
     }
+
+    timecodestamper->last_tc_running_time = running_time;
+  } else if (timecodestamper->last_tc) {
+    GstClockTime timeout = timecodestamper->tc_timeout;
+    GstClockTime tc_running_time = timecodestamper->last_tc_running_time;
+
+    if (timecodestamper->tc_auto_resync && timeout != GST_CLOCK_TIME_NONE &&
+        (running_time + timeout < tc_running_time ||
+            running_time >= tc_running_time + timeout)) {
+      g_clear_pointer (&timecodestamper->last_tc, gst_video_time_code_free);
+      timecodestamper->last_tc_running_time = GST_CLOCK_TIME_NONE;
+      GST_DEBUG_OBJECT (timecodestamper, "Upstream timecode timed out");
+    } else {
+      gst_video_time_code_increment_frame (timecodestamper->last_tc);
+      report_tc_update (timecodestamper, "Incremented upstream",
+          timecodestamper->last_tc);
+    }
+  } else {
+    GST_DEBUG_OBJECT (timecodestamper, "Never saw an upstream timecode");
   }
 
   {
@@ -1655,68 +1701,63 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
 
   /* Update RTC-based timecode */
   {
-    GstVideoTimeCode rtc_timecode_now;
-    gchar *tc_str, *dt_str;
+    GstVideoTimeCode *rtc_timecode_now;
 
     /* Create timecode for the current frame time */
-    memset (&rtc_timecode_now, 0, sizeof (rtc_timecode_now));
-    gst_video_time_code_init_from_date_time_full (&rtc_timecode_now,
-        timecodestamper->fps_n, timecodestamper->fps_d, dt_frame, tc_flags, 0);
+    rtc_timecode_now =
+        gst_video_time_code_new_from_date_time_full (timecodestamper->fps_n,
+        timecodestamper->fps_d, dt_frame, tc_flags, 0);
 
-    tc_str = gst_video_time_code_to_string (&rtc_timecode_now);
-    dt_str = g_date_time_format (dt_frame, "%F %R %z");
-    GST_DEBUG_OBJECT (timecodestamper,
-        "Created RTC timecode %s for %s (%06u us)", tc_str, dt_str,
-        g_date_time_get_microsecond (dt_frame));
-    g_free (dt_str);
-    g_free (tc_str);
+    {
+      gchar *tc_str = NULL, *dt_str = NULL;
+
+      GST_DEBUG_OBJECT (timecodestamper,
+          "Created RTC timecode %s for %s (%06u us)",
+          (tc_str = gst_video_time_code_to_string (rtc_timecode_now)),
+          (dt_str = g_date_time_format (dt_frame, "%F %R %z")),
+          g_date_time_get_microsecond (dt_frame));
+      g_free (dt_str);
+      g_free (tc_str);
+    }
 
     /* If we don't have an RTC timecode yet, directly initialize with this one */
     if (!timecodestamper->rtc_tc) {
-      timecodestamper->rtc_tc = gst_video_time_code_copy (&rtc_timecode_now);
-      tc_str = gst_video_time_code_to_string (timecodestamper->rtc_tc);
-      GST_DEBUG_OBJECT (timecodestamper, "Initialized RTC timecode to %s",
-          tc_str);
-      g_free (tc_str);
+      timecodestamper->rtc_tc = g_steal_pointer (&rtc_timecode_now);
+      report_tc_update (timecodestamper, "Initialized RTC",
+          timecodestamper->rtc_tc);
     } else {
       GstClockTime rtc_now_time, rtc_tc_time;
-      GstClockTime rtc_diff;
+      GstClockTimeDiff rtc_drift;
 
       /* Increment the old RTC timecode to this frame */
       gst_video_time_code_increment_frame (timecodestamper->rtc_tc);
 
-      /* Otherwise check if we drifted too much and need to resync */
+      /* Check if we drifted too much and need to resync */
       rtc_tc_time =
           gst_video_time_code_nsec_since_daily_jam (timecodestamper->rtc_tc);
       rtc_now_time =
-          gst_video_time_code_nsec_since_daily_jam (&rtc_timecode_now);
-      if (rtc_tc_time > rtc_now_time)
-        rtc_diff = rtc_tc_time - rtc_now_time;
-      else
-        rtc_diff = rtc_now_time - rtc_tc_time;
+          gst_video_time_code_nsec_since_daily_jam (rtc_timecode_now);
+      rtc_drift = GST_CLOCK_DIFF (rtc_tc_time, rtc_now_time);
+
+      GST_DEBUG_OBJECT (timecodestamper, "RTC drift %" GST_STIME_FORMAT,
+          GST_STIME_ARGS (rtc_drift));
 
       if (timecodestamper->rtc_auto_resync
           && timecodestamper->rtc_max_drift != GST_CLOCK_TIME_NONE
-          && rtc_diff > timecodestamper->rtc_max_drift) {
+          && ABS (rtc_drift) > timecodestamper->rtc_max_drift) {
         gst_video_time_code_free (timecodestamper->rtc_tc);
-        timecodestamper->rtc_tc = gst_video_time_code_copy (&rtc_timecode_now);
-        tc_str = gst_video_time_code_to_string (timecodestamper->rtc_tc);
-        GST_DEBUG_OBJECT (timecodestamper,
-            "Updated RTC timecode to %s (%s%" GST_TIME_FORMAT " drift)", tc_str,
-            (rtc_tc_time > rtc_now_time ? "-" : "+"), GST_TIME_ARGS (rtc_diff));
-        g_free (tc_str);
+        timecodestamper->rtc_tc = g_steal_pointer (&rtc_timecode_now);
+
+        report_tc_update (timecodestamper, "Updated RTC",
+            timecodestamper->rtc_tc);
       } else {
-        /* Else nothing to do here, we use the current one */
-        tc_str = gst_video_time_code_to_string (timecodestamper->rtc_tc);
-        GST_DEBUG_OBJECT (timecodestamper,
-            "Incremented RTC timecode to %s (%s%" GST_TIME_FORMAT " drift)",
-            tc_str, (rtc_tc_time > rtc_now_time ? "-" : "+"),
-            GST_TIME_ARGS (rtc_diff));
-        g_free (tc_str);
+        /* No resync necessary */
+        report_tc_update (timecodestamper, "Incremented RTC",
+            timecodestamper->rtc_tc);
       }
     }
 
-    gst_video_time_code_clear (&rtc_timecode_now);
+    g_clear_pointer (&rtc_timecode_now, gst_video_time_code_free);
   }
   GST_OBJECT_UNLOCK (timecodestamper);
 
@@ -1724,7 +1765,6 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
 #if HAVE_LTC
   if (timecodestamper->ltcpad) {
     GstClockTime frame_duration;
-    gchar *tc_str;
     TimestampedTimecode *ltc_tc;
     gboolean updated_internal = FALSE;
 
@@ -1819,21 +1859,27 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
         ltc_tc->timecode.config.fps_d = timecodestamper->fps_d;
       }
 
-      tc_str = gst_video_time_code_to_string (&ltc_tc->timecode);
-      GST_INFO_OBJECT (timecodestamper,
-          "Retrieved LTC timecode %s at %" GST_TIME_FORMAT
-          " (%u timecodes queued)", tc_str,
-          GST_TIME_ARGS (ltc_tc->running_time),
-          g_queue_get_length (&timecodestamper->ltc_current_tcs));
-      g_free (tc_str);
+      {
+        gchar *tc_str = NULL;
+
+        GST_DEBUG_OBJECT (timecodestamper,
+            "Retrieved LTC timecode %s at %" GST_TIME_FORMAT
+            " (%u timecodes queued)",
+            (tc_str = gst_video_time_code_to_string (&ltc_tc->timecode)),
+            GST_TIME_ARGS (ltc_tc->running_time),
+            g_queue_get_length (&timecodestamper->ltc_current_tcs));
+        g_free (tc_str);
+      }
 
       if (!gst_video_time_code_is_valid (&ltc_tc->timecode)) {
-        tc_str = gst_video_time_code_to_string (&ltc_tc->timecode);
-        GST_INFO_OBJECT (timecodestamper, "Invalid LTC timecode %s", tc_str);
+        gchar *tc_str = NULL;
+
+        GST_DEBUG_OBJECT (timecodestamper, "Invalid LTC timecode %s",
+            (tc_str = gst_video_time_code_to_string (&ltc_tc->timecode)));
         g_free (tc_str);
+
         gst_video_time_code_clear (&ltc_tc->timecode);
-        g_free (ltc_tc);
-        ltc_tc = NULL;
+        g_clear_pointer (&ltc_tc, g_free);
         continue;
       }
 
@@ -1848,8 +1894,8 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
          * counting based on the previous timecode we had
          */
         if (timecodestamper->ltc_auto_resync) {
-          if (timecodestamper->ltc_internal_tc)
-            gst_video_time_code_free (timecodestamper->ltc_internal_tc);
+          g_clear_pointer (&timecodestamper->ltc_internal_tc,
+              gst_video_time_code_free);
           timecodestamper->ltc_internal_tc =
               gst_video_time_code_copy (&ltc_tc->timecode);
           timecodestamper->ltc_internal_running_time = ltc_tc->running_time;
@@ -1874,8 +1920,7 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
       /* otherwise it's in the past and we need to consider the next
        * timecode. Read a new one */
       gst_video_time_code_clear (&ltc_tc->timecode);
-      g_free (ltc_tc);
-      ltc_tc = NULL;
+      g_clear_pointer (&ltc_tc, g_free);
     }
 
     /* If we didn't update from LTC above, increment our internal timecode
@@ -1885,24 +1930,19 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
     }
 
     if (timecodestamper->ltc_internal_tc) {
-      if (timecodestamper->ltc_auto_resync
-          && timecodestamper->ltc_timeout != GST_CLOCK_TIME_NONE
-          && (running_time + timecodestamper->ltc_timeout <
-              timecodestamper->ltc_internal_running_time
-              || running_time >=
-              timecodestamper->ltc_internal_running_time +
-              timecodestamper->ltc_timeout)) {
-        if (timecodestamper->ltc_internal_tc)
-          gst_video_time_code_free (timecodestamper->ltc_internal_tc);
-        timecodestamper->ltc_internal_tc = NULL;
-        GST_DEBUG_OBJECT (timecodestamper, "LTC timecode timed out");
+      GstClockTime timeout = timecodestamper->ltc_timeout;
+      GstClockTime tc_running_time = timecodestamper->ltc_internal_running_time;
+
+      if (timecodestamper->ltc_auto_resync && timeout != GST_CLOCK_TIME_NONE &&
+          (running_time + timeout < tc_running_time ||
+              running_time >= tc_running_time + timeout)) {
+        g_clear_pointer (&timecodestamper->ltc_internal_tc,
+            gst_video_time_code_free);
         timecodestamper->ltc_internal_running_time = GST_CLOCK_TIME_NONE;
+        GST_DEBUG_OBJECT (timecodestamper, "LTC timecode timed out");
       } else {
-        tc_str =
-            gst_video_time_code_to_string (timecodestamper->ltc_internal_tc);
-        GST_DEBUG_OBJECT (timecodestamper, "Updated LTC timecode to %s",
-            tc_str);
-        g_free (tc_str);
+        report_tc_update (timecodestamper, "Updated LTC",
+            timecodestamper->ltc_internal_tc);
       }
     } else {
       GST_DEBUG_OBJECT (timecodestamper, "Have no LTC timecode yet");
@@ -1985,8 +2025,6 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
       break;
     case GST_TIME_CODE_STAMPER_SET_KEEP:
       if (!tc_meta && tc) {
-        gchar *tc_str;
-
         if (timecodestamper->timecode_offset) {
           if (!free_tc) {
             tc = gst_video_time_code_copy (tc);
@@ -1995,18 +2033,13 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
           gst_video_time_code_add_frames (tc, timecodestamper->timecode_offset);
         }
 
-        tc_str = gst_video_time_code_to_string (tc);
-        GST_DEBUG_OBJECT (timecodestamper, "Storing timecode %s", tc_str);
-        g_free (tc_str);
-
+        report_tc_update (timecodestamper, "Setting buffer", tc);
         gst_buffer_add_video_time_code_meta (buffer, tc);
       }
       break;
     case GST_TIME_CODE_STAMPER_SET_ALWAYS:
       gst_buffer_foreach_meta (buffer, remove_timecode_meta, NULL);
       if (tc) {
-        gchar *tc_str;
-
         if (timecodestamper->timecode_offset) {
           if (!free_tc) {
             tc = gst_video_time_code_copy (tc);
@@ -2015,10 +2048,7 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
           gst_video_time_code_add_frames (tc, timecodestamper->timecode_offset);
         }
 
-        tc_str = gst_video_time_code_to_string (tc);
-        GST_DEBUG_OBJECT (timecodestamper, "Storing timecode %s", tc_str);
-        g_free (tc_str);
-
+        report_tc_update (timecodestamper, "Setting buffer", tc);
         gst_buffer_add_video_time_code_meta (buffer, tc);
       }
       break;
@@ -2052,12 +2082,10 @@ gst_timecodestamper_transform_ip (GstBaseTransform * vfilter,
 out:
 #endif
 
-  if (dt_now)
-    g_date_time_unref (dt_now);
-  if (dt_frame)
-    g_date_time_unref (dt_frame);
-  if (free_tc && tc)
-    gst_video_time_code_free (tc);
+  g_clear_pointer (&dt_now, g_date_time_unref);
+  g_clear_pointer (&dt_frame, g_date_time_unref);
+  if (free_tc)
+    g_clear_pointer (&tc, gst_video_time_code_free);
 
   return flow_ret;
 }
@@ -2127,10 +2155,7 @@ gst_timecodestamper_release_pad (GstElement * element, GstPad * pad)
 
   timecodestamper->ltcpad = NULL;
 
-  if (timecodestamper->ltc_internal_tc != NULL) {
-    gst_video_time_code_free (timecodestamper->ltc_internal_tc);
-    timecodestamper->ltc_internal_tc = NULL;
-  }
+  g_clear_pointer (&timecodestamper->ltc_internal_tc, gst_video_time_code_free);
   timecodestamper->ltc_internal_running_time = GST_CLOCK_TIME_NONE;
 
   {
@@ -2156,15 +2181,8 @@ gst_timecodestamper_release_pad (GstElement * element, GstPad * pad)
   timecodestamper->ltc_first_running_time = GST_CLOCK_TIME_NONE;
   timecodestamper->ltc_current_running_time = GST_CLOCK_TIME_NONE;
 
-  if (timecodestamper->ltc_dec) {
-    ltc_decoder_free (timecodestamper->ltc_dec);
-    timecodestamper->ltc_dec = NULL;
-  }
-
-  if (timecodestamper->stream_align) {
-    gst_audio_stream_align_free (timecodestamper->stream_align);
-    timecodestamper->stream_align = NULL;
-  }
+  g_clear_pointer (&timecodestamper->ltc_dec, ltc_decoder_free);
+  g_clear_pointer (&timecodestamper->stream_align, gst_audio_stream_align_free);
 
   timecodestamper->ltc_total = 0;
 
