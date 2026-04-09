@@ -708,6 +708,9 @@ gst_h264_encoder_set_format (GstVideoEncoder * encoder,
     priv->fps_n = 30;
   }
 
+  priv->frame_duration =
+      gst_util_uint64_scale (GST_SECOND, priv->fps_d, priv->fps_n);
+
   /* in case live streaming, we should run on low-latency mode */
   priv->is_live = FALSE;
   query = gst_query_new_latency ();
@@ -1567,8 +1570,8 @@ gst_h264_encoder_encode_frame (GstH264Encoder * self,
     }
 
     /* Add it into the reference list. */
-    g_queue_push_tail (&priv->ref_list, gst_video_codec_frame_ref (frame));
-    g_queue_sort (&priv->ref_list, _sort_by_frame_num, NULL);
+    g_queue_insert_sorted (&priv->ref_list, gst_video_codec_frame_ref (frame),
+        _sort_by_frame_num, NULL);
 
     g_assert (g_queue_get_length (&priv->ref_list) <
         priv->gop.max_dec_frame_buffering);
@@ -1749,6 +1752,19 @@ struct ProfileCandidate
   guint level;
 };
 
+static gboolean
+_fill_profile_candidate (const GValue * profile, const GValue * level,
+    struct ProfileCandidate *candidate)
+{
+  candidate->profile_name = g_value_get_string (profile);
+  candidate->profile =
+      gst_h264_encoder_profile_from_string (candidate->profile_name);
+  candidate->level =
+      level ? _h264_get_level_idc (g_value_get_string (level)) : 0;
+
+  return (candidate->profile != GST_H264_PROFILE_INVALID);
+}
+
 static GstFlowReturn
 gst_h264_encoder_negotiate_default (GstH264Encoder * self,
     GstVideoCodecState * in_state, GstH264Profile * profile,
@@ -1775,28 +1791,22 @@ gst_h264_encoder_negotiate_default (GstH264Encoder * self,
         *level = gst_structure_get_value (structure, "level");
     struct ProfileCandidate *candidate;
 
-    if (!profile)
+    if (!profiles)
       continue;
 
-    candidate = &candidates[num_candidates];
-
     if (G_VALUE_HOLDS_STRING (profiles)) {
-      candidate->profile_name = g_value_get_string (profiles);
-      candidate->profile =
-          gst_h264_encoder_profile_from_string (candidate->profile_name);
-      candidate->level = level ?
-          _h264_get_level_idc (g_value_get_string (level)) : 0;
-      num_candidates++;
+      candidate = &candidates[num_candidates];
+      if (_fill_profile_candidate (profiles, level, candidate))
+        num_candidates++;
     } else if (GST_VALUE_HOLDS_LIST (profiles)) {
       for (guint j = 0; j < gst_value_list_get_size (profiles); j++) {
         const GValue *profile = gst_value_list_get_value (profiles, j);
 
-        candidate->profile_name = g_value_get_string (profile);
-        candidate->profile =
-            gst_h264_encoder_profile_from_string (candidate->profile_name);
-        candidate->level = level ?
-            _h264_get_level_idc (g_value_get_string (level)) : 0;
-        num_candidates++;
+        candidate = &candidates[num_candidates];
+        if (_fill_profile_candidate (profile, level, candidate))
+          num_candidates++;
+        if (num_candidates == G_N_ELEMENTS (candidates))
+          break;
       }
     }
 
@@ -2517,6 +2527,8 @@ gst_h264_encoder_init (GstH264Encoder * self)
   g_queue_init (&priv->reorder_list);
 
   priv->dts_queue = gst_vec_deque_new_for_struct (sizeof (GstClockTime), 8);
+
+  priv->frame_duration = GST_CLOCK_TIME_NONE;
 
   priv->config.max_num_reference_list0 = 1;
   priv->config.max_num_reference_list1 = 0;

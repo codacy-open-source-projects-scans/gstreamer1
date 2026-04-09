@@ -1,4 +1,3 @@
-aalib-devel
 bat
 bison
 busybox
@@ -111,7 +110,6 @@ pkgconfig(atk)
 pkgconfig(avtp)
 pkgconfig(bash-completion)
 pkgconfig(bluez)
-pkgconfig(caca)
 pkgconfig(cairo-gobject)
 pkgconfig(cairo-png)
 pkgconfig(cairo)
