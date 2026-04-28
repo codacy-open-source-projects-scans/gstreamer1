@@ -61,6 +61,7 @@
 #include <gst/gl/gstglcontext.h>
 #include <gst/codecparsers/gstav1parser.h>
 #include <gst/codecparsers/gsth264parser.h>
+#include <gst/codecparsers/gsth265parser.h>
 
 #include "vtutil.h"
 #include "helpers.h"
@@ -165,6 +166,14 @@ enum
   VTDEC_FRAME_FLAG_ERROR = (1 << 12),
 };
 
+#define GST_VTDEC_CODEC_TYPE_IS_PRORES(codec) \
+    ((codec) == kCMVideoCodecType_AppleProRes422 \
+    || (codec) == kCMVideoCodecType_AppleProRes4444XQ \
+    || (codec) == kCMVideoCodecType_AppleProRes4444 \
+    || (codec) == kCMVideoCodecType_AppleProRes422HQ \
+    || (codec) == kCMVideoCodecType_AppleProRes422LT \
+    || (codec) == kCMVideoCodecType_AppleProRes422Proxy)
+
 static void gst_vtdec_finalize (GObject * object);
 
 static gboolean gst_vtdec_start (GstVideoDecoder * decoder);
@@ -203,6 +212,8 @@ static gboolean compute_h264_decode_picture_buffer_size (GstVtdec * vtdec,
     GstBuffer * codec_data, int *length);
 static gboolean compute_hevc_decode_picture_buffer_size (GstVtdec * vtdec,
     GstBuffer * codec_data, int *length);
+static gboolean gst_vtdec_hevc_codec_data_has_alpha (GstVtdec * vtdec,
+    GstBuffer * codec_data);
 static gboolean gst_vtdec_compute_dpb_size (GstVtdec * vtdec,
     CMVideoCodecType cm_format, GstBuffer * codec_data);
 static gboolean gst_vtdec_check_vp9_support (GstVtdec * vtdec);
@@ -238,18 +249,24 @@ static GstStaticPadTemplate gst_vtdec_sink_template =
 
 static SupplementalSupport gst_vtdec_codec_support = NoneSupported;
 
-#define VIDEO_SRC_CAPS_FORMATS "{ NV12, AYUV64, ARGB64_BE, P010_10LE }"
+#define VIDEO_SRC_CAPS_NATIVE_FORMATS "{ NV12, AYUV64, ARGB64_BE, P010_10LE, AV12, BGRA, ARGB }"
+
+/* TODO: Add support for more formats to videotexturecache-vulkan/gl.
+ * VideoToolbox will output most formats with HW-backed buffers,
+ * but our GL/Vulkan code does not support handling them yet. */
+#define VIDEO_SRC_CAPS_GL_FORMATS "{ NV12 }"
+#define VIDEO_SRC_CAPS_VULKAN_FORMATS "{ NV12, BGRA }"
 
 #define VIDEO_SRC_CAPS_NATIVE                                           \
     GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_GL_MEMORY,\
-        VIDEO_SRC_CAPS_FORMATS) ", "                                    \
-    "texture-target = (string) rectangle ;"                             \
-    GST_VIDEO_CAPS_MAKE(VIDEO_SRC_CAPS_FORMATS)
+        VIDEO_SRC_CAPS_GL_FORMATS) ", "                                 \
+    "texture-target = (string) rectangle ;"                              \
+    GST_VIDEO_CAPS_MAKE(VIDEO_SRC_CAPS_NATIVE_FORMATS)
 
 #ifdef APPLEMEDIA_MOLTENVK
 #define VIDEO_SRC_CAPS                                                      \
     GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, \
-        VIDEO_SRC_CAPS_FORMATS) ";" VIDEO_SRC_CAPS_NATIVE
+        VIDEO_SRC_CAPS_VULKAN_FORMATS) ";" VIDEO_SRC_CAPS_NATIVE
 #else
 #define VIDEO_SRC_CAPS VIDEO_SRC_CAPS_NATIVE
 #endif
@@ -272,7 +289,8 @@ gst_vtdec_class_init (GstVtdecClass * klass)
     GstCaps *caps = gst_caps_from_string (VIDEO_SRC_CAPS);
     /* RGBA64_LE is kCVPixelFormatType_64RGBALE, only available on macOS 11.3+ */
     if (GST_APPLEMEDIA_HAVE_64RGBALE)
-      caps = gst_vtutil_caps_append_video_format (caps, "RGBA64_LE");
+      caps = gst_vtutil_caps_append_video_format (caps, "RGBA64_LE",
+          GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
     gst_element_class_add_pad_template (element_class,
         gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS, caps));
     gst_caps_unref (caps);
@@ -364,13 +382,13 @@ gst_vtdec_stop (GstVideoDecoder * decoder)
   vtdec->downstream_ret = GST_FLOW_FLUSHING;
   GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
 
+  gst_pad_stop_task (GST_VIDEO_DECODER_SRC_PAD (decoder));
+
   while ((frame = gst_vec_deque_pop_head (vtdec->reorder_queue))) {
     gst_video_decoder_release_frame (decoder, frame);
   }
   gst_vec_deque_free (vtdec->reorder_queue);
   vtdec->reorder_queue = NULL;
-
-  gst_pad_stop_task (GST_VIDEO_DECODER_SRC_PAD (decoder));
 
   if (vtdec->input_state)
     gst_video_codec_state_unref (vtdec->input_state);
@@ -420,7 +438,8 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
     g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
   }
 
-  /* If we're currently draining/flushing, make sure to not pause before we output all the frames */
+  /* If we're currently draining/flushing,
+   * make sure to not pause before we output all the frames */
   if (vtdec->pause_task &&
       ((!vtdec->is_flushing && !vtdec->is_draining) ||
           gst_vec_deque_is_empty (vtdec->reorder_queue))) {
@@ -434,10 +453,9 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
    * that we push in PTS order, or if we're draining/flushing */
   while ((gst_vec_deque_get_length (vtdec->reorder_queue) >
           vtdec->dbp_size) || vtdec->is_flushing || vtdec->is_draining) {
-    gboolean is_flushing;
+    gboolean is_flushing = vtdec->is_flushing;
 
     frame = gst_vec_deque_pop_head (vtdec->reorder_queue);
-    is_flushing = vtdec->is_flushing;
     g_cond_signal (&vtdec->queue_cond);
     g_mutex_unlock (&vtdec->queue_mutex);
 
@@ -472,21 +490,22 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
   g_mutex_unlock (&vtdec->queue_mutex);
   GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
 
-  /* We need to empty the queue immediately so that session_output_callback()
-   * can push out the current buffer, otherwise it can deadlock */
   if (ret != GST_FLOW_OK) {
     g_mutex_lock (&vtdec->queue_mutex);
 
-    while ((frame = gst_vec_deque_pop_head (vtdec->reorder_queue))) {
-      GST_LOG_OBJECT (vtdec, "flushing frame %d", frame->system_frame_number);
-      gst_video_decoder_release_frame (decoder, frame);
-    }
-
-    /* Don't consider the FLUSHING ret an error if something flagged is_flushing in the meantime */
+    /* Don't consider the FLUSHING ret an error if
+     * something flagged is_flushing in the meantime */
     if (vtdec->is_flushing && ret == GST_FLOW_FLUSHING) {
       ret = GST_FLOW_OK;
     }
-    g_cond_signal (&vtdec->queue_cond);
+
+    /* Make sure handle_frame() won't get stuck due to the queue size limit */
+    if (!vtdec->is_flushing) {
+      GST_DEBUG_OBJECT (vtdec, "setting flushing flag");
+      vtdec->is_flushing = TRUE;
+      g_cond_signal (&vtdec->queue_cond);
+    }
+
     g_mutex_unlock (&vtdec->queue_mutex);
   }
 
@@ -540,14 +559,17 @@ setup_texture_cache (GstVtdec * vtdec, GstVideoFormat format)
 /*
  * Unconditionally output a high bit-depth + alpha format when decoding Apple
  * ProRes video if downstream supports it.
+ * Also prefer alpha formats if we're decoding HEVC with alpha.
  * TODO: read src_pix_fmt to get the preferred output format
  * https://wiki.multimedia.cx/index.php/Apple_ProRes#Frame_header
  */
 static GstVideoFormat
-get_preferred_video_format (GstStructure * s, gboolean prores)
+get_preferred_video_format (GstStructure * s, gboolean prores,
+    gboolean hevc_alpha)
 {
   const GValue *list = gst_structure_get_value (s, "format");
   guint i, size = gst_value_list_get_size (list);
+
   for (i = 0; i < size; i++) {
     const GValue *value = gst_value_list_get_value (list, i);
     const char *fmt = g_value_get_string (value);
@@ -555,7 +577,13 @@ get_preferred_video_format (GstStructure * s, gboolean prores)
     switch (vfmt) {
       case GST_VIDEO_FORMAT_NV12:
       case GST_VIDEO_FORMAT_P010_10LE:
-        if (!prores)
+        if (!prores && !hevc_alpha)
+          return vfmt;
+        break;
+      case GST_VIDEO_FORMAT_AV12:
+      case GST_VIDEO_FORMAT_BGRA:
+      case GST_VIDEO_FORMAT_ARGB:
+        if (hevc_alpha)
           return vfmt;
         break;
       case GST_VIDEO_FORMAT_AYUV64:
@@ -670,10 +698,11 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
     GstStructure *s = gst_caps_get_structure (caps, 0);
 
     if (gst_structure_has_field_typed (s, "format", GST_TYPE_LIST)) {
-      GstStructure *is = gst_caps_get_structure (vtdec->input_state->caps, 0);
-      const char *name = gst_structure_get_name (is);
+      CMVideoCodecType codec =
+          CMVideoFormatDescriptionGetCodecType (vtdec->format_description);
       format = get_preferred_video_format (s,
-          g_strcmp0 (name, "video/x-prores") == 0);
+          GST_VTDEC_CODEC_TYPE_IS_PRORES (codec),
+          codec == kCMVideoCodecType_HEVCWithAlpha);
     }
 
     if (format == GST_VIDEO_FORMAT_UNKNOWN) {
@@ -835,6 +864,115 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
 }
 
 static gboolean
+gst_vtdec_hevc_codec_data_has_alpha (GstVtdec * vtdec, GstBuffer * codec_data)
+{
+  GstH265Parser *parser = NULL;
+  GstH265DecoderConfigRecord *config = NULL;
+  GstMapInfo map;
+  GstH265VPS vps;
+  GstH265SPS sps_bl;
+  GstH265SPS sps_el;
+  gboolean vps_parsed = FALSE;
+  gboolean sps_bl_parsed = FALSE;
+  gboolean sps_el_parsed = FALSE;
+  gboolean has_alpha = FALSE;
+
+  if (!codec_data || !gst_buffer_map (codec_data, &map, GST_MAP_READ))
+    return FALSE;
+
+  parser = gst_h265_parser_new ();
+
+  if (gst_h265_parser_parse_decoder_config_record (parser, map.data, map.size,
+          &config) != GST_H265_PARSER_OK || !config)
+    goto out;
+
+  /* Apple HEVC Video with Alpha Interoperability Profile */
+  for (gint i = 0; i < config->nalu_array->len; i++) {
+    GstH265DecoderConfigRecordNalUnitArray *array =
+        &g_array_index (config->nalu_array,
+        GstH265DecoderConfigRecordNalUnitArray, i);
+
+    for (gint j = 0; j < array->nalu->len; j++) {
+      GstH265NalUnit *nalu = &g_array_index (array->nalu, GstH265NalUnit, j);
+
+      switch (nalu->type) {
+        case GST_H265_NAL_VPS:
+          if (gst_h265_parser_parse_vps (parser, nalu,
+                  &vps) == GST_H265_PARSER_OK) {
+            if (vps.max_layers_minus1 == 1 && vps.vps_extension &&
+                vps.vps_extension_params.valid &&
+                vps.vps_extension_params.scalability_id[1]
+                [GST_H265_SCALABILITY_ID_AUX_ID]
+                == GST_H265_AUX_ALPHA) {
+              vps_parsed = TRUE;
+            }
+          }
+          break;
+        case GST_H265_NAL_SPS:
+          if (nalu->layer_id == 0) {
+            if (gst_h265_parser_parse_sps (parser,
+                    nalu, &sps_bl, FALSE) == GST_H265_PARSER_OK) {
+              sps_bl_parsed = TRUE;
+            }
+          } else if (nalu->layer_id == 1) {
+            if (gst_h265_parser_parse_sps (parser,
+                    nalu, &sps_el, FALSE) == GST_H265_PARSER_OK) {
+              sps_el_parsed = TRUE;
+            }
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  if (vps_parsed && sps_bl_parsed && sps_el_parsed) {
+    has_alpha = TRUE;
+
+    /* Resolution should be identical */
+    if (sps_bl.width != sps_el.width || sps_bl.height != sps_el.height)
+      has_alpha = FALSE;
+
+    if (has_alpha) {
+      /* 8bits 4:2:0 */
+      if (sps_bl.chroma_format_idc != 1 ||
+          sps_bl.bit_depth_luma_minus8 != 0 ||
+          sps_el.chroma_format_idc != 1 || sps_el.bit_depth_luma_minus8 != 0) {
+        has_alpha = FALSE;
+      }
+    }
+
+    if (has_alpha) {
+      const GstH265ProfileTierLevel *ptl = &sps_bl.profile_tier_level;
+      /* Should be main profile compatible */
+      if (ptl->profile_idc != GST_H265_PROFILE_IDC_MAIN
+          && ptl->profile_compatibility_flag[GST_H265_PROFILE_IDC_MAIN] == 0) {
+        has_alpha = FALSE;
+      }
+    }
+
+    if (has_alpha) {
+      const GstH265ProfileTierLevel *ptl = &sps_el.profile_tier_level;
+      /* Should be main profile compatible */
+      if (ptl->profile_idc != GST_H265_PROFILE_IDC_MAIN
+          && ptl->profile_compatibility_flag[GST_H265_PROFILE_IDC_MAIN] == 0) {
+        has_alpha = FALSE;
+      }
+    }
+  }
+
+out:
+  if (config)
+    gst_h265_decoder_config_record_free (config);
+
+  gst_h265_parser_free (parser);
+  gst_buffer_unmap (codec_data, &map);
+
+  return has_alpha;
+}
+
+static gboolean
 gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
 {
   gboolean negotiate_now = TRUE;
@@ -883,12 +1021,19 @@ gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
   }
 
   if ((cm_format == kCMVideoCodecType_H264
-          || cm_format == kCMVideoCodecType_HEVC)
+          || cm_format == kCMVideoCodecType_HEVC
+          || cm_format == kCMVideoCodecType_HEVCWithAlpha)
       && state->codec_data == NULL) {
     GST_INFO_OBJECT (vtdec, "waiting for codec_data before negotiation");
     negotiate_now = FALSE;
   } else if (cm_format == kCMVideoCodecType_VP9) {
     negotiate_now = gst_vtdec_build_vp9_vpcc_from_caps (vtdec, state->caps);
+  }
+
+  if (cm_format == kCMVideoCodecType_HEVC
+      && gst_vtdec_hevc_codec_data_has_alpha (vtdec, state->codec_data)) {
+    GST_INFO_OBJECT (vtdec, "Detected HEVC+Alpha profile");
+    cm_format = kCMVideoCodecType_HEVCWithAlpha;
   }
 
   if (cm_format == kCMVideoCodecType_AV1 && vtdec->av1_needs_sequence_header) {
@@ -989,20 +1134,6 @@ gst_vtdec_sink_event (GstVideoDecoder * decoder, GstEvent * event)
       GST_VIDEO_DECODER_CLASS (gst_vtdec_parent_class)->sink_event (decoder,
       event);
 
-  switch (type) {
-    case GST_EVENT_FLUSH_STOP:
-      /* The base class handles this event and calls _flush().
-       * We can then safely reset the flushing flag. */
-      GST_DEBUG_OBJECT (vtdec, "flush stop received, removing flushing flag");
-
-      g_mutex_lock (&vtdec->queue_mutex);
-      vtdec->is_flushing = FALSE;
-      g_mutex_unlock (&vtdec->queue_mutex);
-      break;
-    default:
-      break;
-  }
-
   return ret;
 }
 
@@ -1075,6 +1206,8 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   GstFlowReturn ret = GST_FLOW_OK;
   int decode_frame_number = frame->decode_frame_number;
   GstTaskState task_state;
+
+  GST_LOG_OBJECT (vtdec, "got input frame %d", decode_frame_number);
 
   if (vtdec->format_description == NULL) {
     ret = GST_FLOW_NOT_NEGOTIATED;
@@ -1183,7 +1316,28 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
     }
   }
 
-  GST_LOG_OBJECT (vtdec, "got input frame %d", decode_frame_number);
+  /* Don't process too many frames ahead AND make sure to not push if some other thread
+   * triggers draining (e.g. output loop via a frame push), as there's nothing stopping
+   * the input from going full throttle then.  */
+  GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
+  g_mutex_lock (&vtdec->queue_mutex);
+  while ((gst_vec_deque_get_length (vtdec->reorder_queue) >
+          vtdec->dbp_size * 2 + 1 || vtdec->is_draining)
+      && !vtdec->is_flushing) {
+    g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
+  }
+
+  /* Drop immediately if flushing was triggered from elsewhere */
+  if (vtdec->is_flushing) {
+    g_mutex_unlock (&vtdec->queue_mutex);
+    GST_DEBUG_OBJECT (vtdec, "Flushing flag set, ignoring frame");
+    GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
+    ret = GST_FLOW_FLUSHING;
+    goto drop;
+  }
+
+  g_mutex_unlock (&vtdec->queue_mutex);
+  GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
 
   /* don't bother enabling kVTDecodeFrame_EnableTemporalProcessing at all since
    * it's not mandatory for the underlying VT codec to respect it. KISS and do
@@ -1193,15 +1347,8 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
   cm_sample_buffer =
       cm_sample_buffer_from_gst_buffer (vtdec, frame->input_buffer);
 
-  /* We need to unlock the stream lock here because
-   * the decode call can wait until gst_vtdec_session_output_callback()
-   * is finished, which in turn can wait until there's space in the
-   * output queue, which is being handled by the output loop,
-   * which also uses the stream lock... */
-  GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
   status = VTDecompressionSessionDecodeFrame (vtdec->session, cm_sample_buffer,
       input_flags, frame, NULL);
-  GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
 
   GST_LOG_OBJECT (vtdec, "VTDecompressionSessionDecodeFrame returned: %d",
       status);
@@ -1218,15 +1365,19 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
       status == codecErr ||
 #endif
       status == kVTVideoDecoderMalfunctionErr) {
-    GST_WARNING_OBJECT (vtdec, "DecodeFrame returned %i, resetting session",
-        status);
-    if (!gst_vtdec_reset_session (vtdec))
-      return GST_FLOW_ERROR;
+    GST_WARNING_OBJECT (vtdec,
+        "DecodeFrame returned %i, resetting session", status);
+    if (!gst_vtdec_reset_session (vtdec)) {
+      ret = GST_FLOW_ERROR;
+      gst_video_decoder_drop_frame (decoder, frame);
+      goto out;
+    }
 
     gst_video_decoder_request_sync_point (decoder, frame,
         GST_VIDEO_DECODER_REQUEST_SYNC_POINT_DISCARD_INPUT);
     gst_video_decoder_drop_frame (decoder, frame);
-    return GST_FLOW_OK;
+    ret = GST_FLOW_OK;
+    goto out;
   }
 
   if (status != noErr) {
@@ -1396,7 +1547,8 @@ create_format_description_from_codec_data (GstVtdec * vtdec,
   atoms = CFDictionaryCreateMutable (NULL, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
 
-  if (cm_format == kCMVideoCodecType_HEVC)
+  if (cm_format == kCMVideoCodecType_HEVC
+      || cm_format == kCMVideoCodecType_HEVCWithAlpha)
     gst_vtutil_dict_set_data (atoms, CFSTR ("hvcC"), map.data, map.size);
   else if (cm_format == kCMVideoCodecType_AV1) {
     GstBuffer *av1c = NULL;
@@ -1629,7 +1781,6 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
   GstVtdec *vtdec = (GstVtdec *) decompression_output_ref_con;
   GstVideoCodecFrame *frame = (GstVideoCodecFrame *) source_frame_ref_con;
   GstVideoCodecState *state;
-  gboolean push_anyway = FALSE;
 
   GST_LOG_OBJECT (vtdec, "got output frame %p %d and VT buffer %p", frame,
       frame->decode_frame_number, image_buffer);
@@ -1673,7 +1824,6 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
     }
   } else if (g_atomic_int_get (&vtdec->require_reset)) {
     GST_INFO_OBJECT (vtdec, "Got decoded frame while reset is scheduled");
-    push_anyway = TRUE;
   }
 
   if (image_buffer) {
@@ -1704,23 +1854,9 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
     }
   }
 
-  /* Limit the amount of frames in our output queue
-   * to avoid processing too many frames ahead.
-   * The DPB * 2 size limit is completely arbitrary. */
   g_mutex_lock (&vtdec->queue_mutex);
-  /* If negotiate() gets called from the output loop (via finish_frame()),
-   * it can attempt to drain and call VTDecompressionSessionWaitForAsynchronousFrames,
-   * which will lock up if we decide to wait in this callback, creating a deadlock. */
-  push_anyway |= vtdec->is_flushing || vtdec->is_draining;
-  while (!push_anyway
-      && gst_vec_deque_get_length (vtdec->reorder_queue) >
-      vtdec->dbp_size * 2 + 1) {
-    g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
-    push_anyway |= vtdec->is_flushing || vtdec->is_draining;
-  }
-
-  gst_vec_deque_push_sorted (vtdec->reorder_queue, frame, sort_frames_by_pts,
-      NULL);
+  gst_vec_deque_push_sorted (vtdec->reorder_queue,
+      frame, sort_frames_by_pts, NULL);
   GST_LOG ("pushed frame %d, queue length %" G_GSIZE_FORMAT,
       frame->decode_frame_number,
       gst_vec_deque_get_length (vtdec->reorder_queue));
@@ -1743,12 +1879,6 @@ gst_vtdec_drain_decoder (GstVideoDecoder * decoder, gboolean flush)
   /* Only early-return here if we're draining (as that needs to output frames).
    * Flushing doesn't care about errors from downstream. */
   if (!flush && vtdec->downstream_ret != GST_FLOW_OK) {
-    /* Makes sure the output callback won't get stuck waiting for space in the queue */
-    g_mutex_lock (&vtdec->queue_mutex);
-    vtdec->is_flushing = TRUE;
-    g_cond_signal (&vtdec->queue_cond);
-    g_mutex_unlock (&vtdec->queue_mutex);
-
     GST_WARNING_OBJECT (vtdec, "Output loop stopped with error (%s), leaving",
         gst_flow_get_name (vtdec->downstream_ret));
     return vtdec->downstream_ret;
@@ -1781,9 +1911,9 @@ gst_vtdec_drain_decoder (GstVideoDecoder * decoder, gboolean flush)
 
   /* This will only pause after all frames are out because is_flushing/is_draining=TRUE */
   gst_vtdec_pause_output_loop (vtdec);
-
   GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
 
+  g_mutex_lock (&vtdec->queue_mutex);
   if (flush) {
     GST_DEBUG_OBJECT (vtdec, "clearing flushing flag");
     vtdec->is_flushing = FALSE;
@@ -1791,13 +1921,11 @@ gst_vtdec_drain_decoder (GstVideoDecoder * decoder, gboolean flush)
     GST_DEBUG_OBJECT (vtdec, "clearing draining flag");
     vtdec->is_draining = FALSE;
   }
+  g_cond_signal (&vtdec->queue_cond);
+  g_mutex_unlock (&vtdec->queue_mutex);
 
-  if (vtdec->downstream_ret == GST_FLOW_OK)
-    GST_DEBUG_OBJECT (vtdec, "buffer queue cleaned");
-  else
-    GST_DEBUG_OBJECT (vtdec,
-        "buffer queue not cleaned, output thread returned %s",
-        gst_flow_get_name (vtdec->downstream_ret));
+  GST_DEBUG_OBJECT (vtdec, "output thread returned %s",
+      gst_flow_get_name (vtdec->downstream_ret));
 
   return vtdec->downstream_ret;
 }
@@ -1853,7 +1981,8 @@ gst_vtdec_compute_dpb_size (GstVtdec * vtdec,
             &vtdec->dbp_size)) {
       return FALSE;
     }
-  } else if (cm_format == kCMVideoCodecType_HEVC) {
+  } else if (cm_format == kCMVideoCodecType_HEVC
+      || cm_format == kCMVideoCodecType_HEVCWithAlpha) {
     if (!compute_hevc_decode_picture_buffer_size (vtdec, codec_data,
             &vtdec->dbp_size)) {
       return FALSE;
