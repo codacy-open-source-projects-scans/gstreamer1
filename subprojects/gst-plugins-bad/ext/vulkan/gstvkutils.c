@@ -31,22 +31,26 @@
  * @vinfo: a #GstVideoInfo
  * @buffer: a #GstBuffer
  * @plane: the plane number
+ * @skip: (out) (nullable): the offset into the returned #GstMemory
  * @cat: the #GstBufferCategory to log into
  *
  * Returns: (transfer none): the #GstMemory that belongs to @plane
  */
 GstMemory *
 _gst_vulkan_buffer_peek_plane_memory (GstBuffer * buffer,
-    const GstVideoInfo * vinfo, gint plane, GstDebugCategory * cat)
+    const GstVideoInfo * vinfo, gint plane, gsize * skip,
+    GstDebugCategory * cat)
 {
   guint idx, len;
-  gsize offset, skip;
+  gsize offset, plane_skip;
   GstVideoMeta *vmeta;
 
   g_return_val_if_fail (GST_IS_BUFFER (buffer), NULL);
   g_return_val_if_fail (vinfo, NULL);
   g_return_val_if_fail (plane >= 0 && plane <= GST_VIDEO_MAX_PLANES, NULL);
+#ifndef GST_DISABLE_GST_DEBUG
   g_return_val_if_fail (cat, NULL);
+#endif
 
   vmeta = gst_buffer_get_video_meta (buffer);
   if (vmeta)
@@ -54,12 +58,15 @@ _gst_vulkan_buffer_peek_plane_memory (GstBuffer * buffer,
   else
     offset = GST_VIDEO_INFO_PLANE_OFFSET (vinfo, plane);
 
-  if (!gst_buffer_find_memory (buffer, offset, 1, &idx, &len, &skip)) {
+  if (!gst_buffer_find_memory (buffer, offset, 1, &idx, &len, &plane_skip)) {
     GST_CAT_WARNING (cat,
         "Buffer's plane %u has no memory at offset %" G_GSIZE_FORMAT, plane,
         offset);
     return NULL;
   }
+
+  if (skip)
+    *skip = plane_skip;
 
   return gst_buffer_peek_memory (buffer, idx);
 }

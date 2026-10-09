@@ -1481,20 +1481,29 @@ _get_selected_tracks (GESTimeline * timeline, GESClip * clip,
   guint i, j;
   GPtrArray *tracks = NULL;
   GESTrack *track = NULL;
+  GESClipClass *clip_class = GES_CLIP_GET_CLASS (clip);
 
-  g_signal_emit (G_OBJECT (timeline),
-      ges_timeline_signals[SELECT_ELEMENT_TRACK], 0, clip, track_element,
-      &track);
+  /* A clip's declarative routing (e.g. a GESUriClip stream-track-map) is
+   * authoritative when it covers @track_element: opting into it means it
+   * decides, over the placement signals. It returns NULL to defer, an empty
+   * array to place in no track, or the tracks to place (and copy) into. */
+  if (clip_class->ABI.abi.select_element_tracks)
+    tracks = clip_class->ABI.abi.select_element_tracks (clip, track_element);
 
-  if (track) {
-    tracks = g_ptr_array_new ();
-
-    g_ptr_array_add (tracks, track);
-  } else if (!g_signal_has_handler_pending (G_OBJECT (timeline),
-          ges_timeline_signals[SELECT_ELEMENT_TRACK], 0, TRUE)) {
+  if (tracks == NULL) {
     g_signal_emit (G_OBJECT (timeline),
-        ges_timeline_signals[SELECT_TRACKS_FOR_OBJECT], 0, clip, track_element,
-        &tracks);
+        ges_timeline_signals[SELECT_ELEMENT_TRACK], 0, clip, track_element,
+        &track);
+
+    if (track) {
+      tracks = g_ptr_array_new ();
+      g_ptr_array_add (tracks, track);
+    } else if (!g_signal_has_handler_pending (G_OBJECT (timeline),
+            ges_timeline_signals[SELECT_ELEMENT_TRACK], 0, TRUE)) {
+      g_signal_emit (G_OBJECT (timeline),
+          ges_timeline_signals[SELECT_TRACKS_FOR_OBJECT], 0, clip,
+          track_element, &tracks);
+    }
   }
 
   if (tracks == NULL)
@@ -1758,6 +1767,31 @@ done:
   return no_errors;
 }
 
+/* Whether @clip already holds a core child of @type that is not in a track
+ * yet, i.e. one created ahead of time (e.g. by a GESUriClip source-track-map)
+ * and still waiting to be placed. */
+static gboolean
+_clip_has_unplaced_core_child (GESClip * clip, GESTrackType type)
+{
+  GList *tmp, *children = ges_container_get_children (GES_CONTAINER (clip),
+      FALSE);
+  gboolean ret = FALSE;
+
+  for (tmp = children; tmp; tmp = tmp->next) {
+    GESTrackElement *el = tmp->data;
+
+    if (ges_track_element_is_core (el)
+        && ges_track_element_get_track (el) == NULL
+        && (ges_track_element_get_track_type (el) & type)) {
+      ret = TRUE;
+      break;
+    }
+  }
+  g_list_free_full (children, gst_object_unref);
+
+  return ret;
+}
+
 /* returns TRUE if no errors in adding to tracks */
 static gboolean
 add_object_to_tracks (GESTimeline * timeline, GESClip * clip,
@@ -1779,6 +1813,12 @@ add_object_to_tracks (GESTimeline * timeline, GESClip * clip,
   for (tmp = tracks; tmp; tmp = tmp->next) {
     GESTrack *track = GES_TRACK (tmp->data);
     if (new_track && track != new_track)
+      continue;
+
+    /* Sources created ahead of time (e.g. by a GESUriClip source-track-map)
+     * are already children of the clip; skip recreating them and let
+     * _add_clip_children_to_tracks() below place the existing ones. */
+    if (!new_track && _clip_has_unplaced_core_child (clip, track->type))
       continue;
 
     list = ges_clip_create_track_elements (clip, track->type);

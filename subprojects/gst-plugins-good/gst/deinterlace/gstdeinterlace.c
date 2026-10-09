@@ -527,6 +527,7 @@ gst_deinterlace_class_init (GstDeinterlaceClass * klass)
       "Deinterlace Methods ported from DScaler/TvTime",
       "Martin Eikermann <meiker@upb.de>, "
       "Sebastian Dröge <sebastian.droege@collabora.co.uk>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   gobject_class->set_property = gst_deinterlace_set_property;
   gobject_class->get_property = gst_deinterlace_get_property;
@@ -3422,6 +3423,8 @@ deinterlace_element_init (GstPlugin * plugin)
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (deinterlace, plugin);
 }
 

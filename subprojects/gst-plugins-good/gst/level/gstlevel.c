@@ -176,6 +176,7 @@ gst_level_class_init (GstLevelClass * klass)
       "Filter/Analyzer/Audio",
       "RMS/Peak/Decaying Peak Level messager for audio/raw",
       "Thomas Vander Stichele <thomas at apestaart dot org>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   trans_class->start = GST_DEBUG_FUNCPTR (gst_level_start);
   trans_class->transform_ip = GST_DEBUG_FUNCPTR (gst_level_transform_ip);
@@ -816,6 +817,8 @@ gst_level_sink_event (GstBaseTransform * trans, GstEvent * event)
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (level, plugin);
 }
 

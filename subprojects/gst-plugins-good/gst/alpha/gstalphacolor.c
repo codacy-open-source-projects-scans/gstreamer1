@@ -85,6 +85,7 @@ gst_alpha_color_class_init (GstAlphaColorClass * klass)
       "Filter/Converter/Video",
       "ARGB from/to AYUV colorspace conversion preserving the alpha channel",
       "Wim Taymans <wim.taymans@gmail.com>");
+  gst_element_class_mark_as_untrusted_aware (gstelement_class);
 
   gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
   gst_element_class_add_static_pad_template (gstelement_class, &src_template);
@@ -698,6 +699,8 @@ not_negotiated:
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return gst_element_register (plugin, "alphacolor", GST_RANK_NONE,
       GST_TYPE_ALPHA_COLOR);
 }

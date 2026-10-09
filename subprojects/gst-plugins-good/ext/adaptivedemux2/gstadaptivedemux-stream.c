@@ -1136,6 +1136,13 @@ parsebin_deep_element_added_cb (GstBin * parsebin, GstBin * unused,
   if (G_OBJECT_TYPE (element) == tsdemux_type) {
     GST_DEBUG_OBJECT (demux, "Overriding tsdemux ignore-pcr to TRUE");
     g_object_set (element, "ignore-pcr", TRUE, NULL);
+
+    if (g_object_class_find_property (G_OBJECT_GET_CLASS (element),
+            "ignore-continuity-counter")) {
+      GST_DEBUG_OBJECT (demux,
+          "Overriding tsdemux ignore-continuity-counter to TRUE");
+      g_object_set (element, "ignore-continuity-counter", TRUE, NULL);
+    }
   }
 }
 
@@ -2089,8 +2096,6 @@ gst_adaptive_demux2_stream_next_download (GstAdaptiveDemux2Stream * stream)
   /* Restarting download, figure out new position
    * FIXME : Move this to a separate function ? */
   if (G_UNLIKELY (stream->state == GST_ADAPTIVE_DEMUX2_STREAM_STATE_RESTART)) {
-    GstClockTimeDiff stream_time = 0;
-
     GST_DEBUG_OBJECT (stream, "Activating stream after restart");
 
     if (stream->parsebin_sink != NULL) {
@@ -2103,12 +2108,14 @@ gst_adaptive_demux2_stream_next_download (GstAdaptiveDemux2Stream * stream)
     }
 
     GST_ADAPTIVE_DEMUX_SEGMENT_LOCK (demux);
-    stream_time = stream->start_position;
 
     GST_DEBUG_OBJECT (stream, "Restarting stream at "
-        "stream position %" GST_STIME_FORMAT, GST_STIME_ARGS (stream_time));
+        "stream position %" GST_TIME_FORMAT,
+        GST_TIME_ARGS (stream->start_position));
 
-    if (GST_CLOCK_STIME_IS_VALID (stream_time)) {
+    if (GST_CLOCK_TIME_IS_VALID (stream->start_position)) {
+      GstClockTimeDiff stream_time = stream->start_position;
+
       /* TODO check return */
       gst_adaptive_demux2_stream_seek (stream, demux->segment.rate >= 0,
           0, stream_time, &stream_time);

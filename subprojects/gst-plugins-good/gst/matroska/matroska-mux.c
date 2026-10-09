@@ -126,6 +126,8 @@ static GstStaticPadTemplate videosink_templ =
         COMMON_VIDEO_CAPS "; "
         "video/x-huffyuv, "
         COMMON_VIDEO_CAPS "; "
+        "video/x-ffvhuff, "
+        COMMON_VIDEO_CAPS "; "
         "video/x-dv, "
         COMMON_VIDEO_CAPS "; "
         "video/x-h263, "
@@ -179,6 +181,8 @@ static GstStaticPadTemplate audiosink_templ =
         COMMON_AUDIO_CAPS "; "
         "audio/x-eac3, "
         COMMON_AUDIO_CAPS "; "
+        "audio/x-true-hd, "
+        COMMON_AUDIO_CAPS "; "
         "audio/x-dts, "
         COMMON_AUDIO_CAPS "; "
         "audio/x-vorbis, "
@@ -222,7 +226,7 @@ static GstStaticPadTemplate subtitlesink_templ =
     GST_PAD_REQUEST,
     GST_STATIC_CAPS ("subtitle/x-kate; "
         "text/x-raw, format=utf8; application/x-ssa; application/x-ass; "
-        "application/x-usf; subpicture/x-dvd; "
+        "application/x-usf; subpicture/x-dvd; subpicture/x-pgs; "
         "application/x-subtitle-unknown")
     );
 
@@ -510,6 +514,7 @@ gst_matroska_mux_pad_init (GstMatroskaMuxPad * pad)
   pad->frame_duration_user = FALSE;
   pad->start_ts = GST_CLOCK_TIME_NONE;
   pad->end_ts = GST_CLOCK_TIME_NONE;
+  pad->last_keyframe_ts = GST_CLOCK_TIME_NONE;
   pad->tags = gst_tag_list_new_empty ();
   gst_tag_list_set_scope (pad->tags, GST_TAG_SCOPE_STREAM);
 }
@@ -645,6 +650,7 @@ gst_matroska_pad_reset (GstMatroskaMuxPad * pad, gboolean full)
 
   pad->start_ts = GST_CLOCK_TIME_NONE;
   pad->end_ts = GST_CLOCK_TIME_NONE;
+  pad->last_keyframe_ts = GST_CLOCK_TIME_NONE;
   gst_clear_tag_list (&pad->tags);
 
   if (full) {
@@ -1186,6 +1192,49 @@ check_new_caps (GstMatroskaTrackVideoContext * videocontext, GstCaps * old_caps,
   return ret;
 }
 
+static void
+gst_matroska_mux_compute_display_size (GstMatroskaTrackVideoContext *
+    videocontext, gint width, gint height, gint par_num, gint par_den,
+    gboolean webm)
+{
+  if (par_num <= 0 || par_den <= 0 || par_num == par_den) {
+    videocontext->display_width = 0;
+    videocontext->display_height = 0;
+    videocontext->display_unit = GST_MATROSKA_VIDEO_DISPLAY_UNIT_PIXELS;
+    return;
+  }
+
+  if (webm) {
+    // WebM does not allow display units other than pixels so we have to
+    // calculate a reasonable display size in pixels and round here.
+    if (par_num > par_den) {
+      videocontext->display_width =
+          gst_util_uint64_scale_int_round (width, par_num, par_den);
+      videocontext->display_height = height;
+    } else {
+      videocontext->display_width = width;
+      videocontext->display_height =
+          gst_util_uint64_scale_int_round (height, par_den, par_num);
+    }
+    videocontext->display_unit = GST_MATROSKA_VIDEO_DISPLAY_UNIT_PIXELS;
+  } else {
+    // Matroska allows setting DAR as display unit so we can store DAR
+    // directly as display size instead of having to round.
+    gint64 dw = (gint64) width * par_num;
+    gint64 dh = (gint64) height * par_den;
+    gint64 div;
+
+    div = gst_util_greatest_common_divisor_int64 (dw, dh);
+    if (div > 0) {
+      dw /= div;
+      dh /= div;
+    }
+    videocontext->display_width = dw;
+    videocontext->display_height = dh;
+    videocontext->display_unit = GST_MATROSKA_VIDEO_DISPLAY_UNIT_DAR;
+  }
+}
+
 static gboolean
 gst_matroska_mux_video_pad_setcaps (GstMatroskaMux * mux,
     GstMatroskaMuxPad * mux_pad, GstCaps * caps)
@@ -1270,19 +1319,12 @@ gst_matroska_mux_video_pad_setcaps (GstMatroskaMux * mux,
   }
   if (gst_structure_get_fraction (structure, "pixel-aspect-ratio",
           &pixel_width, &pixel_height)) {
-    if (pixel_width > pixel_height) {
-      videocontext->display_width = width * pixel_width / pixel_height;
-      videocontext->display_height = height;
-    } else if (pixel_width < pixel_height) {
-      videocontext->display_width = width;
-      videocontext->display_height = height * pixel_height / pixel_width;
-    } else {
-      videocontext->display_width = 0;
-      videocontext->display_height = 0;
-    }
+    gst_matroska_mux_compute_display_size (videocontext, width, height,
+        pixel_width, pixel_height, mux->is_webm);
   } else {
     videocontext->display_width = 0;
     videocontext->display_height = 0;
+    videocontext->display_unit = GST_MATROSKA_VIDEO_DISPLAY_UNIT_PIXELS;
   }
   if ((s = gst_structure_get_string (structure, "chroma-site"))) {
     videocontext->chroma_site = gst_video_chroma_site_from_string (s);
@@ -1359,7 +1401,8 @@ skip_details:
         videocontext->fourcc = GST_MAKE_FOURCC ('B', 'R', 'A', 64);
     }
   } else if (!strcmp (mimetype, "video/x-huffyuv")      /* MS/VfW compatibility cases */
-      ||!strcmp (mimetype, "video/x-divx")
+      ||!strcmp (mimetype, "video/x-ffvhuff")
+      || !strcmp (mimetype, "video/x-divx")
       || !strcmp (mimetype, "video/x-dv")
       || !strcmp (mimetype, "video/x-h263")
       || !strcmp (mimetype, "video/x-msmpeg")
@@ -1371,6 +1414,8 @@ skip_details:
 
     if (!strcmp (mimetype, "video/x-huffyuv"))
       fourcc = GST_MAKE_FOURCC ('H', 'F', 'Y', 'U');
+    else if (!strcmp (mimetype, "video/x-ffvhuff"))
+      fourcc = GST_MAKE_FOURCC ('F', 'F', 'V', 'H');
     else if (!strcmp (mimetype, "video/x-dv"))
       fourcc = GST_MAKE_FOURCC ('D', 'V', 'S', 'D');
     else if (!strcmp (mimetype, "video/x-h263"))
@@ -1846,21 +1891,13 @@ theora_streamheader_to_codecdata (const GValue * streamheader,
     par_num = GST_READ_UINT32_BE (hdr) >> 8;
     par_denom = GST_READ_UINT32_BE (hdr + 3) >> 8;
     if (par_num > 0 && par_denom > 0) {
-      if (par_num > par_denom) {
-        videocontext->display_width =
-            videocontext->pixel_width * par_num / par_denom;
-        videocontext->display_height = videocontext->pixel_height;
-      } else if (par_num < par_denom) {
-        videocontext->display_width = videocontext->pixel_width;
-        videocontext->display_height =
-            videocontext->pixel_height * par_denom / par_num;
-      } else {
-        videocontext->display_width = 0;
-        videocontext->display_height = 0;
-      }
+      gst_matroska_mux_compute_display_size (videocontext,
+          videocontext->pixel_width, videocontext->pixel_height,
+          par_num, par_denom, FALSE /* Theora not supported by WebM */ );
     } else {
       videocontext->display_width = 0;
       videocontext->display_height = 0;
+      videocontext->display_unit = GST_MATROSKA_VIDEO_DISPLAY_UNIT_PIXELS;
     }
 
     gst_buffer_unmap (buf0, &map);
@@ -2359,6 +2396,8 @@ gst_matroska_mux_audio_pad_setcaps (GstMatroskaMux * mux,
     gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_AUDIO_AC3);
   } else if (!strcmp (mimetype, "audio/x-eac3")) {
     gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_AUDIO_EAC3);
+  } else if (!strcmp (mimetype, "audio/x-true-hd")) {
+    gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_AUDIO_TRUEHD);
   } else if (!strcmp (mimetype, "audio/x-dts")) {
     gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_AUDIO_DTS);
   } else if (!strcmp (mimetype, "audio/x-tta")) {
@@ -2610,6 +2649,9 @@ gst_matroska_mux_subtitle_pad_setcaps (GstMatroskaMux * mux,
     gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_SUBTITLE_ASS);
   } else if (!strcmp (mimetype, "application/x-usf")) {
     gst_matroska_mux_set_codec_id (context, GST_MATROSKA_CODEC_ID_SUBTITLE_USF);
+  } else if (!strcmp (mimetype, "subpicture/x-pgs")) {
+    gst_matroska_mux_set_codec_id (context,
+        GST_MATROSKA_CODEC_ID_SUBTITLE_HDMVPGS);
   } else if (!strcmp (mimetype, "subpicture/x-dvd")) {
     gst_matroska_mux_set_codec_id (context,
         GST_MATROSKA_CODEC_ID_SUBTITLE_VOBSUB);
@@ -2852,6 +2894,7 @@ gst_matroska_mux_write_colour (GstMatroskaMux * mux,
       range_id = 1;
       break;
     case GST_VIDEO_COLOR_RANGE_0_255:
+    case GST_VIDEO_COLOR_RANGE_0_1:
       range_id = 2;
   }
 
@@ -3013,6 +3056,11 @@ gst_matroska_mux_track_header (GstMatroskaMux * mux, GstMatroskaMuxPad * pad)
             videocontext->display_width);
         gst_ebml_write_uint (ebml, GST_MATROSKA_ID_VIDEODISPLAYHEIGHT,
             videocontext->display_height);
+        if (videocontext->display_unit !=
+            GST_MATROSKA_VIDEO_DISPLAY_UNIT_PIXELS) {
+          gst_ebml_write_uint (ebml, GST_MATROSKA_ID_VIDEODISPLAYUNIT,
+              videocontext->display_unit);
+        }
       }
       switch (videocontext->interlace_mode) {
         case GST_MATROSKA_INTERLACE_MODE_INTERLACED:
@@ -4210,6 +4258,7 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaMuxPad * mux_pad,
       GST_LOG_OBJECT (mux, "have video keyframe, ts=%" GST_TIME_FORMAT,
           GST_TIME_ARGS (buffer_timestamp));
       is_video_keyframe = TRUE;
+      mux_pad->last_keyframe_ts = buffer_timestamp;
     } else if (GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_DECODE_ONLY) &&
         (!strcmp (mux_pad->track->codec_id, GST_MATROSKA_CODEC_ID_VIDEO_VP8)
             || !strcmp (mux_pad->track->codec_id,
@@ -4417,6 +4466,24 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaMuxPad * mux_pad,
         relative_timestamp, flags);
     if (write_duration)
       gst_ebml_write_uint (ebml, GST_MATROSKA_ID_BLOCKDURATION, block_duration);
+
+    /* Mark non-keyframe video blocks with a ReferenceBlock element so that
+     * demuxers can correctly identify them as delta units. The Matroska spec
+     * requires a ReferenceBlock in BlockGroups that are not keyframes.
+     * Note: this always references the previous keyframe, which is an
+     * approximation. For B-frames the actual reference may be a future frame,
+     * and a frame may have multiple reference frames. However, referencing the
+     * previous keyframe is sufficient to signal that decoding can start from
+     * there. */
+    if (mux_pad->track->type == GST_MATROSKA_TRACK_TYPE_VIDEO
+        && !is_video_keyframe) {
+      gint64 reference_offset =
+          gst_util_uint64_scale (mux_pad->last_keyframe_ts, 1,
+          mux->time_scale) - gst_util_uint64_scale (buffer_timestamp, 1,
+          mux->time_scale);
+      gst_ebml_write_sint (ebml, GST_MATROSKA_ID_REFERENCEBLOCK,
+          reference_offset);
+    }
 
     if (!strcmp (mux_pad->track->codec_id, GST_MATROSKA_CODEC_ID_AUDIO_OPUS)
         && cmeta) {

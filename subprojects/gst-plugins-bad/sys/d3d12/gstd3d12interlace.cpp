@@ -316,6 +316,7 @@ gst_d3d12_interlace_class_init (GstD3D12InterlaceClass * klass)
       "Filter/Interlace/Effect/Video/Hardware",
       "A Direct3D12 interlacer element",
       "Seungha Yang <seungha@centricular.com>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   trans_class->passthrough_on_same_caps = TRUE;
 
@@ -878,37 +879,12 @@ gst_d3d12_interlace_convert (GstD3D12Interlace * self, GstBuffer * buffer,
   gst_d3d12_fence_data_pool_acquire (priv->fence_pool, &fence_data);
   gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (buffer));
 
-  GstD3D12CmdAlloc *gst_ca;
-  if (!gst_d3d12_cmd_alloc_pool_acquire (ctx->ca_pool, &gst_ca)) {
-    GST_ERROR_OBJECT (self, "Couldn't acquire command allocator");
+  if (!gst_d3d12_device_prepare_graphics_cmd_list (ctx->device,
+          ctx->cl.GetAddressOf (), ctx->ca_pool, nullptr, fence_data)) {
+    GST_ERROR_OBJECT (self, "Couldn't prepare command list");
     gst_d3d12_fence_data_unref (fence_data);
     gst_buffer_unref (outbuf);
-    return nullptr;
-  }
 
-  auto ca = gst_d3d12_cmd_alloc_get_handle (gst_ca);
-  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (gst_ca));
-
-  auto hr = ca->Reset ();
-  if (!gst_d3d12_result (hr, ctx->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't reset command allocator");
-    gst_d3d12_fence_data_unref (fence_data);
-    gst_buffer_unref (outbuf);
-    return nullptr;
-  }
-
-  auto device = gst_d3d12_device_get_device_handle (ctx->device);
-  if (!ctx->cl) {
-    hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        ca, nullptr, IID_PPV_ARGS (&ctx->cl));
-  } else {
-    hr = ctx->cl->Reset (ca, nullptr);
-  }
-
-  if (!gst_d3d12_result (hr, ctx->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't reset command list");
-    gst_d3d12_fence_data_unref (fence_data);
-    gst_buffer_unref (outbuf);
     return nullptr;
   }
 
@@ -920,7 +896,7 @@ gst_d3d12_interlace_convert (GstD3D12Interlace * self, GstBuffer * buffer,
     return nullptr;
   }
 
-  hr = ctx->cl->Close ();
+  auto hr = ctx->cl->Close ();
   if (!gst_d3d12_result (hr, ctx->device)) {
     GST_ERROR_OBJECT (self, "Couldn't execute command list");
     gst_d3d12_fence_data_unref (fence_data);

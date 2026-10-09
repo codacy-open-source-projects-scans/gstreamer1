@@ -135,7 +135,7 @@ static GstFlowReturn gst_matroska_demux_parse_id (GstMatroskaDemux * demux,
     guint32 id, guint64 length, guint needed);
 
 /* element functions */
-static void gst_matroska_demux_loop (GstPad * pad);
+static void gst_matroska_demux_loop (GstMatroskaDemux * demux);
 
 static gboolean gst_matroska_demux_element_send_event (GstElement * element,
     GstEvent * event);
@@ -983,6 +983,19 @@ gst_matroska_demux_parse_stream (GstMatroskaDemux * demux, GstEbmlRead * ebml,
               break;
             }
 
+              /* unit of the display dimensions */
+            case GST_MATROSKA_ID_VIDEODISPLAYUNIT:{
+              guint64 num;
+
+              if ((ret = gst_ebml_read_uint (ebml, &id, &num)) != GST_FLOW_OK)
+                break;
+
+              GST_DEBUG_OBJECT (demux, "TrackVideoDisplayUnit: %"
+                  G_GUINT64_FORMAT, num);
+              videocontext->display_unit = num;
+              break;
+            }
+
               /* width of the video in the file */
             case GST_MATROSKA_ID_VIDEOPIXELWIDTH:{
               guint64 num;
@@ -1360,7 +1373,6 @@ gst_matroska_demux_parse_stream (GstMatroskaDemux * demux, GstEbmlRead * ebml,
               GST_WARNING_OBJECT (demux,
                   "Unknown TrackVideo subelement 0x%x - ignoring", id);
               /* fall through */
-            case GST_MATROSKA_ID_VIDEODISPLAYUNIT:
             case GST_MATROSKA_ID_VIDEOPIXELCROPBOTTOM:
             case GST_MATROSKA_ID_VIDEOPIXELCROPTOP:
             case GST_MATROSKA_ID_VIDEOPIXELCROPLEFT:
@@ -3337,7 +3349,8 @@ exit:
   /* restart our task since it might have been stopped when we did the
    * flush. */
   gst_pad_start_task (demux->common.sinkpad,
-      (GstTaskFunction) gst_matroska_demux_loop, demux->common.sinkpad, NULL);
+      (GstTaskFunction) gst_matroska_demux_loop,
+      gst_object_ref (demux), gst_object_unref);
 
   /* streaming can continue now */
   if (pad_locked) {
@@ -4833,7 +4846,13 @@ gst_matroska_demux_update_stream_seek_ranges (GstMatroskaDemux * demux,
   if (start_time < range->start_time) {
     /* We're walking backward, so we need to find the correct range */
     GList *l = demux->current_seek_range;
-    g_assert (l->prev != NULL); /* We can't be *before* the first range */
+
+    /* The first seek range is always created by the first timestamped block at the start
+     * of the file. Any earlier time should just extend that backward, in the case that
+     * blocks aren't muxed strictly in timestamp order */
+    if (l->prev == NULL) {
+      range->start_time = start_time;
+    }
 
     while (l->prev) {
       GList *prev = l->prev;
@@ -6693,9 +6712,8 @@ seek_failed:
 }
 
 static void
-gst_matroska_demux_loop (GstPad * pad)
+gst_matroska_demux_loop (GstMatroskaDemux * demux)
 {
-  GstMatroskaDemux *demux = GST_MATROSKA_DEMUX (GST_PAD_PARENT (pad));
   GstFlowReturn ret;
   guint32 id;
   guint64 length;
@@ -7120,7 +7138,7 @@ gst_matroska_demux_sink_activate_mode (GstPad * sinkpad, GstObject * parent,
       if (active) {
         /* if we have a scheduler we can start the task */
         gst_pad_start_task (sinkpad, (GstTaskFunction) gst_matroska_demux_loop,
-            sinkpad, NULL);
+            gst_object_ref (parent), gst_object_unref);
       } else {
         gst_pad_stop_task (sinkpad);
       }
@@ -7542,11 +7560,11 @@ gst_matroska_demux_video_caps (GstMatroskaTrackVideoContext *
     for (i = 0; i < gst_caps_get_size (caps); i++) {
       structure = gst_caps_get_structure (caps, i);
 
-      /* FIXME: use the real unit here! */
-      GST_DEBUG ("video size %dx%d, target display size %dx%d (any unit)",
+      GST_DEBUG ("video size %dx%d, target display size %dx%d, unit %u",
           videocontext->pixel_width,
           videocontext->pixel_height,
-          videocontext->display_width, videocontext->display_height);
+          videocontext->display_width, videocontext->display_height,
+          videocontext->display_unit);
 
       /* pixel width and height are the w and h of the video in pixels */
       if (videocontext->pixel_width > 0 && videocontext->pixel_height > 0) {
@@ -7557,8 +7575,12 @@ gst_matroska_demux_video_caps (GstMatroskaTrackVideoContext *
             "width", G_TYPE_INT, w, "height", G_TYPE_INT, h, NULL);
       }
 
-      if (videocontext->display_width > 0 || videocontext->display_height > 0) {
-        int n, d;
+      /* only use the display dimensions if we know how to interpret
+       * them and they're not unknown */
+      if (videocontext->display_unit < GST_MATROSKA_VIDEO_DISPLAY_UNIT_UNKNOWN
+          && (videocontext->display_width > 0
+              || videocontext->display_height > 0)) {
+        guint64 n, d;
 
         if (videocontext->display_width <= 0)
           videocontext->display_width = videocontext->pixel_width;
@@ -7566,13 +7588,26 @@ gst_matroska_demux_video_caps (GstMatroskaTrackVideoContext *
           videocontext->display_height = videocontext->pixel_height;
 
         /* calculate the pixel aspect ratio using the display and pixel w/h */
-        n = videocontext->display_width * videocontext->pixel_height;
-        d = videocontext->display_height * videocontext->pixel_width;
-        GST_DEBUG ("setting PAR to %d/%d", n, d);
-        gst_structure_set (structure, "pixel-aspect-ratio",
-            GST_TYPE_FRACTION,
-            videocontext->display_width * videocontext->pixel_height,
-            videocontext->display_height * videocontext->pixel_width, NULL);
+        n = (guint64) videocontext->display_width * videocontext->pixel_height;
+        d = (guint64) videocontext->display_height * videocontext->pixel_width;
+
+        if (n <= G_MAXINT64 && d <= G_MAXINT64) {
+          gint64 div;
+
+          /* Reduce the fraction in case this makes it fit into ints. */
+          div = gst_util_greatest_common_divisor_int64 ((gint64) n, (gint64) d);
+          if (div > 0) {
+            n /= div;
+            d /= div;
+          }
+        }
+
+        if (n <= G_MAXINT && d <= G_MAXINT) {
+          GST_DEBUG ("setting PAR to %" G_GUINT64_FORMAT "/%"
+              G_GUINT64_FORMAT, n, d);
+          gst_structure_set (structure, "pixel-aspect-ratio",
+              GST_TYPE_FRACTION, (gint) n, (gint) d, NULL);
+        }
       }
 
       if (videocontext->default_fps > 0.0) {

@@ -2544,6 +2544,7 @@ gst_video_box_class_init (GstVideoBoxClass * klass)
       "Filter/Effect/Video",
       "Resizes a video by adding borders or cropping",
       "Wim Taymans <wim@fluendo.com>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   gst_element_class_add_static_pad_template (element_class,
       &gst_video_box_sink_template);
@@ -3360,6 +3361,8 @@ gst_video_box_transform_meta (GstBaseTransform * trans,
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (videobox, plugin);
 }
 

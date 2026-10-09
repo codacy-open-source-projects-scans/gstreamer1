@@ -19,8 +19,11 @@
 
 #include <gst/check/gstcheck.h>
 #include <gst/app/gstappsink.h>
+#include <gst/allocators/gstiosurface.h>
 #include <gst/video/video.h>
 #include <TargetConditionals.h>
+
+#include "iosurface-output-paths.h"
 
 #if TARGET_OS_OSX
 #include <gst/gstmacos.h>
@@ -75,6 +78,7 @@ on_new_sample (GstAppSink * appsink, gpointer user_data)
   GstSample *sample = gst_app_sink_pull_sample (appsink);
   GstBuffer *buffer;
   GstCaps *caps;
+  gboolean enough_samples = FALSE;
 
   if (sample == NULL)
     return GST_FLOW_ERROR;
@@ -84,14 +88,18 @@ on_new_sample (GstAppSink * appsink, gpointer user_data)
 
   if (ctx->result->caps == NULL && caps != NULL)
     ctx->result->caps = gst_caps_ref (caps);
-  if (buffer != NULL)
+  if (buffer != NULL && (ctx->max_samples == 0 ||
+          ctx->result->sample_buffers->len < ctx->max_samples))
     g_ptr_array_add (ctx->result->sample_buffers, gst_buffer_ref (buffer));
 
   if (ctx->max_samples > 0 && ctx->result->sample_buffers->len >=
       ctx->max_samples)
-    g_main_loop_quit (ctx->loop);
+    enough_samples = TRUE;
 
   gst_sample_unref (sample);
+
+  if (enough_samples)
+    g_main_loop_quit (ctx->loop);
 
   return GST_FLOW_OK;
 }
@@ -378,9 +386,9 @@ run_vtdec_sample_collection_pipeline (const gchar * pipeline_tail,
   fail_unless (!result.timeout, "Pipeline timed out");
   fail_unless (!result.error, "Pipeline error: %s",
       result.error_message ? result.error_message : "unknown");
-  fail_unless (result.eos || result.sample_buffers->len == VTDEC_COMPARE_FRAMES,
-      "Pipeline EOS missing before collecting %u samples",
-      VTDEC_COMPARE_FRAMES);
+  fail_unless (result.sample_buffers->len == VTDEC_COMPARE_FRAMES,
+      "Expected %u samples before EOS, got %u",
+      VTDEC_COMPARE_FRAMES, result.sample_buffers->len);
   fail_unless (result.caps != NULL, "Expected output caps");
   fail_unless (result.sample_buffers != NULL && result.sample_buffers->len > 0,
       "Expected samples at appsink");
@@ -453,15 +461,68 @@ compare_pipeline_results (PipelineResult * expected, PipelineResult * actual)
   }
 }
 
+static void
+assert_iosurface_pipeline_result (PipelineResult * result,
+    const gchar * expected_caps_feature)
+{
+  fail_unless (result->caps != NULL, "Expected output caps");
+  if (expected_caps_feature) {
+    GstCapsFeatures *features = gst_caps_get_features (result->caps, 0);
+
+    fail_unless (features != NULL &&
+        gst_caps_features_contains (features, expected_caps_feature),
+        "Expected output caps with %s, got features %" GST_PTR_FORMAT,
+        expected_caps_feature, features);
+  }
+
+  for (guint i = 0; i < result->sample_buffers->len; i++) {
+    GstBuffer *buffer = g_ptr_array_index (result->sample_buffers, i);
+    gchar *label = g_strdup_printf ("buffer %u", i);
+
+    assert_iosurface_buffer_matches_caps (buffer, result->caps, label);
+    g_free (label);
+  }
+}
+
 GST_START_TEST (test_vtdec_system_memory_output)
 {
   static const gchar *required[] = {
-    "filesrc", "tsdemux", "h264parse", "vtdec", "fakesink"
+    "filesrc", "tsdemux", "h264parse", "vtdec", "appsink"
   };
+  PipelineResult result;
 
-  run_vtdec_pipeline_test (required, G_N_ELEMENTS (required),
-      "video/x-raw,format=NV12 ! "
-      "fakesink name=sink signal-handoffs=true sync=false", FALSE);
+  if (!require_elements_or_skip (required, G_N_ELEMENTS (required)))
+    return;
+
+  result =
+      run_vtdec_sample_collection_pipeline
+      ("video/x-raw,format=NV12 ! " "appsink name=sink sync=false", FALSE);
+
+  assert_iosurface_pipeline_result (&result, NULL);
+
+  pipeline_result_clear (&result);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_vtdec_iosurface_memory_output)
+{
+  static const gchar *required[] = {
+    "filesrc", "tsdemux", "h264parse", "vtdec", "appsink"
+  };
+  PipelineResult result;
+
+  if (!require_elements_or_skip (required, G_N_ELEMENTS (required)))
+    return;
+
+  result =
+      run_vtdec_sample_collection_pipeline
+      ("video/x-raw(memory:IOSurface),format=NV12 ! "
+      "appsink name=sink sync=false", FALSE);
+
+  assert_iosurface_pipeline_result (&result, GST_CAPS_FEATURE_MEMORY_IOSURFACE);
+
+  pipeline_result_clear (&result);
 }
 
 GST_END_TEST;
@@ -480,6 +541,8 @@ GST_START_TEST (test_vtdec_vulkan_image_download_matches_system_memory)
   system_result =
       run_vtdec_sample_collection_pipeline ("video/x-raw,format=NV12 ! "
       "appsink name=sink sync=false", FALSE);
+  assert_iosurface_pipeline_result (&system_result, NULL);
+
   vulkan_result =
       run_vtdec_sample_collection_pipeline
       ("video/x-raw(memory:VulkanImage),format=NV12 ! " "vulkandownload ! "
@@ -507,6 +570,8 @@ GST_START_TEST (test_vtdec_gl_download_matches_system_memory)
   system_result =
       run_vtdec_sample_collection_pipeline ("video/x-raw,format=NV12 ! "
       "appsink name=sink sync=false", FALSE);
+  assert_iosurface_pipeline_result (&system_result, NULL);
+
   gl_result =
       run_vtdec_sample_collection_pipeline
       ("video/x-raw(memory:GLMemory),format=NV12 ! " "gldownload ! "
@@ -526,6 +591,18 @@ GST_START_TEST (test_vtdec_gl_memory_output)
     "filesrc", "tsdemux", "h264parse", "vtdec", "glcolorconvert",
     "gldownload", "fakesink"
   };
+  PipelineResult result;
+
+  if (!require_elements_or_skip (required, G_N_ELEMENTS (required)))
+    return;
+
+  result =
+      run_vtdec_sample_collection_pipeline
+      ("video/x-raw(memory:GLMemory),format=NV12 ! "
+      "appsink name=sink sync=false", FALSE);
+
+  assert_iosurface_pipeline_result (&result, "memory:GLMemory");
+  pipeline_result_clear (&result);
 
   run_vtdec_pipeline_test (required, G_N_ELEMENTS (required),
       "video/x-raw(memory:GLMemory),format=NV12 ! "
@@ -544,6 +621,18 @@ GST_START_TEST (test_vtdec_vulkan_image_output)
     "filesrc", "tsdemux", "h264parse", "vtdec", "vulkancolorconvert",
     "vulkandownload", "fakesink"
   };
+  PipelineResult result;
+
+  if (!require_elements_or_skip (required, G_N_ELEMENTS (required)))
+    return;
+
+  result =
+      run_vtdec_sample_collection_pipeline
+      ("video/x-raw(memory:VulkanImage),format=NV12 ! "
+      "appsink name=sink sync=false", TRUE);
+
+  assert_iosurface_pipeline_result (&result, "memory:VulkanImage");
+  pipeline_result_clear (&result);
 
   run_vtdec_pipeline_test (required, G_N_ELEMENTS (required),
       "video/x-raw(memory:VulkanImage),format=NV12 ! "
@@ -564,6 +653,7 @@ vtdec_output_paths_suite (void)
 
   suite_add_tcase (s, tc_chain);
   tcase_add_test (tc_chain, test_vtdec_system_memory_output);
+  tcase_add_test (tc_chain, test_vtdec_iosurface_memory_output);
   tcase_add_test (tc_chain, test_vtdec_gl_memory_output);
   tcase_add_test (tc_chain, test_vtdec_vulkan_image_output);
   tcase_add_test (tc_chain, test_vtdec_gl_download_matches_system_memory);
@@ -574,24 +664,13 @@ vtdec_output_paths_suite (void)
 }
 
 static int
-run_tests (int argc, char **argv, gpointer user_data)
+run_tests ()
 {
-  Suite *s;
-  SRunner *sr;
-
-  (void) argc;
-  (void) argv;
-  (void) user_data;
-
-  s = vtdec_output_paths_suite ();
-  sr = srunner_create (s);
+  Suite *s = vtdec_output_paths_suite ();
   /* VideoToolbox / GL / Vulkan integration is not fork-safe enough for the
    * default check mode on Apple platforms. Run in-process like the other
    * applemedia pipeline tests. */
-  srunner_set_fork_status (sr, CK_NOFORK);
-  srunner_run (sr, NULL, NULL, CK_NORMAL);
-  srunner_free (sr);
-  return 0;
+  return gst_check_run_suite_nofork (s, "vtdec-output-paths", __FILE__);
 }
 
 int
@@ -599,7 +678,7 @@ main (int argc, char **argv)
 {
   gst_check_init (&argc, &argv);
 #if TARGET_OS_OSX
-  return gst_macos_main ((GstMainFunc) run_tests, argc, argv, NULL);
+  return gst_macos_main_simple ((GstMainFuncSimple) run_tests, NULL);
 #else
   return run_tests (argc, argv, NULL);
 #endif

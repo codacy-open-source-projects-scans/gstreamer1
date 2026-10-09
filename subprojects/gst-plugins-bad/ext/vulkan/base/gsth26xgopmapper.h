@@ -54,6 +54,8 @@ struct _GstH26XGOP
   /*< private >*/
   GstH26XGOPType type;
   gboolean is_ref;
+  /* Only the first frame of the GOP; inserted I frames are not IDR. */
+  gboolean is_idr;
   guint8 pyramid_level;
 
   /* Only for b pyramid */
@@ -130,6 +132,8 @@ gboolean             gst_h26x_gop_mapper_set_params          (GstH26XGOPMapper *
 
 void                 gst_h26x_gop_mapper_reset               (GstH26XGOPMapper * self);
 
+gboolean             gst_h26x_gop_mapper_is_generated        (GstH26XGOPMapper * self);
+
 #define GST_H26X_GOP_IS(gop, type) (_gst_h26x_gop_is (gop, G_PASTE (GST_H26X_GOP_TYPE_, type)))
 #define GST_H26X_GOP_IS_IDR(gop)   (_gst_h26x_gop_is_idr (gop))
 
@@ -142,7 +146,7 @@ _gst_h26x_gop_is (GstH26XGOP * gop, GstH26XGOPType type)
 static inline gboolean
 _gst_h26x_gop_is_idr (GstH26XGOP * gop)
 {
-  return (gop->type == GST_H26X_GOP_TYPE_I) && gop->is_ref;
+  return gop->is_idr;
 }
 
 G_END_DECLS

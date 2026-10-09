@@ -98,7 +98,7 @@ static GstPad *gst_dtls_enc_request_new_pad (GstElement *, GstPadTemplate *,
 
 static gboolean src_activate_mode (GstPad *, GstObject *, GstPadMode,
     gboolean active);
-static void src_task_loop (GstPad *);
+static void src_task_loop (GstDtlsEnc *);
 static void clear_signals (GstDtlsEnc *);
 
 static GstFlowReturn sink_chain (GstPad *, GstObject *, GstBuffer *);
@@ -477,8 +477,8 @@ src_activate_mode (GstPad * pad, GstObject * parent, GstPadMode mode,
     self->src_ret = GST_FLOW_OK;
     self->send_initial_events = TRUE;
     success =
-        gst_pad_start_task (pad, (GstTaskFunction) src_task_loop, self->src,
-        NULL);
+        gst_pad_start_task (pad, (GstTaskFunction) src_task_loop,
+        gst_object_ref (self), gst_object_unref);
     if (!success) {
       GST_WARNING_OBJECT (self, "failed to activate pad task");
     }
@@ -502,9 +502,8 @@ src_activate_mode (GstPad * pad, GstObject * parent, GstPadMode mode,
 }
 
 static void
-src_task_loop (GstPad * pad)
+src_task_loop (GstDtlsEnc * self)
 {
-  GstDtlsEnc *self = GST_DTLS_ENC (GST_PAD_PARENT (pad));
   GstFlowReturn ret;
   GstBuffer *buffer;
   gboolean check_connection_timeout = FALSE;
@@ -697,6 +696,7 @@ on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
     guint auth, GstDtlsEnc * self)
 {
   GstBuffer *new_encoder_key;
+  gsize key_len;
   gchar *key_str;
 
   g_return_if_fail (GST_IS_DTLS_ENC (self));
@@ -705,15 +705,16 @@ on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
   self->srtp_cipher = cipher;
   self->srtp_auth = auth;
 
-  new_encoder_key =
-      gst_buffer_new_memdup (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+  key_len = gst_dtls_srtp_master_key_length (cipher);
+
+  new_encoder_key = gst_buffer_new_memdup (key, key_len);
 
   if (self->encoder_key)
     gst_buffer_unref (self->encoder_key);
 
   self->encoder_key = new_encoder_key;
 
-  key_str = g_base64_encode (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+  key_str = g_base64_encode (key, key_len);
   GST_INFO_OBJECT (self, "received key: %s", key_str);
   g_free (key_str);
 

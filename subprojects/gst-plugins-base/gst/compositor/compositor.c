@@ -814,8 +814,8 @@ GST_ELEMENT_REGISTER_DEFINE (compositor, "compositor", GST_RANK_PRIMARY + 1,
 static gboolean
 set_functions (GstCompositor * self, const GstVideoInfo * info)
 {
-  gint offset[GST_VIDEO_MAX_COMPONENTS] = { 0, };
-  gint scale[GST_VIDEO_MAX_COMPONENTS] = { 0, };
+  gdouble offset[GST_VIDEO_MAX_COMPONENTS] = { 0, };
+  gdouble scale[GST_VIDEO_MAX_COMPONENTS] = { 0, };
   gint i;
 
   gst_clear_buffer (&self->intermediate_frame);
@@ -1130,8 +1130,8 @@ set_functions (GstCompositor * self, const GstVideoInfo * info)
   }
 
   /* calculate black and white colors */
-  gst_video_color_range_offsets (self->intermediate_info.colorimetry.range,
-      self->intermediate_info.finfo, offset, scale);
+  gst_video_color_range_offsets_full (self->intermediate_info.colorimetry.range,
+      self->intermediate_info.finfo, offset, scale, NULL);
   if (GST_VIDEO_INFO_IS_YUV (info)) {
     /* black color [0.0, 0.0, 0.0] */
     self->black_color[0] = offset[0];
@@ -2144,6 +2144,8 @@ gst_compositor_class_init (GstCompositorClass * klass)
       "Composite multiple video streams", "Wim Taymans <wim@fluendo.com>, "
       "Sebastian Dröge <sebastian.droege@collabora.co.uk>");
 
+  gst_element_class_mark_as_untrusted_aware (gstelement_class);
+
   /**
    * compositor:ignore-inactive-pads:
    *
@@ -2224,6 +2226,8 @@ gst_compositor_child_proxy_init (gpointer g_iface, gpointer iface_data)
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (compositor, plugin);
 }
 

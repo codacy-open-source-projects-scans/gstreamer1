@@ -194,7 +194,14 @@ holds_long_type (const GValue * v)
 static gboolean
 print_field (const GstIdStr * fieldname, const GValue * value, gpointer pfx)
 {
-  const gchar *type_name = g_type_name (G_VALUE_TYPE (value));
+  const gchar *type_name;
+
+  // gchararray -> string for caps fields
+  if (G_VALUE_HOLDS (value, G_TYPE_STRING)) {
+    type_name = "string";
+  } else {
+    type_name = g_type_name (G_VALUE_TYPE (value));
+  }
 
   if (G_VALUE_HOLDS (value, GST_TYPE_UNIQUE_LIST)
       && gst_value_unique_list_get_size (value) > 0) {
@@ -268,7 +275,8 @@ print_caps (const GstCaps * caps, const gchar * pfx, const gchar * fieldname)
           CAPS_FEATURE_COLOR, features_string, RESET_COLOR);
       g_free (features_string);
     } else {
-      n_print ("%s%s%s%s%s%s\n", pfx, FIELD_NAME_COLOR, fieldname,
+      n_print ("%s%s%s%s%s%s%s\n", pfx, FIELD_NAME_COLOR, fieldname,
+          *fieldname ? ": " : "",
           STRUCT_NAME_COLOR, gst_structure_get_name (structure), RESET_COLOR);
     }
     gst_structure_foreach_id_str (structure, print_field, (gpointer) pfx);
@@ -480,7 +488,8 @@ flags_to_string (GFlagsValue * vals, guint flags)
   G_PARAM_READABLE | G_PARAM_WRITABLE | G_PARAM_DEPRECATED | \
   GST_PARAM_CONTROLLABLE | GST_PARAM_MUTABLE_PLAYING | \
   GST_PARAM_MUTABLE_PAUSED | GST_PARAM_MUTABLE_READY | \
-  GST_PARAM_CONDITIONALLY_AVAILABLE | GST_PARAM_DOC_SHOW_DEFAULT)
+  GST_PARAM_CONDITIONALLY_AVAILABLE | GST_PARAM_DOC_SHOW_DEFAULT | \
+  GST_PARAM_UNTRUSTED_SENSITIVE)
 
 static int
 sort_gparamspecs (GParamSpec ** a, GParamSpec ** b)
@@ -563,6 +572,12 @@ print_object_properties_info (GObject * obj, GObjectClass * obj_class,
     }
     if (param->flags & GST_PARAM_CONDITIONALLY_AVAILABLE) {
       g_print (", %s%s%s", PROP_ATTR_VALUE_COLOR, _("conditionally available"),
+          RESET_COLOR);
+      first_flag = FALSE;
+    }
+    if (param->flags & GST_PARAM_UNTRUSTED_SENSITIVE) {
+      g_print (", %s%s%s", PROP_ATTR_VALUE_COLOR,
+          _("sensitive when set from an untrusted pipeline description"),
           RESET_COLOR);
       first_flag = FALSE;
     }
@@ -2520,7 +2535,8 @@ main (int argc, char *argv[])
   argv = g_win32_get_command_line ();
 #endif
 
-#if defined(__APPLE__) && TARGET_OS_MAC && !TARGET_OS_IPHONE
+#if defined(__APPLE__) && TARGET_OS_MAC && !TARGET_OS_IPHONE && \
+    !defined(GST_CHECK_MAIN)
   ret = gst_macos_main ((GstMainFunc) real_main, argc, argv, NULL);
 #else
   ret = real_main (argc, argv);

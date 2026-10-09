@@ -88,6 +88,7 @@ G_BEGIN_DECLS
 #define FOURCC__wrt     GST_MAKE_FOURCC(0xa9,'w','r','t')
 #define FOURCC_aART     GST_MAKE_FOURCC('a','A','R','T')
 #define FOURCC_ac_3     GST_MAKE_FOURCC('a','c','-','3')
+#define FOURCC_ac_4     GST_MAKE_FOURCC('a','c','-','4')
 #define FOURCC_ec_3     GST_MAKE_FOURCC('e','c','-','3')
 #define FOURCC_agsm     GST_MAKE_FOURCC('a','g','s','m')
 #define FOURCC_ai12     GST_MAKE_FOURCC('a','i','1','2')
@@ -134,6 +135,7 @@ G_BEGIN_DECLS
 #define FOURCC_cslg     GST_MAKE_FOURCC('c','s','l','g')
 #define FOURCC_d263     GST_MAKE_FOURCC('d','2','6','3')
 #define FOURCC_dac3     GST_MAKE_FOURCC('d','a','c','3')
+#define FOURCC_dac4     GST_MAKE_FOURCC('d','a','c','4')
 #define FOURCC_dec3     GST_MAKE_FOURCC('d','e','c','3')
 #define FOURCC_damr     GST_MAKE_FOURCC('d','a','m','r')
 #define FOURCC_data     GST_MAKE_FOURCC('d','a','t','a')
@@ -484,6 +486,12 @@ G_BEGIN_DECLS
 #define FOURCC_mhaC     GST_MAKE_FOURCC('m','h','a','C')
 #define FOURCC_mha1     GST_MAKE_FOURCC('m','h','a','1')
 #define FOURCC_mhm1     GST_MAKE_FOURCC('m','h','m','1')
+
+/* Generic compression for samples (ISO/IEC 23001-17:2024/Amd. 2) */
+#define FOURCC_resv     GST_MAKE_FOURCC('r','e','s','v')
+#define FOURCC_rinf     GST_MAKE_FOURCC('r','i','n','f')
+#define FOURCC_cmpC     GST_MAKE_FOURCC('c','m','p','C')
+#define FOURCC_gcmp     GST_MAKE_FOURCC('g','c','m','p')
 
 G_END_DECLS
 

@@ -22,6 +22,7 @@
 
 #include "gstvideometa.h"
 
+#include <math.h>
 #include <string.h>
 #include <gst/base/base.h>
 
@@ -276,7 +277,11 @@ video_meta_deserialize (const GstMetaInfo * info, GstBuffer * buffer,
   success &= gst_byte_reader_get_uint32_le (&br, &height);
   success &= gst_byte_reader_get_uint32_le (&br, &n_planes);
 
-  if (!success || n_planes > GST_VIDEO_MAX_PLANES)
+  if (!success || n_planes < 1 || n_planes > GST_VIDEO_MAX_PLANES)
+    return NULL;
+
+  /* make sure the payload holds all plane offsets, strides and alignments */
+  if (size < 36 + n_planes * 16)
     return NULL;
 
   for (int n = 0; n < n_planes; n++)
@@ -303,6 +308,50 @@ video_meta_deserialize (const GstMetaInfo * info, GstBuffer * buffer,
 #else
   gsize *offset = (gsize *) offset64;
 #endif
+
+  GstVideoInfo vinfo;
+  if (format < 0 || format >= GST_VIDEO_FORMAT_LAST || width == 0
+      || height == 0
+      || !gst_video_info_set_format (&vinfo, format, width, height)
+      || vinfo.finfo->n_planes != n_planes)
+    return NULL;
+
+  {
+    /* make sure all planes are inside the buffer */
+    gsize buffer_size = gst_buffer_get_size (buffer);
+    guint frame_height;
+
+    /* a buffer with the ONEFIELD flag only stores a single field and not the
+     * full frame */
+    if (flags & GST_VIDEO_FRAME_FLAG_ONEFIELD)
+      frame_height = GST_ROUND_UP_2 (height) / 2;
+    else
+      frame_height = height;
+
+    for (int n = 0; n < n_planes; n++) {
+      guint64 plane_size;
+
+      if (stride[n] < 0)
+        return NULL;
+
+      if (GST_VIDEO_FORMAT_INFO_IS_TILED (vinfo.finfo)) {
+        plane_size = (guint64) GST_VIDEO_TILE_X_TILES (stride[n]) *
+            GST_VIDEO_TILE_Y_TILES (stride[n]) *
+            GST_VIDEO_FORMAT_INFO_TILE_SIZE (vinfo.finfo, n);
+      } else if (GST_VIDEO_FORMAT_INFO_HAS_PALETTE (vinfo.finfo) && n == 1) {
+        plane_size = 256 * 4;
+      } else {
+        gint comp[GST_VIDEO_MAX_COMPONENTS];
+        gst_video_format_info_component (vinfo.finfo, n, comp);
+        plane_size = (guint64) (gsize) stride[n] *
+            GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT (vinfo.finfo, comp[0],
+            frame_height);
+      }
+
+      if (offset[n] > buffer_size || plane_size > buffer_size - offset[n])
+        return NULL;
+    }
+  }
 
   vmeta =
       gst_buffer_add_video_meta_full (buffer, flags, format, width, height,
@@ -936,23 +985,12 @@ _gst_video_meta_transform_matrix_point (const GstVideoMetaTransformMatrix *
   gdouble w_prime = transform->matrix[2][0] * x_in +
       transform->matrix[2][1] * y_in + transform->matrix[2][2];
 
-  if (w_prime == 0.0f) {
-    *x = transform->out_rectangle.x;
-    *y = transform->out_rectangle.y;
-    g_return_val_if_fail (w_prime != 0.0, FALSE);
-  }
+  g_return_val_if_fail (fabs (w_prime) >= 1e-9, FALSE);
 
-  if (w_prime == 1.0f) {
-    x_temp = transform->matrix[0][0] * x_in +
-        transform->matrix[0][1] * y_in + transform->matrix[0][2];
-    y_temp = transform->matrix[1][0] * x_in +
-        transform->matrix[1][1] * y_in + transform->matrix[1][2];
-  } else {
-    x_temp = (transform->matrix[0][0] * x_in +
-        transform->matrix[0][1] * y_in + transform->matrix[0][2]) / w_prime;
-    y_temp = (transform->matrix[1][0] * x_in +
-        transform->matrix[1][1] * y_in + transform->matrix[1][2]) / w_prime;
-  }
+  x_temp = (transform->matrix[0][0] * x_in +
+      transform->matrix[0][1] * y_in + transform->matrix[0][2]) / w_prime;
+  y_temp = (transform->matrix[1][0] * x_in +
+      transform->matrix[1][1] * y_in + transform->matrix[1][2]) / w_prime;
 
   *x = x_temp + 0.5f + transform->out_rectangle.x;
   *y = y_temp + 0.5f + transform->out_rectangle.y;
@@ -1040,13 +1078,16 @@ _gst_video_meta_transform_matrix_rectangle (const
   gint x2, y2;
 
   /* If the transformation is not affine, can't do it on a rectangle */
-  if (transform->matrix[2][0] != 0 ||
-      transform->matrix[2][1] != 0 || transform->matrix[2][2] != 1)
+  if (!G_APPROX_VALUE (transform->matrix[2][0], 0.0f, 1e-6f) ||
+      !G_APPROX_VALUE (transform->matrix[2][1], 0.0f, 1e-6f) ||
+      !G_APPROX_VALUE (transform->matrix[2][2], 1.0f, 1e-6f))
     return FALSE;
 
   /* If there is shearing, it won't preserve the rectangle either */
-  if ((transform->matrix[0][0] != 0 || transform->matrix[1][1] != 0) &&
-      (transform->matrix[0][1] != 0 || transform->matrix[1][0] != 0))
+  if ((!G_APPROX_VALUE (transform->matrix[0][0], 0.0f, 1e-6f) ||
+          !G_APPROX_VALUE (transform->matrix[1][1], 0.0f, 1e-6f)) &&
+      (!G_APPROX_VALUE (transform->matrix[0][1], 0.0f, 1e-6f) ||
+          !G_APPROX_VALUE (transform->matrix[1][0], 0.0f, 1e-6f)))
     return FALSE;
 
   x1 = rect->x;
@@ -1647,19 +1688,170 @@ gst_video_time_code_meta_free (GstMeta * meta, GstBuffer * buffer)
   gst_video_time_code_clear (&emeta->tc);
 }
 
+#define VIDEO_TIME_CODE_META_SERIALIZE_STATIC_SIZE \
+    4 + /* hours */ \
+    4 + /* minutes */ \
+    4 + /* seconds */ \
+    4 + /* frames */ \
+    4 + /* field_count */ \
+    /* GstVideoTimeCodeConfig */ \
+    4 + /* fps_n */ \
+    4 + /* fps_d */ \
+    4 + /* GstVideoTimeCodeFlags */ \
+    4                           /* serialized GDateTime size */
+
+static gboolean
+gst_video_time_code_meta_serialize (const GstMeta * meta,
+    GstByteArrayInterface * data, guint8 * version)
+{
+  GstVideoTimeCodeMeta *tmeta = (GstVideoTimeCodeMeta *) meta;
+  GstByteWriter bw;
+  gchar *daily_jam = NULL;
+  gsize daily_jam_len = 0;
+  gsize size;
+  guint8 *ptr;
+  const GstVideoTimeCode *tc = &tmeta->tc;
+
+  if (tmeta->tc.config.latest_daily_jam) {
+    daily_jam = g_date_time_format_iso8601 (tc->config.latest_daily_jam);
+    if (!daily_jam) {
+      GST_WARNING ("Couldn't serialize datetime");
+      return FALSE;
+    }
+
+    daily_jam_len = strlen (daily_jam);
+    if (daily_jam_len + 1 >= G_MAXUINT32) {
+      GST_WARNING ("Too large datetime string");
+      g_free (daily_jam);
+      return FALSE;
+    }
+
+    /* +1 for null-terminated string */
+    daily_jam_len++;
+  }
+
+  size = VIDEO_TIME_CODE_META_SERIALIZE_STATIC_SIZE + daily_jam_len;
+  ptr = gst_byte_array_interface_append (data, size);
+  if (!ptr) {
+    g_free (daily_jam);
+    return FALSE;
+  }
+
+  gst_byte_writer_init_with_data (&bw, ptr, size, FALSE);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->hours);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->minutes);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->seconds);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->frames);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->field_count);
+
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->config.fps_n);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->config.fps_d);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, tc->config.flags);
+  gst_byte_writer_put_uint32_le_unchecked (&bw, (guint) daily_jam_len);
+
+  /* Write null-terminated datetime string if any */
+  if (daily_jam_len) {
+    gst_byte_writer_put_data_unchecked (&bw,
+        (guint8 *) daily_jam, daily_jam_len);
+  }
+
+  g_free (daily_jam);
+
+  return TRUE;
+}
+
+static GstMeta *
+gst_video_time_code_meta_deserialize (const GstMetaInfo * info,
+    GstBuffer * buffer, const guint8 * data, gsize size, guint8 version)
+{
+  GstByteReader br;
+  guint hours;
+  guint minutes;
+  guint seconds;
+  guint frames;
+  guint field_count;
+  guint fps_n;
+  guint fps_d;
+  guint flags;
+  guint daily_jam_len;
+  GDateTime *latest_daily_jam = NULL;
+  GstMeta *ret;
+
+  if (version != 0)
+    return NULL;
+
+  if (size < VIDEO_TIME_CODE_META_SERIALIZE_STATIC_SIZE) {
+    GST_WARNING ("Too small data size %" G_GSIZE_FORMAT, size);
+    return NULL;
+  }
+
+  gst_byte_reader_init (&br, data, size);
+  hours = gst_byte_reader_get_uint32_le_unchecked (&br);
+  minutes = gst_byte_reader_get_uint32_le_unchecked (&br);
+  seconds = gst_byte_reader_get_uint32_le_unchecked (&br);
+  frames = gst_byte_reader_get_uint32_le_unchecked (&br);
+  field_count = gst_byte_reader_get_uint32_le_unchecked (&br);
+
+  fps_n = gst_byte_reader_get_uint32_le_unchecked (&br);
+  fps_d = gst_byte_reader_get_uint32_le_unchecked (&br);
+  flags = gst_byte_reader_get_uint32_le_unchecked (&br);
+  daily_jam_len = gst_byte_reader_get_uint32_le_unchecked (&br);
+
+  if (daily_jam_len != gst_byte_reader_get_remaining (&br)) {
+    GST_WARNING ("Invalid datetime data size %u", daily_jam_len);
+    return NULL;
+  }
+
+  if (daily_jam_len) {
+    const gchar *daily_jam = NULL;
+    gsize len;
+
+    if (!gst_byte_reader_get_data (&br,
+            daily_jam_len, (const guint8 **) &daily_jam)) {
+      return NULL;
+    }
+
+    len = strnlen (daily_jam, daily_jam_len);
+    if (len + 1 != daily_jam_len) {
+      GST_WARNING ("Invalid datetime string");
+      return NULL;
+    }
+
+    latest_daily_jam = g_date_time_new_from_iso8601 (daily_jam, NULL);
+    if (!latest_daily_jam) {
+      GST_WARNING ("Couldn't deserialize datetime");
+      return NULL;
+    }
+  }
+
+  ret = (GstMeta *) gst_buffer_add_video_time_code_meta_full (buffer,
+      fps_n, fps_d, latest_daily_jam, flags, hours, minutes, seconds, frames,
+      field_count);
+
+  if (latest_daily_jam)
+    g_date_time_unref (latest_daily_jam);
+
+  return ret;
+}
+
 const GstMetaInfo *
 gst_video_time_code_meta_get_info (void)
 {
   static const GstMetaInfo *meta_info = NULL;
 
   if (g_once_init_enter ((GstMetaInfo **) & meta_info)) {
-    const GstMetaInfo *mi =
-        gst_meta_register (GST_VIDEO_TIME_CODE_META_API_TYPE,
-        "GstVideoTimeCodeMeta",
-        sizeof (GstVideoTimeCodeMeta),
-        gst_video_time_code_meta_init,
-        gst_video_time_code_meta_free,
-        gst_video_time_code_meta_transform);
+    GstMetaInfo *info;
+    const GstMetaInfo *mi;
+
+    info = gst_meta_info_new (GST_VIDEO_TIME_CODE_META_API_TYPE,
+        "GstVideoTimeCodeMeta", sizeof (GstVideoTimeCodeMeta));
+    info->init_func = gst_video_time_code_meta_init;
+    info->free_func = gst_video_time_code_meta_free;
+    info->transform_func = gst_video_time_code_meta_transform;
+    info->serialize_func = gst_video_time_code_meta_serialize;
+    info->deserialize_func = gst_video_time_code_meta_deserialize;
+
+    mi = gst_meta_info_register (info);
     g_once_init_leave ((GstMetaInfo **) & meta_info, (GstMetaInfo *) mi);
   }
   return meta_info;
@@ -1695,7 +1887,7 @@ gst_buffer_add_video_time_code_meta (GstBuffer * buffer,
  * @buffer: a #GstBuffer
  * @fps_n: framerate numerator
  * @fps_d: framerate denominator
- * @latest_daily_jam: a #GDateTime for the latest daily jam
+ * @latest_daily_jam: (allow-none): a #GDateTime for the latest daily jam
  * @flags: a #GstVideoTimeCodeFlags
  * @hours: hours since the daily jam
  * @minutes: minutes since the daily jam

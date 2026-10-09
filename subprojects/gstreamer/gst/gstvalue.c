@@ -427,7 +427,7 @@ gst_value_transform_any_list_string (const GValue * src_value,
   guint alen;
 
   array = src_value->data[0].v_pointer;
-  alen = array->len;
+  alen = array ? array->len : 0;
 
   /* estimate minimum string length to minimise re-allocs in GString */
   s = g_string_sized_new (2 + (10 * alen) + 2);
@@ -494,7 +494,7 @@ _gst_value_transform_g_value_array_string (const GValue * src_value,
   guint alen;
 
   array = src_value->data[0].v_pointer;
-  alen = array->n_values;
+  alen = array ? array->n_values : 0;
 
   /* estimate minimum string length to minimise re-allocs in GString */
   s = g_string_sized_new (2 + (10 * alen) + 2);
@@ -657,7 +657,6 @@ gst_value_list_or_array_get_basic_type (const GValue * value, GType * type)
 #define IS_RANGE_COMPAT(type1,type2,t1,t2) \
   (((t1) == (type1) && (t2) == (type2)) || ((t2) == (type1) && (t1) == (type2)))
 
-#if !defined(G_DISABLE_ASSERT) || !defined(G_DISABLE_CHECKS)
 static gboolean
 gst_value_list_or_array_are_compatible (const GValue * value1,
     const GValue * value2)
@@ -686,7 +685,6 @@ gst_value_list_or_array_are_compatible (const GValue * value1,
 
   return FALSE;
 }
-#endif
 
 static inline void
 _gst_value_list_append_and_take_value (GValue * value, GValue * append_value)
@@ -1158,8 +1156,10 @@ gst_value_unique_list_append_and_take_value (GValue * value,
   for (i = 0; i < gst_value_unique_list_get_size (value); i++) {
     p_val = gst_value_unique_list_get_value (value, i);
 
-    if (gst_value_compare (p_val, append_value) == GST_VALUE_EQUAL)
-      return;                   /* value already exist in set */
+    if (gst_value_compare (p_val, append_value) == GST_VALUE_EQUAL) {
+      g_value_unset (append_value);
+      return;
+    }
   }
 
   _gst_value_list_append_and_take_value (value, append_value);
@@ -1348,7 +1348,6 @@ gst_value_compare_value_list (const GValue * value1, const GValue * value2)
   GValue *v2;
   gint len, to_remove;
   guint8 *removed;
-  GstValueCompareFunc compare;
 
   /* get length and do initial length check. */
   len = vlist1->len;
@@ -1358,14 +1357,6 @@ gst_value_compare_value_list (const GValue * value1, const GValue * value2)
   /* Empty lists are equal */
   if (len == 0)
     return GST_VALUE_EQUAL;
-
-  /* We know lists are not empty. do sanity check on first values */
-  if (G_VALUE_TYPE (&vlist1->fields[0]) != G_VALUE_TYPE (&vlist2->fields[0]))
-    return GST_VALUE_UNORDERED;
-
-  /* Get the compare function */
-  if (!(compare = gst_value_get_compare_func (&vlist1->fields[0])))
-    return GST_VALUE_UNORDERED;
 
   /* place to mark removed value indices of array2 */
   removed = g_newa (guint8, len);
@@ -1382,9 +1373,10 @@ gst_value_compare_value_list (const GValue * value1, const GValue * value2)
       if (removed[j])
         continue;
       v2 = &vlist2->fields[j];
-      /* Note: compare function can be called directly since we know the types
-       * are identical */
-      if (compare (v1, v2) == GST_VALUE_EQUAL) {
+      /* Compare each pair on its own. A list may mix types (e.g. a fraction
+       * range and a scalar), so mismatched pairs come back UNORDERED instead
+       * of misapplying one element's compare function to another type. */
+      if (gst_value_compare (v1, v2) == GST_VALUE_EQUAL) {
         /* mark item as removed now that we found it in array2 and
          * decrement the number of remaining items in array2. */
         removed[j] = 1;
@@ -2982,6 +2974,17 @@ _priv_gst_value_parse_any_list (gchar * s, gchar ** after, GValue * value,
 
     _gst_value_list_append_val (vlist, &list_value);
 
+    /* Reject an untyped list or array with incompatible elements (e.g. the
+     * string and int in "{ I420, 1 }"). With no cast each element is typed on
+     * its own. This enforces at parse time the same element compatibility that
+     * gst_value_list_append_value asserts, so a scalar and a range over it stay
+     * valid. It is only input validation, as comparison type-checks each pair.
+     * The value is freed by the caller on failure. */
+    if (type == G_TYPE_INVALID && element_spec == NULL && vlist->len > 1
+        && !gst_value_list_or_array_are_compatible (&vlist->fields[0],
+            &vlist->fields[vlist->len - 1]))
+      return FALSE;
+
     while (g_ascii_isspace (*s))
       s++;
 
@@ -3133,10 +3136,22 @@ _priv_gst_value_parse_value (gchar * str,
   if (*s == '[') {
     ret = _priv_gst_value_parse_range_struct_caps (s, &s, value, type);
   } else if (*s == '{') {
+    /* A container type annotation is only honoured if it names a list-family
+     * type: the list parser below accesses value->data[0].v_pointer as a
+     * GstValueList, which is not valid for any other type */
     if (container_type == G_TYPE_INVALID)
       container_type = GST_TYPE_LIST;
+    else if (container_type != GST_TYPE_LIST
+        && container_type != GST_TYPE_UNIQUE_LIST
+        && container_type != GST_TYPE_ARRAY) {
+      GST_WARNING ("invalid container type '%s' for list",
+          g_type_name (container_type));
+      return FALSE;
+    }
     g_value_init (value, container_type);
     ret = _priv_gst_value_parse_list (s, &s, value, type, pspec);
+    if (G_UNLIKELY (!ret))
+      g_value_unset (value);
   } else if (*s == '<') {
     if (type == G_TYPE_STRV) {
       g_value_init (value, G_TYPE_STRV);
@@ -3145,6 +3160,8 @@ _priv_gst_value_parse_value (gchar * str,
       g_value_init (value, GST_TYPE_ARRAY);
       ret = _priv_gst_value_parse_array (s, &s, value, type, pspec);
     }
+    if (G_UNLIKELY (!ret))
+      g_value_unset (value);
   } else {
     value_s = s;
 
@@ -3329,6 +3346,25 @@ gst_value_set_structure (GValue * value, const GstStructure * structure)
   g_return_if_fail (structure == NULL || GST_IS_STRUCTURE (structure));
 
   g_value_set_boxed (value, structure);
+}
+
+/**
+ * gst_value_take_structure:
+ * @value: a GValue initialized to GST_TYPE_STRUCTURE
+ * @structure: (transfer full): the structure to set the value to
+ *
+ * Sets the contents of @value to @structure. Takes ownership of the structure
+ *
+ * Since: 1.30
+ */
+void
+gst_value_take_structure (GValue * value, GstStructure * structure)
+{
+  g_return_if_fail (G_IS_VALUE (value));
+  g_return_if_fail (G_VALUE_TYPE (value) == GST_TYPE_STRUCTURE);
+  g_return_if_fail (structure == NULL || GST_IS_STRUCTURE (structure));
+
+  g_value_take_boxed (value, structure);
 }
 
 /**
@@ -3663,12 +3699,13 @@ wrong_length:
   }
 map_failed:
   {
+    gst_buffer_unref (buffer);
     return FALSE;
   }
 wrong_char:
   {
-    gst_buffer_unref (buffer);
     gst_buffer_unmap (buffer, &info);
+    gst_buffer_unref (buffer);
     return FALSE;
   }
 }

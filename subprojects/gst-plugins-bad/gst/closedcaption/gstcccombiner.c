@@ -261,7 +261,7 @@ static CCBufferPushReturn
 schedule_cea608_s334_1a (GstCCCombiner * self, guint8 * data, guint len,
     GstClockTime pts, GstClockTime duration)
 {
-  guint8 field0_data[3], field1_data[3];
+  guint8 field0_data[MAX_CEA608_LEN], field1_data[MAX_CEA608_LEN];
   guint field0_len = 0, field1_len = 0;
   guint i;
 
@@ -269,6 +269,12 @@ schedule_cea608_s334_1a (GstCCCombiner * self, guint8 * data, guint len,
     GST_WARNING ("Invalid cc_data buffer size %u. Truncating to a multiple "
         "of 3", len);
     len = len - (len % 3);
+  }
+
+  if (2 * (len / 3) > MAX_CEA608_LEN) {
+    GST_WARNING ("Truncating CEA608 s334-1a data of %u bytes to %u bytes",
+        len, MAX_CEA608_LEN * 3 / 2);
+    len = MAX_CEA608_LEN * 3 / 2;
   }
 
   for (i = 0; i < len / 3; i++) {
@@ -1329,6 +1335,7 @@ gst_cc_combiner_class_init (GstCCCombinerClass * klass)
       "Filter",
       "Combines GstVideoCaptionMeta with video input stream",
       "Sebastian Dröge <sebastian@centricular.com>");
+  gst_element_class_mark_as_untrusted_aware (gstelement_class);
 
   /**
    * GstCCCombiner:schedule:

@@ -47,10 +47,14 @@
 #  include <config.h>
 #endif
 
+#include <AvailabilityMacros.h>
+
 #include "avfassetsrc.h"
 #include "helpers.h"
 #include "coremediabuffer.h"
 #include "vtutil.h"
+
+#include <gst/allocators/gstiosurface.h>
 
 GST_DEBUG_CATEGORY_STATIC (gst_avf_asset_src_debug);
 #define GST_CAT_DEFAULT gst_avf_asset_src_debug
@@ -87,14 +91,27 @@ static GstStaticPadTemplate audio_factory = GST_STATIC_PAD_TEMPLATE ("audio",
     )
 );
 
+#define AVF_ASSET_SRC_VIDEO_FORMATS "NV12"
+#define AVF_ASSET_SRC_VIDEO_CAPS_FIELDS \
+    "framerate = " GST_VIDEO_FPS_RANGE ", " \
+    "width = " GST_VIDEO_SIZE_RANGE ", " \
+    "height = " GST_VIDEO_SIZE_RANGE
+#define AVF_ASSET_SRC_VIDEO_CAPS_WITH_FEATURES(features) \
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES (features, \
+        AVF_ASSET_SRC_VIDEO_FORMATS) ", " \
+    AVF_ASSET_SRC_VIDEO_CAPS_FIELDS
+#define AVF_ASSET_SRC_VIDEO_CAPS_SYSTEM_MEMORY \
+    "video/x-raw, " \
+    "format = (string) " AVF_ASSET_SRC_VIDEO_FORMATS ", " \
+    AVF_ASSET_SRC_VIDEO_CAPS_FIELDS
+
 static GstStaticPadTemplate video_factory = GST_STATIC_PAD_TEMPLATE ("video",
     GST_PAD_SRC,
     GST_PAD_SOMETIMES,
-    GST_STATIC_CAPS ("video/x-raw, "
-        "format = (string) NV12, "
-        "framerate = " GST_VIDEO_FPS_RANGE ", "
-        "width = " GST_VIDEO_SIZE_RANGE ", "
-        "height = " GST_VIDEO_SIZE_RANGE
+    GST_STATIC_CAPS (
+        AVF_ASSET_SRC_VIDEO_CAPS_SYSTEM_MEMORY "; "
+        AVF_ASSET_SRC_VIDEO_CAPS_WITH_FEATURES
+        (GST_CAPS_FEATURE_MEMORY_IOSURFACE)
     )
 );
 
@@ -114,11 +131,14 @@ static gboolean gst_avf_asset_src_send_event (GstAVFAssetSrc *self,
     GstEvent *event);
 static GstFlowReturn gst_avf_asset_src_send_start_stream (GstAVFAssetSrc * self,
     GstPad * pad, const gchar * stream_type);
+static GstCaps * gst_avf_asset_src_select_video_caps (GstAVFAssetSrc * self,
+    GstCaps * caps);
 
 static void gst_avf_asset_src_read_audio (GstAVFAssetSrc *self);
 static void gst_avf_asset_src_read_video (GstAVFAssetSrc *self);
 static void gst_avf_asset_src_start (GstAVFAssetSrc *self);
 static void gst_avf_asset_src_stop (GstAVFAssetSrc *self);
+static void gst_avf_asset_src_update_video_allocation (GstAVFAssetSrc * self);
 static gboolean gst_avf_asset_src_start_reading (GstAVFAssetSrc *self);
 static void gst_avf_asset_src_stop_reading (GstAVFAssetSrc *self);
 static void gst_avf_asset_src_stop_all (GstAVFAssetSrc *self);
@@ -127,6 +147,11 @@ static void gst_avf_asset_src_uri_handler_init (gpointer g_iface,
 
 static void gst_avf_asset_src_send_audio_eos (GstAVFAssetSrc * self);
 static void gst_avf_asset_src_send_video_eos (GstAVFAssetSrc * self);
+
+/* Undeprecate AVFoundation track APIs -- starting 15.0 */
+#if defined(MAC_OS_X_VERSION_MAX_ALLOWED) && MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
+#endif
 
 static gboolean
 gst_avf_asset_src_register_supplemental_decoders_if_needed (NSArray * tracks)
@@ -155,7 +180,7 @@ gst_avf_asset_src_register_supplemental_decoders_if_needed (NSArray * tracks)
         (unsigned long)[format_descriptions count]);
 
     for (guint j = 0; j < [format_descriptions count]; j++) {
-      CMFormatDescriptionRef fmt = 
+      CMFormatDescriptionRef fmt =
           (__bridge CMFormatDescriptionRef) [format_descriptions objectAtIndex:j];
       FourCharCode codec = CMFormatDescriptionGetMediaSubType (fmt);
 
@@ -247,6 +272,7 @@ gst_avf_asset_src_init (GstAVFAssetSrc * self)
   self->selected_video_track = 0;
   self->last_audio_pad_ret = GST_FLOW_OK;
   self->last_video_pad_ret = GST_FLOW_OK;
+  self->use_video_meta = FALSE;
   g_mutex_init (&self->lock);
 }
 
@@ -338,6 +364,7 @@ gst_avf_asset_src_change_state (GstElement * element, GstStateChange transition)
         gst_avf_asset_src_stop_all (self);
         return GST_STATE_CHANGE_FAILURE;
       }
+      [GST_AVF_ASSET_SRC_READER (self) setUseVideoMeta: self->use_video_meta];
       break;
     }
     case GST_STATE_CHANGE_READY_TO_PAUSED:
@@ -385,6 +412,48 @@ gst_avf_asset_src_get_caps(GstAVFAssetSrc * self, GstPad * pad, GstCaps * filter
   }
 
   return caps;
+}
+
+static gboolean
+gst_avf_asset_src_caps_has_feature (GstCaps * caps, const gchar * feature)
+{
+  GstCapsFeatures *features;
+
+  if (caps == NULL || gst_caps_is_empty (caps) || gst_caps_is_any (caps))
+    return FALSE;
+
+  features = gst_caps_get_features (caps, 0);
+  return features != NULL && gst_caps_features_contains (features, feature);
+}
+
+static GstCaps *
+gst_avf_asset_src_select_video_caps (GstAVFAssetSrc * self, GstCaps * caps)
+{
+  GstCaps *peer_caps;
+  GstCaps *candidates;
+  GstCaps *intersection;
+
+  peer_caps = gst_pad_peer_query_caps (self->videopad, NULL);
+  if (peer_caps == NULL || gst_caps_is_any (peer_caps)) {
+    gst_clear_caps (&peer_caps);
+    return gst_caps_ref (caps);
+  }
+
+  candidates = gst_caps_copy (caps);
+  gst_caps_append (candidates, gst_applemedia_copy_caps_with_feature (caps,
+          GST_CAPS_FEATURE_MEMORY_IOSURFACE));
+
+  intersection =
+      gst_caps_intersect_full (peer_caps, candidates, GST_CAPS_INTERSECT_FIRST);
+  gst_caps_unref (peer_caps);
+  gst_caps_unref (candidates);
+
+  if (gst_caps_is_empty (intersection)) {
+    gst_caps_unref (intersection);
+    return gst_caps_ref (caps);
+  }
+
+  return gst_caps_fixate (intersection);
 }
 
 static gboolean
@@ -635,6 +704,9 @@ gst_avf_asset_src_read_audio (GstAVFAssetSrc *self)
 static void
 gst_avf_asset_src_read_video (GstAVFAssetSrc *self)
 {
+  if (gst_pad_check_reconfigure (self->videopad))
+    gst_avf_asset_src_update_video_allocation (self);
+
   gst_avf_asset_src_read_data (self, self->videopad,
       GST_AVF_ASSET_READER_MEDIA_TYPE_VIDEO);
 }
@@ -743,6 +815,7 @@ gst_avf_asset_src_start (GstAVFAssetSrc *self)
   }
   if (AVF_ASSET_READER_HAS_VIDEO (self)) {
     GstCaps *vcaps = NULL;
+    GstCaps *selected_caps = NULL;
 
     self->videopad = gst_pad_new_from_static_template (&video_factory, "video");
     gst_pad_set_query_function (self->videopad,
@@ -762,17 +835,63 @@ gst_avf_asset_src_start (GstAVFAssetSrc *self)
         vcaps = gst_caps_fixate (vcaps);
       }
     }
-    if (vcaps) {
-      gst_pad_set_caps (self->videopad, vcaps);
-      gst_pad_push_event (self->videopad, gst_event_new_caps (vcaps));
-      gst_caps_unref (vcaps);
-    }
-    gst_pad_push_event (self->videopad, gst_event_new_segment (&segment));
     gst_element_add_pad (GST_ELEMENT (self), self->videopad);
+
+    if (vcaps) {
+      selected_caps = gst_avf_asset_src_select_video_caps (self, vcaps);
+      gst_pad_set_caps (self->videopad, selected_caps);
+      gst_pad_push_event (self->videopad, gst_event_new_caps (selected_caps));
+      gst_caps_unref (selected_caps);
+    }
+
+    gst_pad_push_event (self->videopad, gst_event_new_segment (&segment));
+    gst_clear_caps (&vcaps);
   }
   gst_element_no_more_pads (GST_ELEMENT (self));
 
   self->state = GST_AVF_ASSET_SRC_STATE_STARTED;
+}
+
+static void
+gst_avf_asset_src_update_video_allocation (GstAVFAssetSrc * self)
+{
+  GstCaps *base_caps;
+  GstCaps *caps;
+  GstCaps *current_caps;
+  GstQuery *query;
+
+  if (!self->videopad)
+    return;
+
+  base_caps = [GST_AVF_ASSET_SRC_READER (self) videoCaps];
+  if (!base_caps)
+    return;
+
+  caps = gst_avf_asset_src_select_video_caps (self, base_caps);
+  gst_caps_unref (base_caps);
+
+  current_caps = gst_pad_get_current_caps (self->videopad);
+  if (!current_caps || !gst_caps_is_equal (current_caps, caps)) {
+    gst_pad_set_caps (self->videopad, caps);
+    gst_pad_push_event (self->videopad, gst_event_new_caps (caps));
+  }
+  gst_clear_caps (&current_caps);
+
+  query = gst_query_new_allocation (caps, TRUE);
+  if (!gst_pad_peer_query (self->videopad, query)) {
+    GST_DEBUG_OBJECT (self, "peer ALLOCATION query failed");
+  }
+
+  self->use_video_meta =
+      gst_query_find_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL) ||
+      gst_avf_asset_src_caps_has_feature (caps,
+      GST_CAPS_FEATURE_MEMORY_IOSURFACE);
+  if (self->reader != NULL) {
+    [GST_AVF_ASSET_SRC_READER (self) setUseVideoMeta: self->use_video_meta];
+  }
+
+  gst_query_unref (query);
+  gst_caps_unref (caps);
 }
 
 static void
@@ -813,18 +932,22 @@ gst_avf_asset_src_start_reading (GstAVFAssetSrc *self)
 
   GST_DEBUG_OBJECT (self, "Start reading");
 
+  if (AVF_ASSET_READER_HAS_VIDEO (self))
+    gst_avf_asset_src_update_video_allocation (self);
+
   if ((ret = gst_avf_asset_src_start_reader (self)) != TRUE) {
     goto exit;
   }
   if (AVF_ASSET_READER_HAS_SUPPORTED_AUDIO (self)) {
-    ret = gst_pad_start_task (self->audiopad, (GstTaskFunction) gst_avf_asset_src_read_audio, self, NULL);
+    ret = gst_pad_start_task (self->audiopad, (GstTaskFunction) gst_avf_asset_src_read_audio, gst_object_ref (self), gst_object_unref);
     if (!ret) {
       GST_ERROR ("Failed to start audio task");
       goto exit;
     }
   } else if (AVF_ASSET_READER_HAS_AUDIO (self) && self->audiopad) {
     ret = gst_pad_start_task (self->audiopad,
-        (GstTaskFunction) gst_avf_asset_src_send_audio_eos, self, NULL);
+        (GstTaskFunction) gst_avf_asset_src_send_audio_eos, gst_object_ref (self),
+        gst_object_unref);
     if (!ret) {
       GST_ERROR ("Failed to start audio EOS task");
       goto exit;
@@ -832,14 +955,15 @@ gst_avf_asset_src_start_reading (GstAVFAssetSrc *self)
   }
 
   if (AVF_ASSET_READER_HAS_SUPPORTED_VIDEO (self)) {
-    ret = gst_pad_start_task (self->videopad, (GstTaskFunction)gst_avf_asset_src_read_video, self, NULL);
+    ret = gst_pad_start_task (self->videopad, (GstTaskFunction)gst_avf_asset_src_read_video, gst_object_ref (self), gst_object_unref);
     if (!ret) {
       GST_ERROR ("Failed to start video task");
       goto exit;
     }
   } else if (AVF_ASSET_READER_HAS_VIDEO (self) && self->videopad) {
     ret = gst_pad_start_task (self->videopad,
-        (GstTaskFunction) gst_avf_asset_src_send_video_eos, self, NULL);
+        (GstTaskFunction) gst_avf_asset_src_send_video_eos, gst_object_ref (self),
+        gst_object_unref);
     if (!ret) {
       GST_ERROR ("Failed to start video EOS task");
       goto exit;
@@ -1115,7 +1239,8 @@ gst_avf_asset_src_uri_handler_init (gpointer g_iface, gpointer iface_data)
     settings = [NSDictionary dictionaryWithObjectsAndKeys:
         [NSNumber numberWithInt:
         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange],
-        kCVPixelBufferPixelFormatTypeKey, nil];
+        kCVPixelBufferPixelFormatTypeKey,
+        [NSDictionary dictionary], kCVPixelBufferIOSurfacePropertiesKey, nil];
   } else {
     return FALSE;
   }
@@ -1154,6 +1279,11 @@ gst_avf_asset_src_uri_handler_init (gpointer g_iface, gpointer iface_data)
     return;
   }
   reading = TRUE;
+}
+
+- (void) setUseVideoMeta: (gboolean) useVideoMeta
+{
+  use_video_meta = useVideoMeta;
 }
 
 - (void) stop
@@ -1241,7 +1371,9 @@ gst_avf_asset_src_uri_handler_init (gpointer g_iface, gpointer iface_data)
     GST_WARNING ("Buffer %p has invalid timestamp", cmbuf);
   }
   dur = CMSampleBufferGetDuration (cmbuf);
-  buf = gst_core_media_buffer_new (cmbuf, FALSE, NULL);
+  buf = gst_core_media_buffer_new (cmbuf,
+      type == GST_AVF_ASSET_READER_MEDIA_TYPE_VIDEO ? use_video_meta :
+      FALSE, NULL);
   CFRelease (cmbuf);
   if (buf == NULL)
     return NULL;
@@ -1293,6 +1425,11 @@ gst_avf_asset_src_uri_handler_init (gpointer g_iface, gpointer iface_data)
   return caps;
 }
 
+- (GstCaps *) videoCaps
+{
+  return video_caps ? gst_caps_ref (video_caps) : NULL;
+}
+
 - (void) dealloc
 {
   asset = nil;
@@ -1308,3 +1445,7 @@ gst_avf_asset_src_uri_handler_init (gpointer g_iface, gpointer iface_data)
 }
 
 @end
+
+#if defined(MAC_OS_X_VERSION_MAX_ALLOWED) && MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+G_GNUC_END_IGNORE_DEPRECATIONS;
+#endif

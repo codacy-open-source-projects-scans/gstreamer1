@@ -199,6 +199,7 @@ gst_h264_parse_init (GstH264Parse * h264parse)
   h264parse->frame_out = gst_adapter_new ();
   gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (h264parse), FALSE);
   gst_base_parse_set_infer_ts (GST_BASE_PARSE (h264parse), FALSE);
+  gst_base_parse_set_allow_duplicated_pts (GST_BASE_PARSE (h264parse), TRUE);
   GST_PAD_SET_ACCEPT_INTERSECT (GST_BASE_PARSE_SINK_PAD (h264parse));
   GST_PAD_SET_ACCEPT_TEMPLATE (GST_BASE_PARSE_SINK_PAD (h264parse));
 
@@ -214,7 +215,7 @@ gst_h264_parse_finalize (GObject * object)
 
   gst_video_clear_user_data_unregistered (&h264parse->user_data_unregistered,
       TRUE);
-  gst_video_clear_user_data (&h264parse->user_data, TRUE);
+  gst_video_clear_user_data (&h264parse->user_data);
 
   g_object_unref (h264parse->frame_out);
 
@@ -243,7 +244,7 @@ gst_h264_parse_reset_frame (GstH264Parse * h264parse)
   h264parse->have_pps_in_frame = FALSE;
   h264parse->have_aud_in_frame = FALSE;
   gst_adapter_clear (h264parse->frame_out);
-  gst_video_clear_user_data (&h264parse->user_data, FALSE);
+  gst_video_clear_user_data (&h264parse->user_data);
   gst_video_clear_user_data_unregistered (&h264parse->user_data_unregistered,
       FALSE);
 }
@@ -1129,7 +1130,8 @@ gst_h264_parse_process_nal (GstH264Parse * h264parse, GstH264NalUnit * nalu)
       h264parse->picture_start = TRUE;
 
       /* don't need to parse the whole slice (header) here */
-      if (*(nalu->data + nalu->offset + nalu->header_bytes) & 0x80) {
+      if (nalu->size > nalu->header_bytes &&
+          *(nalu->data + nalu->offset + nalu->header_bytes) & 0x80) {
         /* means first_mb_in_slice == 0 */
         /* real frame data */
         GST_DEBUG_OBJECT (h264parse, "first_mb_in_slice = 0");
@@ -1955,8 +1957,9 @@ get_compatible_profile_caps (GstH264SPS * sps)
       g_value_unset (&value);
     }
     gst_caps_set_value (caps, "profile", &compat_profiles);
-    g_value_unset (&compat_profiles);
   }
+
+  g_value_unset (&compat_profiles);
 
   return caps;
 }
@@ -2415,22 +2418,6 @@ gst_h264_parse_update_src_caps (GstH264Parse * h264parse, GstCaps * caps)
           /* Assume par_n/par_d of 1/1 for calcs below, but don't set into caps */
           par_n = par_d = 1;
         }
-      }
-
-      if (s && !gst_structure_has_field (s, "interlace-mode")) {
-        const gchar *interlace_mode;
-        /* If a picture timing is present, and upstream didn't specify the
-         * interlace mode, we are in mixed mode (i.e. we are not guaranteed we
-         * will either be always interlaced or always progressive)
-         */
-        if (vui->pic_struct_present_flag)
-          interlace_mode = "mixed";
-        else
-          interlace_mode = "progressive";
-        GST_DEBUG_OBJECT (h264parse, "Setting interlace-mode : %s",
-            interlace_mode);
-        gst_caps_set_simple (caps, "interlace-mode", G_TYPE_STRING,
-            interlace_mode, NULL);
       }
 
       /* Pass through or set output stereo/multiview config */

@@ -35,6 +35,7 @@
 
 #include <gst/video/video.h>
 #include <gst/gl/gstglcontext.h>
+#include <gst/allocators/gstiosurface.h>
 #include "coremediabuffer.h"
 #include "videotexturecache-gl.h"
 #include "helpers.h"
@@ -58,6 +59,87 @@ get_oriented_dimensions(GstAVFVideoSourceOrientation orientation, CMVideoDimensi
 
 static CMTime
 find_range_bound_close_enough_to_fps (AVFrameRateRange *range, int fps_n, int fps_d);
+
+static const gchar *
+gst_avf_error_code_name (NSInteger code)
+{
+#define ERROR_CASE(c) case c: return G_STRINGIFY (c)
+
+  switch ((AVError) code) {
+    ERROR_CASE (AVErrorDeviceAlreadyUsedByAnotherSession);
+    ERROR_CASE (AVErrorDeviceInUseByAnotherApplication);
+    ERROR_CASE (AVErrorDeviceLockedForConfigurationByAnotherProcess);
+    ERROR_CASE (AVErrorApplicationIsNotAuthorized);
+    ERROR_CASE (AVErrorApplicationIsNotAuthorizedToUseDevice);
+    ERROR_CASE (AVErrorDeviceNotConnected);
+    ERROR_CASE (AVErrorDeviceWasDisconnected);
+    default:
+      return "unknown";
+  }
+
+#undef ERROR_CASE
+}
+
+static GstResourceError
+gst_avf_resource_error_from_nserror (NSError * err)
+{
+  if (err == nil || ![[err domain] isEqualToString:AVFoundationErrorDomain])
+    return GST_RESOURCE_ERROR_OPEN_READ;
+
+  switch ((AVError) [err code]) {
+    case AVErrorDeviceAlreadyUsedByAnotherSession:
+    case AVErrorDeviceInUseByAnotherApplication:
+    case AVErrorDeviceLockedForConfigurationByAnotherProcess:
+      return GST_RESOURCE_ERROR_BUSY;
+    case AVErrorApplicationIsNotAuthorized:
+    case AVErrorApplicationIsNotAuthorizedToUseDevice:
+      return GST_RESOURCE_ERROR_NOT_AUTHORIZED;
+    case AVErrorDeviceNotConnected:
+    case AVErrorDeviceWasDisconnected:
+      return GST_RESOURCE_ERROR_NOT_FOUND;
+    default:
+      return GST_RESOURCE_ERROR_OPEN_READ;
+  }
+}
+
+static gchar *
+gst_avf_error_debug_string (NSError * err)
+{
+  NSString *domain = err != nil ? [err domain] : nil;
+  NSString *failure_reason = err != nil ? [err localizedFailureReason] : nil;
+  NSString *recovery_suggestion =
+      err != nil ? [err localizedRecoverySuggestion] : nil;
+  id device = err != nil ? [[err userInfo] objectForKey:AVErrorDeviceKey] : nil;
+  id pid = err != nil ? [[err userInfo] objectForKey:AVErrorPIDKey] : nil;
+  NSString *device_description = device != nil ? [device description] : nil;
+  NSString *pid_description = pid != nil ? [pid description] : nil;
+
+  return g_strdup_printf ("AVFoundation error domain=%s code=%ld (%s), "
+      "failure-reason=%s, recovery-suggestion=%s, device=%s, pid=%s",
+      domain != nil ? [domain UTF8String] : "unknown",
+      err != nil ? (long) [err code] : 0,
+      err != nil ? gst_avf_error_code_name ([err code]) : "unknown",
+      failure_reason != nil ? [failure_reason UTF8String] : "none",
+      recovery_suggestion != nil ? [recovery_suggestion UTF8String] : "none",
+      device_description != nil ? [device_description UTF8String] : "none",
+      pid_description != nil ? [pid_description UTF8String] : "none");
+}
+
+static void
+gst_avf_video_src_post_error (GstElement * element, const gchar * message,
+    NSError * err)
+{
+  NSString *description = err != nil ? [err localizedDescription] : nil;
+  GstResourceError code = gst_avf_resource_error_from_nserror (err);
+  gchar *text = g_strdup_printf ("%s: %s", message,
+      description != nil ? [description UTF8String] : "unknown error");
+  gchar *debug = gst_avf_error_debug_string (err);
+
+  GST_WARNING_OBJECT (element, "error: %s", text);
+  GST_WARNING_OBJECT (element, "error: %s", debug);
+  gst_element_message_full (element, GST_MESSAGE_ERROR, GST_RESOURCE_ERROR,
+      code, text, debug, __FILE__, GST_FUNCTION, __LINE__);
+}
 
 #if TARGET_OS_OSX
 static GstCaps * gst_av_capture_screen_rect_get_caps (CGRect rect,
@@ -110,6 +192,20 @@ gst_avf_screen_dup_name (NSScreen * screen, CGDirectDisplayID display_id)
 }
 #endif
 
+#define AVF_VIDEO_SRC_CAPTURE_FORMATS "{ NV12, UYVY, YUY2 }"
+#define AVF_VIDEO_SRC_BGRA_FORMATS "BGRA"
+#define AVF_VIDEO_SRC_VIDEO_CAPS_FIELDS \
+    "framerate = " GST_VIDEO_FPS_RANGE ", " \
+    "width = " GST_VIDEO_SIZE_RANGE ", " \
+    "height = " GST_VIDEO_SIZE_RANGE
+#define AVF_VIDEO_SRC_CAPS_WITH_FEATURES(features, formats) \
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES (features, formats) ", " \
+    AVF_VIDEO_SRC_VIDEO_CAPS_FIELDS
+#define AVF_VIDEO_SRC_CAPS_SYSTEM_MEMORY(formats) \
+    "video/x-raw, " \
+    "format = (string) " formats ", " \
+    AVF_VIDEO_SRC_VIDEO_CAPS_FIELDS
+
 static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
@@ -125,17 +221,19 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
             "NV12") ", "
         "texture-target = " GST_GL_TEXTURE_TARGET_2D_STR "; "
 #endif
-        "video/x-raw, "
-        "format = (string) { NV12, UYVY, YUY2 }, "
-        "framerate = " GST_VIDEO_FPS_RANGE ", "
-        "width = " GST_VIDEO_SIZE_RANGE ", "
-        "height = " GST_VIDEO_SIZE_RANGE "; "
+        AVF_VIDEO_SRC_CAPS_SYSTEM_MEMORY
+        (AVF_VIDEO_SRC_CAPTURE_FORMATS) "; "
 
-        "video/x-raw, "
-        "format = (string) BGRA, "
-        "framerate = " GST_VIDEO_FPS_RANGE ", "
-        "width = " GST_VIDEO_SIZE_RANGE ", "
-        "height = " GST_VIDEO_SIZE_RANGE "; "
+        AVF_VIDEO_SRC_CAPS_SYSTEM_MEMORY
+        (AVF_VIDEO_SRC_BGRA_FORMATS) "; "
+
+        AVF_VIDEO_SRC_CAPS_WITH_FEATURES
+        (GST_CAPS_FEATURE_MEMORY_IOSURFACE,
+            AVF_VIDEO_SRC_CAPTURE_FORMATS) "; "
+
+        AVF_VIDEO_SRC_CAPS_WITH_FEATURES
+        (GST_CAPS_FEATURE_MEMORY_IOSURFACE,
+            AVF_VIDEO_SRC_BGRA_FORMATS) "; "
 ));
 
 typedef enum _QueueState {
@@ -544,10 +642,7 @@ G_GNUC_END_IGNORE_DEPRECATIONS
   input = [AVCaptureDeviceInput deviceInputWithDevice:device
                                                 error:&err];
   if (input == nil) {
-    GST_ELEMENT_ERROR (element, RESOURCE, BUSY,
-        ("Failed to open device: %s",
-        [[err localizedDescription] UTF8String]),
-        (NULL));
+    gst_avf_video_src_post_error (element, "Failed to open device", err);
     device = nil;
     return NO;
   }
@@ -812,10 +907,11 @@ G_GNUC_END_IGNORE_DEPRECATIONS
 - (BOOL)setDeviceCaps:(const GstVideoInfo *)info
 {
   gboolean found_format = FALSE, found_framerate = FALSE;
+  NSError *err = nil;
 
   GST_DEBUG_OBJECT (element, "Setting device caps");
 
-  if ([device lockForConfiguration:NULL] == YES) {
+  if ([device lockForConfiguration:&err] == YES) {
     for (AVCaptureDeviceFormat *fmt in device.formats.reverseObjectEnumerator) {
       CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions (fmt.formatDescription);
       dimensions = [self orientedDimensions:dimensions];
@@ -846,7 +942,8 @@ G_GNUC_END_IGNORE_DEPRECATIONS
       return NO;
     }
   } else {
-    GST_WARNING ("Couldn't lock device for configuration");
+    gst_avf_video_src_post_error (element,
+        "Couldn't lock device for configuration", err);
     return NO;
   }
   return YES;
@@ -892,9 +989,9 @@ G_GNUC_END_IGNORE_DEPRECATIONS
         "width: %d height: %d format: %s", width, height,
         gst_video_format_to_string (format));
     int video_format = gst_video_format_to_cvpixelformat (format);
-    output.videoSettings = [NSDictionary
-        dictionaryWithObject:[NSNumber numberWithInt:video_format]
-        forKey:(NSString*)kCVPixelBufferPixelFormatTypeKey];
+    output.videoSettings = [NSDictionary dictionaryWithObjectsAndKeys:
+        [NSNumber numberWithInt:video_format], kCVPixelBufferPixelFormatTypeKey,
+        [NSDictionary dictionary], kCVPixelBufferIOSurfacePropertiesKey, nil];
 
     if (captureScreen) {
 #if TARGET_OS_OSX
@@ -1155,9 +1252,21 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
   if (!ret)
     return ret;
 
+  useVideoMeta =
+      gst_query_find_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
+
   gst_query_parse_allocation (query, &alloc_caps, NULL);
+  if (alloc_caps == NULL)
+    return TRUE;
+
   features = gst_caps_get_features (alloc_caps, 0);
-  if (gst_caps_features_contains (features, GST_CAPS_FEATURE_MEMORY_GL_MEMORY)) {
+  if (features && gst_caps_features_contains (features,
+          GST_CAPS_FEATURE_MEMORY_IOSURFACE)) {
+    useVideoMeta = TRUE;
+  }
+
+  if (features && gst_caps_features_contains (features,
+          GST_CAPS_FEATURE_MEMORY_GL_MEMORY)) {
     GstVideoTextureCacheGL *cache_gl;
 
     cache_gl = textureCache ? GST_VIDEO_TEXTURE_CACHE_GL (textureCache) : NULL;
@@ -1737,7 +1846,7 @@ gst_avf_video_src_set_context (GstElement * element, GstContext * context)
 GstCaps*
 gst_av_capture_device_get_caps (AVCaptureDevice *device, AVCaptureVideoDataOutput *output, GstAVFVideoSourceOrientation orientation)
 {
-  GstCaps *result_caps, *result_gl_caps;
+  GstCaps *result_caps, *result_gl_caps, *result_iosurface_caps;
 #if TARGET_OS_OSX || TARGET_OS_IOS || TARGET_OS_TV
   gboolean is_gl_format;
 #if TARGET_OS_OSX
@@ -1749,6 +1858,7 @@ gst_av_capture_device_get_caps (AVCaptureDevice *device, AVCaptureVideoDataOutpu
 
   result_caps = gst_caps_new_empty ();
   result_gl_caps = gst_caps_new_empty ();
+  result_iosurface_caps = gst_caps_new_empty ();
 
   /* Iterate in reverse order so UYVY is first and BGRA is last */
   for (AVCaptureDeviceFormat *format in device.formats.reverseObjectEnumerator) {
@@ -1791,6 +1901,10 @@ gst_av_capture_device_get_caps (AVCaptureDevice *device, AVCaptureVideoDataOutpu
           caps = GST_AVF_FPS_RANGE_CAPS_NEW (gst_format, dimensions.width,
               dimensions.height, min_fps_n, min_fps_d, max_fps_n, max_fps_d);
 
+        gst_caps_append (result_iosurface_caps,
+            gst_applemedia_copy_caps_with_feature (caps,
+                GST_CAPS_FEATURE_MEMORY_IOSURFACE));
+
 #if TARGET_OS_OSX || TARGET_OS_IOS || TARGET_OS_TV
         is_gl_format = FALSE;
         for (int i = 0; i < G_N_ELEMENTS (gl_formats); i++) {
@@ -1825,7 +1939,10 @@ gst_av_capture_device_get_caps (AVCaptureDevice *device, AVCaptureVideoDataOutpu
     }
   }
 
-  result_gl_caps = gst_caps_simplify (gst_caps_merge (result_gl_caps, result_caps));
+  result_gl_caps =
+      gst_caps_simplify (gst_caps_merge (result_gl_caps, result_caps));
+  result_gl_caps =
+      gst_caps_merge (result_gl_caps, gst_caps_simplify (result_iosurface_caps));
 
   return result_gl_caps;
 }
@@ -1848,11 +1965,17 @@ gst_av_capture_screen_rect_get_caps (CGRect rect, gdouble scale,
         gst_video_format_from_cvpixelformat ([pixel_format integerValue]);
 
     if (gst_format != GST_VIDEO_FORMAT_UNKNOWN) {
-      gst_caps_append (result, gst_caps_new_simple ("video/x-raw",
+      GstCaps *caps = gst_caps_new_simple ("video/x-raw",
               "width", G_TYPE_INT, (gint) (rect.size.width * scale),
               "height", G_TYPE_INT, (gint) (rect.size.height * scale),
               "format", G_TYPE_STRING,
-              gst_video_format_to_string (gst_format), NULL));
+              gst_video_format_to_string (gst_format), NULL);
+      GstCaps *iosurface_caps =
+          gst_applemedia_copy_caps_with_feature (caps,
+          GST_CAPS_FEATURE_MEMORY_IOSURFACE);
+
+      gst_caps_append (result, caps);
+      gst_caps_append (result, iosurface_caps);
     }
   }
 

@@ -130,6 +130,7 @@ gst_wavpack_dec_reset (GstWavpackDec * dec)
 
   dec->channels = 0;
   dec->channel_mask = 0;
+  dec->need_reorder = FALSE;
   dec->sample_rate = 0;
   dec->depth = 0;
   dec->depth_shift = 0;
@@ -238,7 +239,8 @@ gst_wavpack_dec_negotiate (GstWavpackDec * dec)
   if (dec->channel_mask) {
     if (!gst_wavpack_get_channel_positions (dec->channels,
             dec->channel_mask, pos))
-      GST_WARNING_OBJECT (dec, "Failed to set channel layout");
+      GST_WARNING_OBJECT (dec,
+          "Unsupported channel layout -- mapping to unpositioned channels");
   }
 
   gst_audio_info_init (&info);
@@ -249,6 +251,10 @@ gst_wavpack_dec_negotiate (GstWavpackDec * dec)
     gst_audio_channel_positions_to_valid_order (info.position, info.channels);
     gst_audio_get_channel_reorder_map (info.channels,
         info.position, pos, dec->channel_reorder_map);
+    dec->need_reorder =
+        memcmp (pos, info.position, dec->channels * sizeof (pos[0])) != 0;
+  } else {
+    dec->need_reorder = FALSE;
   }
 
   /* should always succeed */
@@ -308,10 +314,12 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
   GstBuffer *outbuf = NULL;
   GstFlowReturn ret = GST_FLOW_OK;
   WavpackHeader wph;
-  int32_t decoded, unpacked_size;
-  gint width, depth_shift, i, j, num_samples, wavpack_mode;
+  gint width, depth_shift, wavpack_mode;
   gboolean mode_float;
   gint32 *dec_data = NULL;
+  gsize i, j, dec_data_size, unpacked_size, num_samples;
+  uint32_t decoded;
+  guint64 offset;
   guint8 *out_data;
   GstMapInfo map, omap;
 
@@ -328,7 +336,7 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
   if (!gst_wavpack_read_header (&wph, map.data))
     goto invalid_header;
 
-  if (map.size < wph.ckSize + 4 * 1 + 4)
+  if (map.size - 4 * 1 - 4 < wph.ckSize)
     goto input_not_framed;
 
   if (!(wph.flags & INITIAL_BLOCK))
@@ -378,10 +386,17 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
 
   g_assert (dec->context != NULL);
   /* alloc output buffer */
-  dec_data = g_malloc (4 * wph.block_samples * dec->channels);
+  dec_data_size = 4;
+  if (!g_size_checked_mul (&dec_data_size, dec_data_size, wph.block_samples) ||
+      !g_size_checked_mul (&dec_data_size, dec_data_size, dec->channels))
+    goto invalid_header;
+  dec_data = g_malloc (dec_data_size);
+  offset = GST_BUFFER_OFFSET (buf);
 
   /* decode */
   decoded = WavpackUnpackSamples (dec->context, dec_data, wph.block_samples);
+  gst_buffer_unmap (buf, &map);
+  buf = NULL;
   if (decoded != wph.block_samples)
     goto decode_error;
 
@@ -393,7 +408,7 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
   outbuf = gst_audio_decoder_allocate_output_buffer (bdec, unpacked_size);
 
   /* legacy; pass along offset, whatever that might entail */
-  GST_BUFFER_OFFSET (outbuf) = GST_BUFFER_OFFSET (buf);
+  GST_BUFFER_OFFSET (outbuf) = offset;
 
   gst_buffer_map (outbuf, &omap, GST_MAP_WRITE);
   out_data = omap.data;
@@ -401,33 +416,76 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
   switch (width) {
     case 8:{
       gint8 *outbuffer = (gint8 *) out_data;
-      gint *reorder_map = dec->channel_reorder_map;
 
-      for (i = 0; i < num_samples; i += dec->channels) {
-        for (j = 0; j < dec->channels; j++)
-          *outbuffer++ = (gint8) (dec_data[i + reorder_map[j]]);
+      if (dec->need_reorder) {
+        const gint *reorder_map = dec->channel_reorder_map;
+
+        for (i = 0; i < num_samples; i += dec->channels) {
+          for (j = 0; j < dec->channels; j++)
+            *outbuffer++ = (gint8) (dec_data[i + reorder_map[j]]);
+        }
+      } else {
+        for (i = 0; i < num_samples; i++)
+          *outbuffer++ = (gint8) (dec_data[i]);
       }
       break;
     }
     case 16:{
       gint16 *outbuffer = (gint16 *) out_data;
-      gint *reorder_map = dec->channel_reorder_map;
 
-      for (i = 0; i < num_samples; i += dec->channels) {
-        for (j = 0; j < dec->channels; j++)
-          *outbuffer++ = (gint16) (dec_data[i + reorder_map[j]]);
+      if (dec->need_reorder) {
+        const gint *reorder_map = dec->channel_reorder_map;
+
+        for (i = 0; i < num_samples; i += dec->channels) {
+          for (j = 0; j < dec->channels; j++)
+            *outbuffer++ = (gint16) (dec_data[i + reorder_map[j]]);
+        }
+      } else {
+        for (i = 0; i < num_samples; i++)
+          *outbuffer++ = (gint16) (dec_data[i]);
       }
       break;
     }
     case 24:{
       guint8 *outbuffer = (guint8 *) out_data;
-      gint *reorder_map = dec->channel_reorder_map;
 
-      if (depth_shift) {
-        for (i = 0; i < num_samples; i += dec->channels) {
-          for (j = 0; j < dec->channels; j++) {
-            gint32 sample =
-                (gint32) (dec_data[i + reorder_map[j]]) >> depth_shift;
+      if (dec->need_reorder) {
+        const gint *reorder_map = dec->channel_reorder_map;
+
+        if (depth_shift) {
+          for (i = 0; i < num_samples; i += dec->channels) {
+            for (j = 0; j < dec->channels; j++) {
+              gint32 sample =
+                  (gint32) (dec_data[i + reorder_map[j]]) >> depth_shift;
+
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+              GST_WRITE_UINT24_LE (outbuffer, sample);
+#else
+              GST_WRITE_UINT24_BE (outbuffer, sample);
+#endif
+
+              outbuffer += 3;
+            }
+          }
+        } else {
+          for (i = 0; i < num_samples; i += dec->channels) {
+            for (j = 0; j < dec->channels; j++) {
+              gint32 sample = (gint32) (dec_data[i + reorder_map[j]]);
+
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+              GST_WRITE_UINT24_LE (outbuffer, sample);
+#else
+              GST_WRITE_UINT24_BE (outbuffer, sample);
+#endif
+
+              outbuffer += 3;
+            }
+          }
+        }
+      } else {
+        if (depth_shift) {
+          for (i = 0; i < num_samples; i++) {
+            gint32 sample = (gint32) (dec_data[i]) >> depth_shift;
 
 #if G_BYTE_ORDER == G_LITTLE_ENDIAN
             GST_WRITE_UINT24_LE (outbuffer, sample);
@@ -437,11 +495,9 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
 
             outbuffer += 3;
           }
-        }
-      } else {
-        for (i = 0; i < num_samples; i += dec->channels) {
-          for (j = 0; j < dec->channels; j++) {
-            gint32 sample = (gint32) (dec_data[i + reorder_map[j]]);
+        } else {
+          for (i = 0; i < num_samples; i++) {
+            gint32 sample = (gint32) (dec_data[i]);
 
 #if G_BYTE_ORDER == G_LITTLE_ENDIAN
             GST_WRITE_UINT24_LE (outbuffer, sample);
@@ -457,11 +513,17 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
     }
     case 32:{
       gint32 *outbuffer = (gint32 *) out_data;
-      gint *reorder_map = dec->channel_reorder_map;
 
-      for (i = 0; i < num_samples; i += dec->channels) {
-        for (j = 0; j < dec->channels; j++)
-          *outbuffer++ = (gint32) (dec_data[i + reorder_map[j]]);
+      if (dec->need_reorder) {
+        const gint *reorder_map = dec->channel_reorder_map;
+
+        for (i = 0; i < num_samples; i += dec->channels) {
+          for (j = 0; j < dec->channels; j++)
+            *outbuffer++ = (gint32) (dec_data[i + reorder_map[j]]);
+        }
+      } else {
+        for (i = 0; i < num_samples; i++)
+          *outbuffer++ = (gint32) (dec_data[i]);
       }
       break;
     }
@@ -470,9 +532,6 @@ gst_wavpack_dec_handle_frame (GstAudioDecoder * bdec, GstBuffer * buf)
   }
 
   gst_buffer_unmap (outbuf, &omap);
-  gst_buffer_unmap (buf, &map);
-  buf = NULL;
-
   g_free (dec_data);
 
   ret = gst_audio_decoder_finish_frame (bdec, outbuf, 1);

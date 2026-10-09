@@ -102,14 +102,25 @@ typedef struct
   GstVideoGammaMode gamma_mode;
   GstVideoPrimariesMode primaries_mode;
   gdouble alpha_value;
+  GstVideoConvertScaleVAlign v_align;
+  GstVideoConvertScaleHAlign h_align;
 
   GstVideoConverter *convert;
 
   GstStructure *converter_config;
   gboolean converter_config_changed;
 
+  GstVideoInfo last_frame_vinfo;
+
   gint borders_h;
   gint borders_w;
+  gint dst_x;
+  gint dst_y;
+
+  gint crop_x;
+  gint crop_y;
+  gint crop_width;
+  gint crop_height;
 
   GstTaskPool *task_pool;
   gboolean task_pool_from_persistent_context;
@@ -142,6 +153,8 @@ GST_DEBUG_CATEGORY_STATIC (CAT_PERFORMANCE);
 #define DEFAULT_PROP_GAMMA_MODE GST_VIDEO_GAMMA_MODE_NONE
 #define DEFAULT_PROP_PRIMARIES_MODE GST_VIDEO_PRIMARIES_MODE_NONE
 #define DEFAULT_PROP_N_THREADS 1
+#define DEFAULT_PROP_VALIGN GST_VIDEO_CONVERT_SCALE_VALIGN_CENTER
+#define DEFAULT_PROP_HALIGN GST_VIDEO_CONVERT_SCALE_HALIGN_CENTER
 
 enum
 {
@@ -163,6 +176,8 @@ enum
   PROP_GAMMA_MODE,
   PROP_PRIMARIES_MODE,
   PROP_CONVERTER_CONFIG,
+  PROP_VALIGN,
+  PROP_HALIGN,
 };
 
 #undef GST_VIDEO_SIZE_RANGE
@@ -215,6 +230,48 @@ gst_video_scale_method_get_type (void)
   return video_scale_method_type;
 }
 
+#define GST_TYPE_VIDEO_CONVERT_SCALE_VALIGN (gst_video_convert_scale_valign_get_type())
+static GType
+gst_video_convert_scale_valign_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue methods[] = {
+    {GST_VIDEO_CONVERT_SCALE_VALIGN_TOP, "Top", "top"},
+    {GST_VIDEO_CONVERT_SCALE_VALIGN_CENTER, "Center", "center"},
+    {GST_VIDEO_CONVERT_SCALE_VALIGN_BOTTOM, "Bottom", "bottom"},
+    {0, NULL, NULL},
+  };
+
+  if (g_once_init_enter (&type)) {
+    GType tmp = g_enum_register_static ("GstVideoConvertScaleVAlign", methods);
+    g_once_init_leave (&type, tmp);
+  }
+
+  return type;
+}
+
+#define GST_TYPE_VIDEO_CONVERT_SCALE_HALIGN (gst_video_convert_scale_halign_get_type())
+static GType
+gst_video_convert_scale_halign_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue methods[] = {
+    {GST_VIDEO_CONVERT_SCALE_HALIGN_LEFT, "Left", "left"},
+    {GST_VIDEO_CONVERT_SCALE_HALIGN_CENTER, "Center", "center"},
+    {GST_VIDEO_CONVERT_SCALE_HALIGN_RIGHT, "Right", "right"},
+    {0, NULL, NULL},
+  };
+
+  if (g_once_init_enter (&type)) {
+    GType tmp = g_enum_register_static ("GstVideoConvertScaleHAlign", methods);
+    g_once_init_leave (&type, tmp);
+  }
+
+  return type;
+}
+
 static GstCaps *
 gst_video_convert_scale_get_capslist (void)
 {
@@ -253,6 +310,8 @@ static GstCaps *gst_video_convert_scale_transform_caps (GstBaseTransform *
     trans, GstPadDirection direction, GstCaps * caps, GstCaps * filter);
 static GstCaps *gst_video_convert_scale_fixate_caps (GstBaseTransform * base,
     GstPadDirection direction, GstCaps * caps, GstCaps * othercaps);
+static gboolean gst_video_convert_scale_propose_allocation (GstBaseTransform *
+    trans, GstQuery * decide_query, GstQuery * query);
 static gboolean gst_video_convert_scale_transform_meta (GstBaseTransform *
     trans, GstBuffer * outbuf, GstMeta * meta, GstBuffer * inbuf);
 
@@ -275,13 +334,7 @@ static gboolean
 gst_video_convert_scale_filter_meta (GstBaseTransform * trans, GstQuery * query,
     GType api, const GstStructure * params)
 {
-  /* This element cannot passthrough the crop meta, because it would convert the
-   * wrong sub-region of the image, and worst, our output image may not be large
-   * enough for the crop to be applied later */
-  if (api == GST_VIDEO_CROP_META_API_TYPE)
-    return FALSE;
-
-  /* propose all other metadata upstream */
+  /* propose all metadata upstream */
   return TRUE;
 }
 
@@ -390,12 +443,38 @@ gst_video_convert_scale_class_init (GstVideoConvertScaleClass * klass)
           " This configuration, if set, takes precedence over the other similar conversion properties.",
           GST_TYPE_STRUCTURE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstVideoConvertScale:valignment:
+   *
+   * Vertical alignment of the video content when adding borders
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (gobject_class, PROP_VALIGN,
+      g_param_spec_enum ("valignment", "Vertical Alignment",
+          "Vertical alignment of the video content when adding borders",
+          GST_TYPE_VIDEO_CONVERT_SCALE_VALIGN, DEFAULT_PROP_VALIGN,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstVideoConvertScale:halignment:
+   *
+   * Horizontal alignment of the video content when adding borders
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (gobject_class, PROP_HALIGN,
+      g_param_spec_enum ("halignment", "Horizontal Alignment",
+          "Horizontal alignment of the video content when adding borders",
+          GST_TYPE_VIDEO_CONVERT_SCALE_HALIGN, DEFAULT_PROP_HALIGN,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class,
       "Video colorspace converter and scaler",
       "Filter/Converter/Video/Scaler/Colorspace",
       "Resizes video and converts from one colorspace to another",
       "Wim Taymans <wim.taymans@gmail.com>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   gst_element_class_add_pad_template (element_class,
       gst_video_convert_scale_sink_template_factory ());
@@ -422,6 +501,8 @@ gst_video_convert_scale_class_init (GstVideoConvertScaleClass * klass)
       GST_DEBUG_FUNCPTR (gst_video_convert_scale_src_event);
   trans_class->transform_meta =
       GST_DEBUG_FUNCPTR (gst_video_convert_scale_transform_meta);
+  trans_class->propose_allocation =
+      GST_DEBUG_FUNCPTR (gst_video_convert_scale_propose_allocation);
 
   filter_class->set_info = GST_DEBUG_FUNCPTR (gst_video_convert_scale_set_info);
   filter_class->transform_frame =
@@ -431,6 +512,8 @@ gst_video_convert_scale_class_init (GstVideoConvertScaleClass * klass)
   klass->scales = TRUE;
 
   gst_type_mark_as_plugin_api (GST_TYPE_VIDEO_CONVERT_SCALE, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_VIDEO_CONVERT_SCALE_VALIGN, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_VIDEO_CONVERT_SCALE_HALIGN, 0);
 }
 
 static void
@@ -454,6 +537,10 @@ gst_video_convert_scale_init (GstVideoConvertScale * self)
   priv->matrix_mode = DEFAULT_PROP_MATRIX_MODE;
   priv->gamma_mode = DEFAULT_PROP_GAMMA_MODE;
   priv->primaries_mode = DEFAULT_PROP_PRIMARIES_MODE;
+  priv->v_align = DEFAULT_PROP_VALIGN;
+  priv->h_align = DEFAULT_PROP_HALIGN;
+
+  gst_video_info_init (&priv->last_frame_vinfo);
 
   priv->converter_config = NULL;
   priv->converter_config_changed = FALSE;
@@ -550,6 +637,12 @@ gst_video_convert_scale_set_property (GObject * object, guint prop_id,
       priv->converter_config = g_value_dup_boxed (value);
       priv->converter_config_changed = TRUE;
       break;
+    case PROP_VALIGN:
+      priv->v_align = g_value_get_enum (value);
+      break;
+    case PROP_HALIGN:
+      priv->h_align = g_value_get_enum (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -615,6 +708,12 @@ gst_video_convert_scale_get_property (GObject * object, guint prop_id,
       break;
     case PROP_CONVERTER_CONFIG:
       g_value_set_boxed (value, priv->converter_config);
+      break;
+    case PROP_VALIGN:
+      g_value_set_enum (value, priv->v_align);
+      break;
+    case PROP_HALIGN:
+      g_value_set_enum (value, priv->h_align);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -789,6 +888,10 @@ gst_video_convert_scale_transform_meta (GstBaseTransform * trans,
     NULL
   };
 
+  /* Drop it as we apply the crop */
+  if (info->api == GST_VIDEO_CROP_META_API_TYPE)
+    return FALSE;
+
   should_copy = gst_meta_api_type_tags_contain_only (info->api, valid_tags);
 
   /* Cant handle the tags in this meta, let the parent class handle it */
@@ -808,7 +911,7 @@ gst_video_convert_scale_transform_meta (GstBaseTransform * trans,
         GST_VIDEO_INFO_HEIGHT (&videofilter->in_info)
       };
       const GstVideoRectangle out_rectangle = {
-        priv->borders_w / 2, priv->borders_h / 2,
+        priv->dst_x, priv->dst_y,
         GST_VIDEO_INFO_WIDTH (&videofilter->out_info) - priv->borders_w,
         GST_VIDEO_INFO_HEIGHT (&videofilter->out_info) - priv->borders_h
       };
@@ -828,12 +931,22 @@ gst_video_convert_scale_transform_meta (GstBaseTransform * trans,
   return TRUE;
 }
 
-static GstStructure *
-gst_video_convert_scale_get_converter_config (GstVideoConvertScale * self,
-    GstVideoInfo * out_info)
+static gboolean
+gst_video_convert_scale_propose_allocation (GstBaseTransform * trans,
+    GstQuery * decide_query, GstQuery * query)
 {
-  GstVideoConvertScalePrivate *priv = PRIV (self);
-  return gst_structure_copy (priv->converter_config);
+  if (!GST_BASE_TRANSFORM_CLASS (parent_class)->propose_allocation (trans,
+          decide_query, query))
+    return FALSE;
+
+  /* Passthrough is passthrough */
+  if (decide_query == NULL)
+    return TRUE;
+
+  /* If we're not passthrough, we can handle crop meta as well */
+  gst_query_add_allocation_meta (query, GST_VIDEO_CROP_META_API_TYPE, NULL);
+
+  return TRUE;
 }
 
 static void
@@ -886,14 +999,18 @@ gst_video_convert_scale_create_converter (GstVideoConvertScale * self,
   }
   GST_OBJECT_UNLOCK (self);
 
+  priv->last_frame_vinfo = *in_info;
+
   /* Create converter with the task pool (or NULL if not set) */
   if (pool) {
     GST_DEBUG_OBJECT (self, "Using task pool %" GST_PTR_FORMAT
         " for video converter", pool);
     converter =
-        gst_video_converter_new_with_pool (in_info, out_info, config, pool);
+        gst_video_converter_new_with_pool (&priv->last_frame_vinfo, out_info,
+        config, pool);
   } else {
-    converter = gst_video_converter_new (in_info, out_info, config);
+    converter = gst_video_converter_new (&priv->last_frame_vinfo, out_info,
+        config);
   }
 
   /* Release the task pool reference */
@@ -902,15 +1019,129 @@ gst_video_convert_scale_create_converter (GstVideoConvertScale * self,
   return converter;
 }
 
+static GstStructure *
+gst_video_convert_scale_get_default_config (GstVideoConvertScale * self,
+    GstVideoInfo * out_info)
+{
+  GstVideoConvertScalePrivate *priv = PRIV (self);
+  GstStructure *options;
+
+  options = gst_structure_new_static_str_empty ("videoconvertscale");
+
+  switch (priv->method) {
+    case GST_VIDEO_SCALE_NEAREST:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_NEAREST,
+          NULL);
+      break;
+    case GST_VIDEO_SCALE_BILINEAR:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_LINEAR,
+          GST_VIDEO_RESAMPLER_OPT_MAX_TAPS, G_TYPE_INT, 2, NULL);
+      break;
+    case GST_VIDEO_SCALE_4TAP:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_SINC,
+          GST_VIDEO_RESAMPLER_OPT_MAX_TAPS, G_TYPE_INT, 4, NULL);
+      break;
+    case GST_VIDEO_SCALE_LANCZOS:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_LANCZOS,
+          NULL);
+      break;
+    case GST_VIDEO_SCALE_BILINEAR2:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_LINEAR,
+          NULL);
+      break;
+    case GST_VIDEO_SCALE_SINC:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_SINC,
+          NULL);
+      break;
+    case GST_VIDEO_SCALE_HERMITE:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 0.0,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 0.0, NULL);
+      break;
+    case GST_VIDEO_SCALE_SPLINE:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 1.0,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 0.0, NULL);
+      break;
+    case GST_VIDEO_SCALE_CATROM:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 0.0,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 0.5, NULL);
+      break;
+    case GST_VIDEO_SCALE_MITCHELL:
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
+          GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 1.0 / 3.0,
+          GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 1.0 / 3.0,
+          NULL);
+      break;
+  }
+
+  gst_structure_set_static_str (options,
+      GST_VIDEO_RESAMPLER_OPT_ENVELOPE, G_TYPE_DOUBLE, priv->envelope,
+      GST_VIDEO_RESAMPLER_OPT_SHARPNESS, G_TYPE_DOUBLE, priv->sharpness,
+      GST_VIDEO_RESAMPLER_OPT_SHARPEN, G_TYPE_DOUBLE, priv->sharpen,
+      GST_VIDEO_CONVERTER_OPT_DEST_X, G_TYPE_INT, priv->dst_x,
+      GST_VIDEO_CONVERTER_OPT_DEST_Y, G_TYPE_INT, priv->dst_y,
+      GST_VIDEO_CONVERTER_OPT_DEST_WIDTH, G_TYPE_INT,
+      out_info->width - priv->borders_w, GST_VIDEO_CONVERTER_OPT_DEST_HEIGHT,
+      G_TYPE_INT, out_info->height - priv->borders_h,
+      GST_VIDEO_CONVERTER_OPT_DITHER_METHOD, GST_TYPE_VIDEO_DITHER_METHOD,
+      priv->dither, GST_VIDEO_CONVERTER_OPT_DITHER_QUANTIZATION, G_TYPE_UINT,
+      priv->dither_quantization,
+      GST_VIDEO_CONVERTER_OPT_CHROMA_RESAMPLER_METHOD,
+      GST_TYPE_VIDEO_RESAMPLER_METHOD, priv->chroma_resampler,
+      GST_VIDEO_CONVERTER_OPT_ALPHA_MODE, GST_TYPE_VIDEO_ALPHA_MODE,
+      priv->alpha_mode, GST_VIDEO_CONVERTER_OPT_ALPHA_VALUE, G_TYPE_DOUBLE,
+      priv->alpha_value, GST_VIDEO_CONVERTER_OPT_CHROMA_MODE,
+      GST_TYPE_VIDEO_CHROMA_MODE, priv->chroma_mode,
+      GST_VIDEO_CONVERTER_OPT_MATRIX_MODE, GST_TYPE_VIDEO_MATRIX_MODE,
+      priv->matrix_mode, GST_VIDEO_CONVERTER_OPT_GAMMA_MODE,
+      GST_TYPE_VIDEO_GAMMA_MODE, priv->gamma_mode,
+      GST_VIDEO_CONVERTER_OPT_PRIMARIES_MODE, GST_TYPE_VIDEO_PRIMARIES_MODE,
+      priv->primaries_mode, GST_VIDEO_CONVERTER_OPT_THREADS, G_TYPE_UINT,
+      priv->n_threads, NULL);
+
+  return options;
+}
+
 static gboolean
 gst_video_convert_scale_set_info (GstVideoFilter * filter, GstCaps * in,
     GstVideoInfo * in_info, GstCaps * out, GstVideoInfo * out_info)
 {
   GstVideoConvertScale *self = GST_VIDEO_CONVERT_SCALE (filter);
   GstVideoConvertScalePrivate *priv = PRIV (self);
+  GstVideoConvertScaleClass *klass = GST_VIDEO_CONVERT_SCALE_GET_CLASS (self);
   gint from_dar_n, from_dar_d, to_dar_n, to_dar_d;
   GstVideoInfo tmp_info;
   GstStructure *options;
+
+  /* A scale-only element keeps the input colorimetry. With no colorimetry
+   * field on the output caps, out_info holds the resolution-derived default,
+   * so take the input's instead. */
+  if (!klass->converts
+      && !gst_structure_has_field (gst_caps_get_structure (out, 0),
+          "colorimetry"))
+    out_info->colorimetry = in_info->colorimetry;
 
   if (priv->convert) {
     gst_video_converter_free (priv->convert);
@@ -930,6 +1161,8 @@ gst_video_convert_scale_set_info (GstVideoFilter * filter, GstCaps * in,
   }
 
   priv->borders_w = priv->borders_h = 0;
+  priv->dst_x = 0;
+  priv->dst_y = 0;
   if (to_dar_n != from_dar_n || to_dar_d != from_dar_d) {
     if (priv->add_borders) {
       gint n, d, to_h, to_w;
@@ -955,12 +1188,39 @@ gst_video_convert_scale_set_info (GstVideoFilter * filter, GstCaps * in,
     }
   }
 
+  switch (priv->h_align) {
+    case GST_VIDEO_CONVERT_SCALE_HALIGN_LEFT:
+      priv->dst_x = 0;
+      break;
+    case GST_VIDEO_CONVERT_SCALE_HALIGN_CENTER:
+      priv->dst_x = priv->borders_w / 2;
+      break;
+    case GST_VIDEO_CONVERT_SCALE_HALIGN_RIGHT:
+      priv->dst_x = priv->borders_w;
+      break;
+  }
+
+  switch (priv->v_align) {
+    case GST_VIDEO_CONVERT_SCALE_VALIGN_TOP:
+      priv->dst_y = 0;
+      break;
+    case GST_VIDEO_CONVERT_SCALE_VALIGN_CENTER:
+      priv->dst_y = priv->borders_h / 2;
+      break;
+    case GST_VIDEO_CONVERT_SCALE_VALIGN_BOTTOM:
+      priv->dst_y = priv->borders_h;
+      break;
+  }
+
   /* if present, these must match */
   if (in_info->interlace_mode != out_info->interlace_mode)
     goto format_mismatch;
 
+  /* Reset the crop meta memory */
+  priv->crop_x = priv->crop_y = priv->crop_width = priv->crop_height = 0;
+
   if (priv->converter_config) {
-    options = gst_video_convert_scale_get_converter_config (self, out_info);
+    options = gst_structure_copy (priv->converter_config);
     GST_DEBUG_OBJECT (self,
         "Using user-provided converter-config: %" GST_PTR_FORMAT, options);
     goto build_converter;
@@ -988,103 +1248,7 @@ gst_video_convert_scale_set_info (GstVideoFilter * filter, GstCaps * in,
     GST_CAT_DEBUG_OBJECT (CAT_PERFORMANCE, filter, "setup videoscaling");
     gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (filter), FALSE);
 
-    options = gst_structure_new_static_str_empty ("videoconvertscale");
-
-    switch (priv->method) {
-      case GST_VIDEO_SCALE_NEAREST:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_NEAREST,
-            NULL);
-        break;
-      case GST_VIDEO_SCALE_BILINEAR:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_LINEAR,
-            GST_VIDEO_RESAMPLER_OPT_MAX_TAPS, G_TYPE_INT, 2, NULL);
-        break;
-      case GST_VIDEO_SCALE_4TAP:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_SINC,
-            GST_VIDEO_RESAMPLER_OPT_MAX_TAPS, G_TYPE_INT, 4, NULL);
-        break;
-      case GST_VIDEO_SCALE_LANCZOS:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_LANCZOS,
-            NULL);
-        break;
-      case GST_VIDEO_SCALE_BILINEAR2:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_LINEAR,
-            NULL);
-        break;
-      case GST_VIDEO_SCALE_SINC:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_SINC,
-            NULL);
-        break;
-      case GST_VIDEO_SCALE_HERMITE:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 0.0,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 0.0,
-            NULL);
-        break;
-      case GST_VIDEO_SCALE_SPLINE:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 1.0,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 0.0,
-            NULL);
-        break;
-      case GST_VIDEO_SCALE_CATROM:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 0.0,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 0.5,
-            NULL);
-        break;
-      case GST_VIDEO_SCALE_MITCHELL:
-        gst_structure_set_static_str (options,
-            GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD,
-            GST_TYPE_VIDEO_RESAMPLER_METHOD, GST_VIDEO_RESAMPLER_METHOD_CUBIC,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_B, G_TYPE_DOUBLE, (gdouble) 1.0 / 3.0,
-            GST_VIDEO_RESAMPLER_OPT_CUBIC_C, G_TYPE_DOUBLE, (gdouble) 1.0 / 3.0,
-            NULL);
-        break;
-    }
-
-    gst_structure_set_static_str (options,
-        GST_VIDEO_RESAMPLER_OPT_ENVELOPE, G_TYPE_DOUBLE, priv->envelope,
-        GST_VIDEO_RESAMPLER_OPT_SHARPNESS, G_TYPE_DOUBLE, priv->sharpness,
-        GST_VIDEO_RESAMPLER_OPT_SHARPEN, G_TYPE_DOUBLE, priv->sharpen,
-        GST_VIDEO_CONVERTER_OPT_DEST_X, G_TYPE_INT, priv->borders_w / 2,
-        GST_VIDEO_CONVERTER_OPT_DEST_Y, G_TYPE_INT, priv->borders_h / 2,
-        GST_VIDEO_CONVERTER_OPT_DEST_WIDTH, G_TYPE_INT,
-        out_info->width - priv->borders_w, GST_VIDEO_CONVERTER_OPT_DEST_HEIGHT,
-        G_TYPE_INT, out_info->height - priv->borders_h,
-        GST_VIDEO_CONVERTER_OPT_DITHER_METHOD, GST_TYPE_VIDEO_DITHER_METHOD,
-        priv->dither, GST_VIDEO_CONVERTER_OPT_DITHER_QUANTIZATION, G_TYPE_UINT,
-        priv->dither_quantization,
-        GST_VIDEO_CONVERTER_OPT_CHROMA_RESAMPLER_METHOD,
-        GST_TYPE_VIDEO_RESAMPLER_METHOD, priv->chroma_resampler,
-        GST_VIDEO_CONVERTER_OPT_ALPHA_MODE, GST_TYPE_VIDEO_ALPHA_MODE,
-        priv->alpha_mode, GST_VIDEO_CONVERTER_OPT_ALPHA_VALUE, G_TYPE_DOUBLE,
-        priv->alpha_value, GST_VIDEO_CONVERTER_OPT_CHROMA_MODE,
-        GST_TYPE_VIDEO_CHROMA_MODE, priv->chroma_mode,
-        GST_VIDEO_CONVERTER_OPT_MATRIX_MODE, GST_TYPE_VIDEO_MATRIX_MODE,
-        priv->matrix_mode, GST_VIDEO_CONVERTER_OPT_GAMMA_MODE,
-        GST_TYPE_VIDEO_GAMMA_MODE, priv->gamma_mode,
-        GST_VIDEO_CONVERTER_OPT_PRIMARIES_MODE, GST_TYPE_VIDEO_PRIMARIES_MODE,
-        priv->primaries_mode, GST_VIDEO_CONVERTER_OPT_THREADS, G_TYPE_UINT,
-        priv->n_threads, NULL);
+    options = gst_video_convert_scale_get_default_config (self, out_info);
 
   build_converter:
     priv->convert =
@@ -1983,21 +2147,69 @@ gst_video_convert_scale_transform_frame (GstVideoFilter * filter,
 {
   GstVideoConvertScalePrivate *priv = PRIV (filter);
   GstFlowReturn ret = GST_FLOW_OK;
+  GstVideoCropMeta *cmeta;
+  gboolean update_config = FALSE;
 
   GST_CAT_DEBUG_OBJECT (CAT_PERFORMANCE, filter, "doing video scaling");
 
-  if (priv->converter_config_changed) {
-    GstStructure *options =
-        gst_video_convert_scale_get_converter_config (GST_VIDEO_CONVERT_SCALE
-        (filter), &filter->out_info);
+  cmeta = gst_buffer_get_video_crop_meta (in_frame->buffer);
+  if (cmeta && (cmeta->x != priv->crop_x ||
+          cmeta->y != priv->crop_y ||
+          cmeta->width != priv->crop_width ||
+          cmeta->height != priv->crop_height))
+    update_config = TRUE;
+  if (!cmeta && (priv->crop_width != 0 || priv->crop_height != 0))
+    update_config = TRUE;
+
+  if (cmeta) {
+    priv->crop_x = cmeta->x;
+    priv->crop_y = cmeta->y;
+    priv->crop_width = cmeta->width;
+    priv->crop_height = cmeta->height;
+  } else {
+    priv->crop_x = priv->crop_y = priv->crop_width = priv->crop_height = 0;
+  }
+
+  if (priv->converter_config_changed || update_config ||
+      !gst_video_info_is_equal (&priv->last_frame_vinfo, &in_frame->info)) {
+    GstStructure *options;
+
+    if (priv->converter_config)
+      options = gst_structure_copy (priv->converter_config);
+    else if (priv->converter_config_changed)
+      /* This is the case where the "converter-config" property was previously
+       * set, but has since been unset, so we reset to the default config
+       * generated from the other properties.
+       */
+      options =
+          gst_video_convert_scale_get_default_config
+          (GST_VIDEO_CONVERT_SCALE (filter), &filter->out_info);
+    else
+      options =
+          gst_structure_copy (gst_video_converter_get_config (priv->convert));
+
+    if (cmeta) {
+      gst_structure_set_static_str (options,
+          GST_VIDEO_CONVERTER_OPT_SRC_X, G_TYPE_INT, cmeta->x,
+          GST_VIDEO_CONVERTER_OPT_SRC_Y, G_TYPE_INT, cmeta->y,
+          GST_VIDEO_CONVERTER_OPT_SRC_WIDTH, G_TYPE_INT, cmeta->width,
+          GST_VIDEO_CONVERTER_OPT_SRC_HEIGHT, G_TYPE_INT, cmeta->height, NULL);
+    } else if (!priv->converter_config) {
+      gst_structure_remove_fields (options,
+          GST_VIDEO_CONVERTER_OPT_SRC_X,
+          GST_VIDEO_CONVERTER_OPT_SRC_Y,
+          GST_VIDEO_CONVERTER_OPT_SRC_WIDTH,
+          GST_VIDEO_CONVERTER_OPT_SRC_HEIGHT, NULL);
+    }
 
     gst_video_converter_free (priv->convert);
     priv->convert =
         gst_video_convert_scale_create_converter (GST_VIDEO_CONVERT_SCALE
-        (filter), &filter->in_info, &filter->out_info, options);
+        (filter), &in_frame->info, &filter->out_info, options);
 
     priv->converter_config_changed = FALSE;
   }
+
 
   gst_video_converter_frame (priv->convert, in_frame, out_frame);
 

@@ -192,6 +192,7 @@ gst_jpeg_parse_class_init (GstJpegParseClass * klass)
 static void
 gst_jpeg_parse_init (GstJpegParse * parse)
 {
+  gst_base_parse_set_allow_duplicated_pts (GST_BASE_PARSE (parse), TRUE);
   parse->sof = -1;
 }
 
@@ -456,13 +457,8 @@ gst_jpeg_parse_app0 (GstJpegParse * parse, GstJpegSegment * seg)
   gst_byte_reader_init (&reader, seg->data + seg->offset, seg->size);
   gst_byte_reader_skip_unchecked (&reader, 2);
 
-#if G_BYTE_ORDER == G_LITTLE_ENDIAN
   if (!gst_byte_reader_get_uint32_le (&reader, &id))
     return FALSE;
-#else
-  if (!gst_byte_reader_get_uint32_be (&reader, &id))
-    return FALSE;
-#endif
 
   if (!valid_state (parse->state, GST_JPEG_PARSER_STATE_GOT_JFIF)
       && GST_MAKE_FOURCC ('J', 'F', 'I', 'F') == id) {
@@ -480,19 +476,11 @@ gst_jpeg_parse_app0 (GstJpegParse * parse, GstJpegSegment * seg)
       return FALSE;
 
     /* x density */
-#if G_BYTE_ORDER == G_LITTLE_ENDIAN
-    if (!gst_byte_reader_get_uint16_le (&reader, &xd))
-      return FALSE;
-    /* y density */
-    if (!gst_byte_reader_get_uint16_le (&reader, &yd))
-      return FALSE;
-#else
     if (!gst_byte_reader_get_uint16_be (&reader, &xd))
       return FALSE;
     /* y density */
     if (!gst_byte_reader_get_uint16_be (&reader, &yd))
       return FALSE;
-#endif
 
     /* x thumbnail */
     if (!gst_byte_reader_get_uint8 (&reader, &xt))
@@ -974,9 +962,9 @@ gst_jpeg_parse_com (GstJpegParse * parse, GstJpegSegment * seg)
 
   buf = (const gchar *) data;
   /* buggy avid, it puts EOI only at every 10th frame */
-  if (g_str_has_prefix (buf, "AVID")) {
+  if (size >= 4 && memcmp (buf, "AVID", 4) == 0) {
     parse_avid (parse, data, size);
-  } else if (g_str_has_prefix (buf, "MULTISCOPE II")) {
+  } else if (size >= 13 && memcmp (buf, "MULTISCOPE II", 13) == 0) {
     parse->par_num = 1;
     parse->par_den = 2;
     parse->multiscope = TRUE;

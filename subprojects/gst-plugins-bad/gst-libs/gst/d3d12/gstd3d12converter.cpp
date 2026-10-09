@@ -145,6 +145,7 @@ using namespace DirectX;
 #define DEFAULT_BRIGHTNESS 0.0
 #define DEFAULT_CONTRAST 1.0
 #define DEFAULT_MAX_MIP_LEVELS 1
+#define DEFAULT_MOST_DETAILED_MIP 0
 
 static const WORD g_indices[6] = { 0, 1, 2, 3, 0, 2 };
 
@@ -265,6 +266,7 @@ enum
   PROP_BRIGHTNESS,
   PROP_CONTRAST,
   PROP_MAX_MIP_LEVELS,
+  PROP_MOST_DETAILED_MIP,
 };
 
 /* *INDENT-OFF* */
@@ -469,6 +471,7 @@ struct _GstD3D12ConverterPrivate
   GstD3D12ConverterAlphaMode dst_alpha_mode =
       GST_D3D12_CONVERTER_ALPHA_MODE_UNSPECIFIED;
   guint mip_levels = DEFAULT_MAX_MIP_LEVELS;
+  guint most_detailed_mip = DEFAULT_MOST_DETAILED_MIP;
 };
 /* *INDENT-ON* */
 
@@ -565,6 +568,22 @@ gst_d3d12_converter_class_init (GstD3D12ConverterClass * klass)
           "(0 = generate full mip chain, G_MAXUINT16 = generate only "
           "the target mip level and one additional level)", 0, G_MAXUINT16,
           DEFAULT_MAX_MIP_LEVELS, param_flags));
+
+  /**
+   * GstD3D12Converter:most-detailed-mip:
+   *
+   * Index of the most detailed mip level to start generating and sampling
+   * from, skipping the GPU-expensive high-resolution mip levels.
+   *
+   * Ignored when max-mip-levels is %G_MAXUINT16 (fast-path).
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (object_class, PROP_MOST_DETAILED_MIP,
+      g_param_spec_uint ("most-detailed-mip", "Most Detailed Mip",
+          "Index of the most detailed mip level to generate and sample "
+          "(ignored when max-mip-levels is G_MAXUINT16)",
+          0, G_MAXUINT16, DEFAULT_MOST_DETAILED_MIP, param_flags));
 
   GST_DEBUG_CATEGORY_INIT (gst_d3d12_converter_debug,
       "d3d12converter", 0, "d3d12converter");
@@ -734,6 +753,9 @@ gst_d3d12_converter_set_property (GObject * object, guint prop_id,
     case PROP_MAX_MIP_LEVELS:
       priv->mip_levels = g_value_get_uint (value);
       break;
+    case PROP_MOST_DETAILED_MIP:
+      priv->most_detailed_mip = g_value_get_uint (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -803,6 +825,9 @@ gst_d3d12_converter_get_property (GObject * object, guint prop_id,
       break;
     case PROP_MAX_MIP_LEVELS:
       g_value_set_uint (value, priv->mip_levels);
+      break;
+    case PROP_MOST_DETAILED_MIP:
+      g_value_set_uint (value, priv->most_detailed_mip);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1525,6 +1550,8 @@ gst_d3d12_converter_update_dest_rect (GstD3D12Converter * self)
     case GST_VIDEO_FORMAT_Y444_12LE:
     case GST_VIDEO_FORMAT_Y444_16LE:
     case GST_VIDEO_FORMAT_RGBP:
+    case GST_VIDEO_FORMAT_RGBP_F16LE:
+    case GST_VIDEO_FORMAT_RGBP_F32LE:
     case GST_VIDEO_FORMAT_BGRP:
     case GST_VIDEO_FORMAT_GBR:
     case GST_VIDEO_FORMAT_GBR_10LE:
@@ -1734,6 +1761,7 @@ is_custom_format (GstVideoFormat format)
     case GST_VIDEO_FORMAT_BGR10A2_LE:
     case GST_VIDEO_FORMAT_RBGA:
     case GST_VIDEO_FORMAT_ARGB64_LE:
+    case GST_VIDEO_FORMAT_ARGB_F32:
       return TRUE;
     default:
       break;
@@ -1829,6 +1857,7 @@ gst_d3d12_converter_calculate_border_color (GstD3D12Converter * self)
         break;
       case GST_VIDEO_FORMAT_AYUV:
       case GST_VIDEO_FORMAT_AYUV64:
+      case GST_VIDEO_FORMAT_AYUV_F32:
         priv->clear_color[0][0] = a;
         priv->clear_color[0][1] = converted[0];
         priv->clear_color[0][2] = converted[1];
@@ -1837,6 +1866,7 @@ gst_d3d12_converter_calculate_border_color (GstD3D12Converter * self)
       case GST_VIDEO_FORMAT_ARGB:
       case GST_VIDEO_FORMAT_xRGB:
       case GST_VIDEO_FORMAT_ARGB64_LE:
+      case GST_VIDEO_FORMAT_ARGB_F32:
         priv->clear_color[0][0] = a;
         priv->clear_color[0][1] = converted[0];
         priv->clear_color[0][2] = converted[1];
@@ -1933,6 +1963,8 @@ gst_d3d12_converter_calculate_border_color (GstD3D12Converter * self)
         priv->clear_color[3][0] = a;
         break;
       case GST_VIDEO_FORMAT_RGBP:
+      case GST_VIDEO_FORMAT_RGBP_F16LE:
+      case GST_VIDEO_FORMAT_RGBP_F32LE:
         priv->clear_color[0][0] = converted[0];
         priv->clear_color[1][0] = converted[1];
         priv->clear_color[2][0] = converted[2];
@@ -2861,10 +2893,12 @@ gst_d3d12_converter_convert_buffer_internal (GstD3D12Converter * converter,
   }
 
   if (priv->mipgen_enabled && priv->mip_levels != 1) {
-    if (priv->mip_levels == 0) {
+    if (priv->mip_levels == 0 || priv->mip_levels == G_MAXUINT16) {
       mip_levels = priv->mipgen_desc.MipLevels;
     } else {
-      mip_levels = MIN (priv->mip_levels, priv->mipgen_desc.MipLevels);
+      /* max-mip-levels counts from most-detailed-mip */
+      mip_levels = MIN (priv->most_detailed_mip + priv->mip_levels,
+          priv->mipgen_desc.MipLevels);
     }
 
     if (priv->update_transform || priv->update_dest_rect) {
@@ -2906,8 +2940,27 @@ gst_d3d12_converter_convert_buffer_internal (GstD3D12Converter * converter,
     guint base_mip_level = 0;
     guint generated_mip_levels = mip_levels;
 
-    /* fast-path mipmap */
-    if (mip_levels > 2 && priv->mip_levels == G_MAXUINT16) {
+    if (priv->mip_levels == G_MAXUINT16) {
+      /* fast-path mipmap (most-detailed-mip is ignored) */
+      if (mip_levels > 2) {
+        base_mip_level = std::min < guint > (mip_levels - 2,
+            priv->mipgen_desc.MipLevels - 2);
+        generated_mip_levels = 2;
+      }
+    } else if (priv->most_detailed_mip > 0) {
+      base_mip_level = std::min < guint > (priv->most_detailed_mip,
+          mip_levels - 1);
+      generated_mip_levels = mip_levels - base_mip_level;
+    }
+
+    GST_LOG_OBJECT (converter, "Mipmap levels: properties (most-detailed-mip: "
+        "%u, max-mip-levels: %u), calculated (auto-mipgen-level: %u, "
+        "base-mip-level: %u, generated-mip-levels: %u)",
+        priv->most_detailed_mip, priv->mip_levels, priv->auto_mipgen_level,
+        base_mip_level, generated_mip_levels);
+
+    /* Create new rtv for non-zero level mip, and adjust viewport size too */
+    if (base_mip_level > 0) {
       GstD3D12DescHeap *rtv_heap;
       if (!gst_d3d12_desc_heap_pool_acquire (priv->rtv_heap_pool, &rtv_heap)) {
         GST_ERROR_OBJECT (converter, "Couldn't acquire descriptor heap");
@@ -2921,10 +2974,6 @@ gst_d3d12_converter_convert_buffer_internal (GstD3D12Converter * converter,
         return FALSE;
       }
 
-      /* Create new rtv for non-zero level mip, and adjust viewport size too */
-      base_mip_level = std::min < guint > (mip_levels - 2,
-          priv->mipgen_desc.MipLevels - 2);
-      generated_mip_levels = 2;
       mipgen_width = std::max < guint > (mipgen_width >> base_mip_level, 1);
       mipgen_height = std::max < guint > (mipgen_height >> base_mip_level, 1);
 

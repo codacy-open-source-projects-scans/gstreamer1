@@ -874,10 +874,10 @@ convert_cea608_raw_cea708_cdp (GstCCConverter * self, GstBuffer * inbuf,
 
     gst_buffer_map (inbuf, &in, GST_MAP_READ);
     if (self->in_field == 0) {
-      cc_buffer_push_separated (self->cc_buffer, in.data, in.size, NULL, 0,
+      cc_buffer_push_separated (self->cc_buffer, in.data, 2 * n, NULL, 0,
           NULL, 0);
     } else {
-      cc_buffer_push_separated (self->cc_buffer, NULL, 0, in.data, in.size,
+      cc_buffer_push_separated (self->cc_buffer, NULL, 0, in.data, 2 * n,
           NULL, 0);
     }
     gst_buffer_unmap (inbuf, &in);
@@ -1860,6 +1860,7 @@ gst_cc_converter_class_init (GstCCConverterClass * klass)
       "Filter/ClosedCaption",
       "Converts Closed Captions between different formats",
       "Sebastian Dröge <sebastian@centricular.com>");
+  gst_element_class_mark_as_untrusted_aware (gstelement_class);
 
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);

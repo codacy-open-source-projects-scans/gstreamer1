@@ -466,6 +466,10 @@ static const GstH265LevelLimits level_limits[] = {
   {  "6",     GST_H265_LEVEL_L6,    35651584 },
   {  "6.1",   GST_H265_LEVEL_L6_1,  35651584 },
   {  "6.2",   GST_H265_LEVEL_L6_2,  35651584 },
+  {  "6.3",   GST_H265_LEVEL_L6_3,  80216064 },
+  {  "7",     GST_H265_LEVEL_L7,    142606336 },
+  {  "7.1",   GST_H265_LEVEL_L7_1,  142606336 },
+  {  "7.2",   GST_H265_LEVEL_L7_2,  142606336 },
 };
 /* *INDENT-ON* */
 
@@ -990,6 +994,18 @@ gst_h265_decoder_parse_nalu (GstH265Decoder * self, GstH265NalUnit * nalu)
   GST_LOG_OBJECT (self, "Parsed nal type: %d, offset %d, size %d",
       nalu->type, nalu->offset, nalu->size);
 
+  if (nalu->layer_id != 0) {
+    /* 7.4.2.1
+     * decoders conforming to a profile specified in Annex A and not
+     * supporting the independent non-base layer decoding (INBLD) capability
+     * specified in Annex F shall ignore (i.e., remove from the bitstream
+     * and discard) all NAL units with values of nuh_layer_id not equal to 0
+     */
+    GST_LOG_OBJECT (self, "Skip nalu type %d with layer id %d",
+        nalu->type, nalu->layer_id);
+    return GST_H265_PARSER_OK;
+  }
+
   memset (&decoder_nalu, 0, sizeof (GstH265DecoderNalUnit));
   decoder_nalu.nalu_type = nalu->type;
 
@@ -1180,6 +1196,18 @@ gst_h265_decoder_parse_codec_data (GstH265Decoder * self, const guint8 * data,
 
     for (j = 0; j < array->nalu->len; j++) {
       GstH265NalUnit *nalu = &g_array_index (array->nalu, GstH265NalUnit, j);
+
+      if (nalu->layer_id != 0) {
+        /* 7.4.2.1
+         * decoders conforming to a profile specified in Annex A and not
+         * supporting the independent non-base layer decoding (INBLD) capability
+         * specified in Annex F shall ignore (i.e., remove from the bitstream
+         * and discard) all NAL units with values of nuh_layer_id not equal to 0
+         */
+        GST_DEBUG_OBJECT (self, "Skip nalu type %d with layer id %d",
+            nalu->type, nalu->layer_id);
+        continue;
+      }
 
       switch (nalu->type) {
         case GST_H265_NAL_VPS:

@@ -88,7 +88,7 @@ static GstFlowReturn gst_wavparse_chain (GstPad * pad, GstObject * parent,
     GstBuffer * buf);
 static gboolean gst_wavparse_sink_event (GstPad * pad, GstObject * parent,
     GstEvent * event);
-static void gst_wavparse_loop (GstPad * pad);
+static void gst_wavparse_loop (GstWavParse * wav);
 static gboolean gst_wavparse_srcpad_event (GstPad * pad, GstObject * parent,
     GstEvent * event);
 
@@ -626,7 +626,7 @@ gst_wavparse_perform_seek (GstWavParse * wav, GstEvent * event)
   /* and start the streaming task again */
   if (!wav->streaming) {
     gst_pad_start_task (wav->sinkpad, (GstTaskFunction) gst_wavparse_loop,
-        wav->sinkpad, NULL);
+        gst_object_ref (wav), gst_object_unref);
   }
 
   GST_PAD_STREAM_UNLOCK (wav->sinkpad);
@@ -1371,11 +1371,14 @@ gst_wavparse_stream_headers (GstWavParse * wav)
     }
 
     /* Clip to upstream size if known */
-    if (upstream_size > 0 && size + 8 + wav->offset > upstream_size) {
-      GST_WARNING_OBJECT (wav, "Clipping chunk size to file size");
-      g_assert (upstream_size >= wav->offset);
-      g_assert (upstream_size - wav->offset >= 8);
-      size = upstream_size - wav->offset - 8;
+    if (upstream_size > 0) {
+      if (upstream_size < wav->offset + 8) {
+        GST_WARNING_OBJECT (wav, "Bogus file size");
+        upstream_size = -1;
+      } else if (size > upstream_size - wav->offset - 8) {
+        GST_WARNING_OBJECT (wav, "Clipping chunk size to file size");
+        size = upstream_size - wav->offset - 8;
+      }
     }
 
     /* wav is a st00pid format, we don't know for sure where data starts.
@@ -1612,6 +1615,9 @@ gst_wavparse_stream_headers (GstWavParse * wav)
             if (wav->streaming) {
               const guint8 *data = NULL;
 
+              if (!gst_wavparse_peek_chunk (wav, &tag, &size)) {
+                goto exit;
+              }
               gst_adapter_flush (wav->adapter, 12);
               wav->offset += 12;
               data = gst_adapter_map (wav->adapter, data_size);
@@ -1739,12 +1745,13 @@ gst_wavparse_stream_headers (GstWavParse * wav)
         wav->offset += size;
         break;
       }
+      case GST_RIFF_TAG_ID3:
       case GST_RIFF_TAG_id3:
       {
         const guint data_size = size;
         GstTagList *new_tags;
 
-        GST_DEBUG_OBJECT (wav, "Have 'id3 ' TAG, size: %u", data_size);
+        GST_DEBUG_OBJECT (wav, "Have ID3 TAG, size: %u", data_size);
         if (wav->streaming) {
           if (!gst_wavparse_peek_chunk (wav, &tag, &size)) {
             goto exit;
@@ -2361,12 +2368,12 @@ push_error:
 }
 
 static void
-gst_wavparse_loop (GstPad * pad)
+gst_wavparse_loop (GstWavParse * wav)
 {
   GstFlowReturn ret;
-  GstWavParse *wav = GST_WAVPARSE (GST_PAD_PARENT (pad));
   GstEvent *event;
   gchar *stream_id;
+  GstPad *pad = wav->sinkpad;
 
   GST_LOG_OBJECT (wav, "process data");
 
@@ -3084,7 +3091,7 @@ gst_wavparse_sink_activate_mode (GstPad * sinkpad, GstObject * parent,
       if (active) {
         /* if we have a scheduler we can start the task */
         res = gst_pad_start_task (sinkpad, (GstTaskFunction) gst_wavparse_loop,
-            sinkpad, NULL);
+            gst_object_ref (parent), gst_object_unref);
       } else {
         res = gst_pad_stop_task (sinkpad);
       }
@@ -3169,6 +3176,8 @@ gst_wavparse_get_property (GObject * object, guint prop_id,
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (wavparse, plugin);
 }
 

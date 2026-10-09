@@ -1,12 +1,13 @@
 <!-- This file was automatically generated from C sources - DO NOT EDIT!
 To affect the contents of this file, edit the original C definitions,
 and/or use gtk-doc annotations.  -->
-<repository xmlns="http://www.gtk.org/introspection/core/1.0" xmlns:c="http://www.gtk.org/introspection/c/1.0" xmlns:glib="http://www.gtk.org/introspection/glib/1.0" version="1.2">
+<repository xmlns="http://www.gtk.org/introspection/core/1.0" xmlns:c="http://www.gtk.org/introspection/c/1.0" xmlns:doc="http://www.gtk.org/introspection/doc/1.0" xmlns:glib="http://www.gtk.org/introspection/glib/1.0" version="1.2">
   <include name="GLib" version="2.0"/>
   <include name="GModule" version="2.0"/>
   <include name="GObject" version="2.0"/>
   <package name="gstreamer-1.0"/>
   <c:include name="gst/gst.h"/>
+  <doc:format name="unknown"/>
   <namespace name="Gst" version="1.0" shared-library="libgstreamer-1.0.so.0" c:identifier-prefixes="Gst" c:symbol-prefixes="gst">
     <alias name="BufferMapInfo" c:type="GstBufferMapInfo" introspectable="0" deprecated="1" deprecated-version="1.28">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstbuffer.h">Alias for #GstMapInfo to be used with g_auto():
@@ -63,6 +64,13 @@ See also #GstBufferMapInfo.</doc>
       <doc-deprecated xml:space="preserve">Use #GstMapInfo instead.</doc-deprecated>
       <source-position filename="../subprojects/gstreamer/gst/gstmemory.h"/>
       <type name="MapInfo" c:type="GstMapInfo"/>
+    </alias>
+    <alias name="TraceSpanId" c:type="GstTraceSpanId">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Opaque identifier for an in-flight trace span. Returned by
+gst_trace_span_begin() and passed to
+gst_trace_span_end().</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <type name="guint64" c:type="guint64"/>
     </alias>
     <function-macro name="ALLOCATOR" c:identifier="GST_ALLOCATOR" introspectable="0">
       <source-position filename="../subprojects/gstreamer/gst/gstallocator.h"/>
@@ -12689,6 +12697,48 @@ Use this variant of #GST_DEBUG_FUNCPTR if you do not need to use @ptr.</doc>
         </parameter>
       </parameters>
     </function-macro>
+    <function-macro name="DEFINE_TRACE_FORMAT" c:identifier="GST_DEFINE_TRACE_FORMAT" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Defines a `static` getter that lazily registers the format on first call
+and caches it for the lifetime of the process. Subsequent calls return the
+cached #GstTraceFormat.
+
+Pass the getter to the scope macros to time a block.
+
+``` c
+GST_DEFINE_TRACE_FORMAT (decode_frame_span,
+    "codec", STRING,
+    "frame", UINT64)
+
+static void
+decode_frame (MyDecoder * self, guint64 frame)
+{
+  GST_TRACE_SCOPE_BEGIN (decode_frame_span,
+      STRING (self-&gt;codec),
+      UINT64 (frame));
+
+  // ... decode the frame ...
+
+  GST_TRACE_SCOPE_END (decode_frame_span);
+}
+```
+
+When the span does not match a lexical scope, hold the #GstTraceSpanId
+returned by gst_trace_span_begin() and close it later with
+gst_trace_span_end(). In both cases the field values are only evaluated
+while a tracer is listening.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="getter">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">identifier of the getter function to define; its name is also used
+  verbatim as the span name surfaced to tracers</doc>
+        </parameter>
+        <parameter name="...">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">at least one (field-name, short-field-type) pair, where the type is a
+  #GstTracerFieldType name without the `GST_TRACER_FIELD_TYPE_` prefix (e.g.
+  `STRING`, `UINT64`); the %NULL terminator is added automatically</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
     <function-macro name="DEVICE" c:identifier="GST_DEVICE" introspectable="0">
       <source-position filename="../subprojects/gstreamer/gst/gstdevice.h"/>
       <parameters>
@@ -14248,7 +14298,10 @@ Filters must be added before the #GstDeviceMonitor is started.</doc>
       </method>
       <method name="get_devices" c:identifier="gst_device_monitor_get_devices" version="1.4">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstdevicemonitor.c">Gets a list of devices from all of the relevant monitors. This may actually
-probe the hardware if the monitor is not currently started.</doc>
+probe the hardware if the monitor is not currently started.
+
+Since 1.28.3, this function will block until the monitor has finished
+starting if gst_device_monitor_start() has been called.</doc>
         <source-position filename="../subprojects/gstreamer/gst/gstdevicemonitor.h"/>
         <return-value transfer-ownership="full" nullable="1">
           <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstdevicemonitor.c">a #GList of
@@ -15818,6 +15871,13 @@ for more details and common types. E.g: "Sink/File"</doc>
     </constant>
     <constant name="ELEMENT_METADATA_LONGNAME" value="long-name" c:type="GST_ELEMENT_METADATA_LONGNAME">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelementmetadata.h">The long English name of the element. E.g. "File Sink"</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gstelementmetadata.h"/>
+      <type name="utf8" c:type="gchar*"/>
+    </constant>
+    <constant name="ELEMENT_METADATA_UNTRUSTED_AWARE" value="untrusted-aware" c:type="GST_ELEMENT_METADATA_UNTRUSTED_AWARE" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelementmetadata.h">Set to "true" on elements that have been reviewed for use with untrusted
+input, see gst_element_class_mark_as_untrusted_aware(). Elements without it
+are refused when parsing with %GST_PARSE_FLAG_NO_UNTRUSTED.</doc>
       <source-position filename="../subprojects/gstreamer/gst/gstelementmetadata.h"/>
       <type name="utf8" c:type="gchar*"/>
     </constant>
@@ -19415,6 +19475,46 @@ list must not be modified by the calling code.
           </instance-parameter>
         </parameters>
       </method>
+      <method name="is_untrusted_aware" c:identifier="gst_element_class_is_untrusted_aware" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelement.c">Checks whether @klass was marked with
+gst_element_class_mark_as_untrusted_aware().
+
+Use gst_element_factory_is_untrusted_aware() to check this without loading
+the plugin the element lives in.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstelement.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelement.c">%TRUE if @klass was reviewed for use with untrusted input.</doc>
+          <type name="gboolean" c:type="gboolean"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="klass" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelement.c">class to check</doc>
+            <type name="ElementClass" c:type="GstElementClass*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <method name="mark_as_untrusted_aware" c:identifier="gst_element_class_mark_as_untrusted_aware" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelement.c">Declares that @klass was reviewed for being instantiated and configured from
+an untrusted pipeline description, for example a gst_parse_launch() string
+that came from an untrusted source: instantiating it cannot by itself reach
+outside media processing, and every property whose value can is marked
+%GST_PARAM_UNTRUSTED_SENSITIVE.
+
+Parsing a description with %GST_PARSE_FLAG_NO_UNTRUSTED refuses to create
+elements that are not marked this way, so an element that was never reviewed,
+including any third-party element, cannot be instantiated from such a
+description.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstelement.h"/>
+        <return-value transfer-ownership="none">
+          <type name="none" c:type="void"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="klass" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelement.c">class to mark</doc>
+            <type name="ElementClass" c:type="GstElementClass*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
       <method name="set_metadata" c:identifier="gst_element_class_set_metadata">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelement.c">Sets the detailed information for a #GstElementClass.
 &gt; This function is for use in _class_init functions only.</doc>
@@ -20022,6 +20122,24 @@ make a copy of the protocol string array if you need to.</doc>
             <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelementfactory.c">an interface name</doc>
             <type name="utf8" c:type="const gchar*"/>
           </parameter>
+        </parameters>
+      </method>
+      <method name="is_untrusted_aware" c:identifier="gst_element_factory_is_untrusted_aware" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelementfactory.c">Checks whether the element @factory produces was reviewed for use with
+untrusted input, see gst_element_class_mark_as_untrusted_aware(). The check
+reads the factory metadata, so it does not load the plugin nor create an
+element.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstelementfactory.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelementfactory.c">%TRUE if elements from @factory may be created from an untrusted
+description.</doc>
+          <type name="gboolean" c:type="gboolean"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="factory" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstelementfactory.c">a #GstElementFactory</doc>
+            <type name="ElementFactory" c:type="GstElementFactory*"/>
+          </instance-parameter>
         </parameters>
       </method>
       <method name="list_is_type" c:identifier="gst_element_factory_list_is_type">
@@ -32455,6 +32573,26 @@ they can be changed when the element is in the READY or lower state.</doc>
         </parameter>
       </parameters>
     </function-macro>
+    <constant name="PARAM_UNTRUSTED_SENSITIVE" value="32768" c:type="GST_PARAM_UNTRUSTED_SENSITIVE" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparamspecs.h">Use this flag on GObject properties whose value can make the element reach
+outside its media processing: read or write a file, open a network
+connection, select a device or IPC endpoint, load a plugin or library, or
+run externally supplied code (shader or script source). Setting such a
+property from data that comes from an untrusted source (for example a
+serialized pipeline or project file that was downloaded or received from a
+third party) is a security risk.
+
+Consumers that build pipelines from untrusted descriptions can ask
+gst_parse_launch_full() to refuse these properties with
+%GST_PARSE_FLAG_NO_UNTRUSTED.
+
+This flag only takes effect on elements whose class is also marked with
+gst_element_class_mark_as_untrusted_aware(): an unmarked element is never
+instantiated from an untrusted description in the first place, so an element
+that sets this flag on a property must also mark its class.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gstparamspecs.h"/>
+      <type name="gint" c:type="gint"/>
+    </constant>
     <constant name="PARAM_USER_SHIFT" value="65536" c:type="GST_PARAM_USER_SHIFT">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparamspecs.h">Bits based on GST_PARAM_USER_SHIFT can be used by 3rd party applications.</doc>
       <source-position filename="../subprojects/gstreamer/gst/gstparamspecs.h"/>
@@ -32514,6 +32652,12 @@ they can be changed when the element is in the READY or lower state.</doc>
 plugin. One would use this macro to export a plugin, so that it can be used
 by other applications.
 
+Since GStreamer 1.14, the @name must match the basename of the shared library
+the plugin ships as: the dynamic loader derives the plugin name from the
+library file name, so a plugin installed as `libgst&lt;name&gt;.so` must pass that
+same name here. A mismatch makes GStreamer silently fail to recognise the
+file as a plugin.
+
 The macro uses a define named PACKAGE for the #GstPluginDesc,source field.
 When using autoconf, this is usually set automatically via the AC_INIT
 macro, and set in config.h. If you are not using autoconf, you will need to
@@ -32531,7 +32675,8 @@ If defined, the GST_PACKAGE_RELEASE_DATETIME will also be used for the
           <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">minor version number of the gstreamer-core that plugin was compiled for</doc>
         </parameter>
         <parameter name="name">
-          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">short, but unique name of the plugin</doc>
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">short, but unique name of the plugin. It must match the basename of
+    the plugin's shared library (see below).</doc>
         </parameter>
         <parameter name="description">
           <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">information about the purpose of the plugin</doc>
@@ -36482,6 +36627,48 @@ of %GST_PARSE_ERROR_NO_SUCH_ELEMENT was returned.</doc>
           </instance-parameter>
         </parameters>
       </method>
+      <method name="get_untrusted_report" c:identifier="gst_parse_context_get_untrusted_report" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">Retrieve what a previous run of gst_parse_launch_full() or
+gst_parse_launchv_full() refused because %GST_PARSE_FLAG_NO_UNTRUSTED was
+set, so an application can tell the user exactly what a description was
+refused for and decide whether to build it in a trusted mode.
+
+Everything that was refused is listed, whichever error the parse reported.
+The result is a #GstStructure named `untrusted-content` with:
+
+* `elements`: a list of the factory names that are not marked
+  untrusted-aware, see gst_element_class_mark_as_untrusted_aware(). Absent
+  when no element was refused.
+* `properties`: a #GstStructure named `untrusted-sensitive-properties`, with
+  one field per refused assignment named `element-name:property`, where
+  `element-name` is the unique name of the element instance and `property`
+  is the property as written in the description, possibly a
+  `child::property` path. The field holds the refused value, parsed into the
+  property's own type when that type is known and parsing the value cannot
+  have side effects, and the string as written otherwise. A refused value is
+  never handed to the property setter. Absent when no property was refused.
+* `unresolved-properties`: a #GstStructure named
+  `untrusted-unresolved-properties`, same field shape, for assignments to a
+  child that never materialized during the parse (demuxer pads and other
+  runtime-only children). The value is always the string as written, since
+  the property type is not known. Absent when no such assignment was
+  refused.
+
+gst_parse_untrusted_report() unpacks these fields without knowing the
+layout.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstparse.h"/>
+        <return-value transfer-ownership="full" nullable="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">a structure describing what was
+    refused, or %NULL if nothing was. Free with gst_structure_free().</doc>
+          <type name="Structure" c:type="GstStructure*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="context" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">a #GstParseContext</doc>
+            <type name="ParseContext" c:type="GstParseContext*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
     </record>
     <enumeration name="ParseError" glib:type-name="GstParseError" glib:get-type="gst_parse_error_get_type" c:type="GstParseError" glib:error-domain="gst_parse_error">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.h">The different parsing errors that can occur.</doc>
@@ -36509,6 +36696,16 @@ of %GST_PARSE_ERROR_NO_SUCH_ELEMENT was returned.</doc>
       <member name="delayed_link" value="7" c:identifier="GST_PARSE_ERROR_DELAYED_LINK" glib:nick="delayed-link" glib:name="GST_PARSE_ERROR_DELAYED_LINK">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.h">A delayed link did not get resolved.</doc>
       </member>
+      <member name="sensitive_property" value="8" c:identifier="GST_PARSE_ERROR_SENSITIVE_PROPERTY" version="1.30" glib:nick="sensitive-property" glib:name="GST_PARSE_ERROR_SENSITIVE_PROPERTY">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.h">A property marked %GST_PARAM_UNTRUSTED_SENSITIVE was set, or a property was
+aimed at a child that still did not exist when parsing finished, while
+%GST_PARSE_FLAG_NO_UNTRUSTED was in effect.</doc>
+      </member>
+      <member name="untrusted_element" value="9" c:identifier="GST_PARSE_ERROR_UNTRUSTED_ELEMENT" version="1.30" glib:nick="untrusted-element" glib:name="GST_PARSE_ERROR_UNTRUSTED_ELEMENT">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.h">The description used an element that is not marked untrusted-aware, see
+gst_element_class_mark_as_untrusted_aware(), while
+%GST_PARSE_FLAG_NO_UNTRUSTED was in effect.</doc>
+      </member>
       <function name="quark" c:identifier="gst_parse_error_quark">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">Get the error quark used by the parsing subsystem.</doc>
         <return-value transfer-ownership="none">
@@ -36535,6 +36732,22 @@ of %GST_PARSE_ERROR_NO_SUCH_ELEMENT was returned.</doc>
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.h">If more than one toplevel element is described
     by the pipeline description string, put them in a #GstBin instead of a
     #GstPipeline. (Since: 1.10)</doc>
+      </member>
+      <member name="no_untrusted" value="8" c:identifier="GST_PARSE_FLAG_NO_UNTRUSTED" version="1.30" glib:nick="no-untrusted" glib:name="GST_PARSE_FLAG_NO_UNTRUSTED">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.h">Refuse to set any property marked %GST_PARAM_UNTRUSTED_SENSITIVE, failing the
+parse with %GST_PARSE_ERROR_SENSITIVE_PROPERTY before the property is set, so
+a setter that performs I/O never runs. A property aimed at a child that does
+not exist yet is checked at the moment the child appears while parsing, as
+happens for request pads created by links in the description. A child that
+still has not appeared when parsing finishes (a pad only added once the
+pipeline is running, for example a demuxer pad) can never be checked, so the
+parse is refused. Use this when building a pipeline from an untrusted
+description; what was refused is recorded in the #GstParseContext, see
+gst_parse_context_get_untrusted_report().
+
+The refused setter never runs, but as with any parse error the partially
+built pipeline is still returned unless %GST_PARSE_FLAG_FATAL_ERRORS is also
+set, so check the error, not only the return value.</doc>
       </member>
     </bitfield>
     <class name="Pipeline" c:symbol-prefix="pipeline" c:type="GstPipeline" parent="Bin" glib:type-name="GstPipeline" glib:get-type="gst_pipeline_get_type" glib:type-struct="PipelineClass">
@@ -37156,7 +37369,10 @@ of the external dependencies change. This is useful for plugins which wrap
 other plugin systems, e.g. a plugin which wraps a plugin-based visualisation
 library and makes visualisations available as GStreamer elements, or a
 codec loader which exposes elements and/or caps dependent on what external
-codec libraries are currently installed.</doc>
+codec libraries are currently installed.
+
+It is an error to register dependencies for any plugin that has been marked
+as only have a static set of features via gst_plugin_set_static_features_flag()</doc>
         <source-position filename="../subprojects/gstreamer/gst/gstplugin.h"/>
         <return-value transfer-ownership="none">
           <type name="none" c:type="void"/>
@@ -37212,7 +37428,10 @@ codec libraries are currently installed.
 
 Convenience wrapper function for gst_plugin_add_dependency() which
 takes simple strings as arguments instead of string arrays, with multiple
-arguments separated by predefined delimiters (see above).</doc>
+arguments separated by predefined delimiters (see above).
+
+It is an error to register dependencies for any plugin that has been marked
+as only have a static set of features via gst_plugin_set_static_features_flag().</doc>
         <source-position filename="../subprojects/gstreamer/gst/gstplugin.h"/>
         <return-value transfer-ownership="none">
           <type name="none" c:type="void"/>
@@ -37230,7 +37449,7 @@ arguments separated by predefined delimiters (see above).</doc>
             <type name="utf8" c:type="const gchar*"/>
           </parameter>
           <parameter name="paths" transfer-ownership="none" nullable="1" allow-none="1">
-            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">one ore more directory paths (separated by ':' or ';' or ','),
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">one or more directory paths (separated by ':' or ';' or ','),
      or %NULL. Example: "/usr/lib/mystuff/plugins"</doc>
             <type name="utf8" c:type="const gchar*"/>
           </parameter>
@@ -37393,6 +37612,23 @@ stored. This is the case when the registry is getting rebuilt.</doc>
           </instance-parameter>
         </parameters>
       </method>
+      <method name="get_registry" c:identifier="gst_plugin_get_registry" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">Get the #GstRegistry this plugin belongs to, for use when registering
+associated #GstPluginFeature during plugin registration. Usually
+this is just the default registry, but may differ during pre-built
+registry creation. If passed NULL, returns the default registry</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstregistry.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">The #GstRegistry to use for plugin feature registration</doc>
+          <type name="Registry" c:type="GstRegistry*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="plugin" transfer-ownership="none" nullable="1" allow-none="1">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">The plugin to retrieve a registry from, or NULL</doc>
+            <type name="Plugin" c:type="GstPlugin*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
       <method name="get_release_date_string" c:identifier="gst_plugin_get_release_date_string">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">Get the release date (and possibly time) in form of a string, if available.
 
@@ -37544,6 +37780,27 @@ The cache is flushed every time the registry is rebuilt.</doc>
             <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">a structure containing the data to cache</doc>
             <type name="Structure" c:type="GstStructure*"/>
           </parameter>
+        </parameters>
+      </method>
+      <method name="set_static_features_flag" c:identifier="gst_plugin_set_static_features_flag" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">Marks this plugin as having no external dependencies, and
+a static set of plugin features, rendering it suitable
+for inclusion in a static build-time registry. Shipping a static
+build-time registry speeds up application startup by avoiding
+scanning of these plugins at run-time.
+
+It is an error to call this function after any gst_plugin_add_dependency()
+or gst_plugin_add_dependency_simple() call, or to call those functions
+once this flag is set.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstplugin.h"/>
+        <return-value transfer-ownership="none">
+          <type name="none" c:type="void"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="plugin" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.c">the #GstPlugin</doc>
+            <type name="Plugin" c:type="GstPlugin*"/>
+          </instance-parameter>
         </parameters>
       </method>
     </class>
@@ -37916,12 +38173,16 @@ to get a list of plugins that match certain criteria.</doc>
       </parameters>
     </callback>
     <bitfield name="PluginFlags" glib:type-name="GstPluginFlags" glib:get-type="gst_plugin_flags_get_type" c:type="GstPluginFlags">
-      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">The plugin loading state</doc>
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">The plugin loading state and registry flags.</doc>
       <member name="cached" value="16" c:identifier="GST_PLUGIN_FLAG_CACHED" glib:nick="cached" glib:name="GST_PLUGIN_FLAG_CACHED">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">Temporarily loaded plugins</doc>
       </member>
       <member name="blacklisted" value="32" c:identifier="GST_PLUGIN_FLAG_BLACKLISTED" glib:nick="blacklisted" glib:name="GST_PLUGIN_FLAG_BLACKLISTED">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">The plugin won't be scanned (again)</doc>
+      </member>
+      <member name="static_features" value="64" c:identifier="GST_PLUGIN_FLAG_STATIC_FEATURES" version="1.30" glib:nick="static-features" glib:name="GST_PLUGIN_FLAG_STATIC_FEATURES">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">The plugin has no external dependencies and a static set of features,
+rendering it suitable for storing in a static build-time registry.</doc>
       </member>
     </bitfield>
     <callback name="PluginInitFullFunc" c:type="GstPluginInitFullFunc">
@@ -38556,6 +38817,71 @@ or no value for the given @tag</doc>
           </instance-parameter>
         </parameters>
       </virtual-method>
+      <virtual-method name="get_property" invoker="get_property" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">Gets the value of a property from a preset.
+
+If @prop contains an alternative suffix in brackets (e.g.
+"bitrate[1920x1080]"), the alternative value is read using
+GKeyFile's locale string mechanism. Otherwise the base property
+value is read.
+
+On success, @value is initialized to the property's type and
+filled with the deserialized value from the preset file. The
+caller must call g_value_unset() on @value when done.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstpreset.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">%TRUE if the property value was retrieved, %FALSE on error</doc>
+          <type name="gboolean" c:type="gboolean"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="preset" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">a #GObject that implements #GstPreset</doc>
+            <type name="Preset" c:type="GstPreset*"/>
+          </instance-parameter>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">preset name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="prop" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">property name, optionally with an alternative suffix
+  (e.g. "bitrate" or "bitrate[1920x1080]")</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="value" direction="out" caller-allocates="1" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.h">#GValue to store the property value</doc>
+            <type name="GObject.Value" c:type="GValue*"/>
+          </parameter>
+        </parameters>
+      </virtual-method>
+      <virtual-method name="get_property_alternatives" invoker="get_property_alternatives" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">Gets the list of alternative suffixes defined for a property in a
+preset. These are the bracket-enclosed parts of keys like
+"bitrate[1920x1080]" or "bitrate[3840x2160@48]".</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstpreset.h"/>
+        <return-value transfer-ownership="full" nullable="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">
+  a %NULL-terminated array of alternative names (e.g.
+  ["1920x1080", "3840x2160@48", ...]), or %NULL if no
+  alternatives exist. Free with g_strfreev().</doc>
+          <array c:type="gchar**">
+            <type name="utf8"/>
+          </array>
+        </return-value>
+        <parameters>
+          <instance-parameter name="preset" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">a #GObject that implements #GstPreset</doc>
+            <type name="Preset" c:type="GstPreset*"/>
+          </instance-parameter>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">preset name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="prop" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">base property name (e.g. "bitrate")</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+        </parameters>
+      </virtual-method>
       <virtual-method name="get_property_names" invoker="get_property_names">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">Get a the names of the GObject properties that can be used for presets.</doc>
         <source-position filename="../subprojects/gstreamer/gst/gstpreset.h"/>
@@ -38722,6 +39048,70 @@ or no value for the given @tag</doc>
             <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">a #GObject that implements #GstPreset</doc>
             <type name="Preset" c:type="GstPreset*"/>
           </instance-parameter>
+        </parameters>
+      </method>
+      <method name="get_property" c:identifier="gst_preset_get_property" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">Gets the value of a property from a preset.
+
+If @prop contains an alternative suffix in brackets (e.g.
+"bitrate[1920x1080]"), the alternative value is read using
+GKeyFile's locale string mechanism. Otherwise the base property
+value is read.
+
+On success, @value is initialized to the property's type and
+filled with the deserialized value from the preset file. The
+caller must call g_value_unset() on @value when done.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstpreset.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">%TRUE if the property value was retrieved, %FALSE on error</doc>
+          <type name="gboolean" c:type="gboolean"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="preset" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">a #GObject that implements #GstPreset</doc>
+            <type name="Preset" c:type="GstPreset*"/>
+          </instance-parameter>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">preset name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="prop" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">property name, optionally with an alternative suffix
+  (e.g. "bitrate" or "bitrate[1920x1080]")</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="value" transfer-ownership="none">
+            <type name="GObject.Value" c:type="GValue*"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="get_property_alternatives" c:identifier="gst_preset_get_property_alternatives" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">Gets the list of alternative suffixes defined for a property in a
+preset. These are the bracket-enclosed parts of keys like
+"bitrate[1920x1080]" or "bitrate[3840x2160@48]".</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstpreset.h"/>
+        <return-value transfer-ownership="full" nullable="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">
+  a %NULL-terminated array of alternative names (e.g.
+  ["1920x1080", "3840x2160@48", ...]), or %NULL if no
+  alternatives exist. Free with g_strfreev().</doc>
+          <array c:type="gchar**">
+            <type name="utf8"/>
+          </array>
+        </return-value>
+        <parameters>
+          <instance-parameter name="preset" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">a #GObject that implements #GstPreset</doc>
+            <type name="Preset" c:type="GstPreset*"/>
+          </instance-parameter>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">preset name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="prop" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">base property name (e.g. "bitrate")</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
         </parameters>
       </method>
       <method name="get_property_names" c:identifier="gst_preset_get_property_names">
@@ -39030,8 +39420,64 @@ or no value for the given @tag</doc>
           </parameters>
         </callback>
       </field>
+      <field name="get_property">
+        <callback name="get_property">
+          <source-position filename="../subprojects/gstreamer/gst/gstpreset.h"/>
+          <return-value transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">%TRUE if the property value was retrieved, %FALSE on error</doc>
+            <type name="gboolean" c:type="gboolean"/>
+          </return-value>
+          <parameters>
+            <parameter name="preset" transfer-ownership="none">
+              <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">a #GObject that implements #GstPreset</doc>
+              <type name="Preset" c:type="GstPreset*"/>
+            </parameter>
+            <parameter name="name" transfer-ownership="none">
+              <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">preset name</doc>
+              <type name="utf8" c:type="const gchar*"/>
+            </parameter>
+            <parameter name="prop" transfer-ownership="none">
+              <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">property name, optionally with an alternative suffix
+  (e.g. "bitrate" or "bitrate[1920x1080]")</doc>
+              <type name="utf8" c:type="const gchar*"/>
+            </parameter>
+            <parameter name="value" direction="out" caller-allocates="1" transfer-ownership="none">
+              <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.h">#GValue to store the property value</doc>
+              <type name="GObject.Value" c:type="GValue*"/>
+            </parameter>
+          </parameters>
+        </callback>
+      </field>
+      <field name="get_property_alternatives">
+        <callback name="get_property_alternatives">
+          <source-position filename="../subprojects/gstreamer/gst/gstpreset.h"/>
+          <return-value transfer-ownership="full" nullable="1">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">
+  a %NULL-terminated array of alternative names (e.g.
+  ["1920x1080", "3840x2160@48", ...]), or %NULL if no
+  alternatives exist. Free with g_strfreev().</doc>
+            <array c:type="gchar**">
+              <type name="utf8"/>
+            </array>
+          </return-value>
+          <parameters>
+            <parameter name="preset" transfer-ownership="none">
+              <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">a #GObject that implements #GstPreset</doc>
+              <type name="Preset" c:type="GstPreset*"/>
+            </parameter>
+            <parameter name="name" transfer-ownership="none">
+              <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">preset name</doc>
+              <type name="utf8" c:type="const gchar*"/>
+            </parameter>
+            <parameter name="prop" transfer-ownership="none">
+              <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpreset.c">base property name (e.g. "bitrate")</doc>
+              <type name="utf8" c:type="const gchar*"/>
+            </parameter>
+          </parameters>
+        </callback>
+      </field>
       <field name="_gst_reserved" readable="0" private="1">
-        <array zero-terminated="0" fixed-size="4">
+        <array zero-terminated="0" fixed-size="2">
           <type name="gpointer" c:type="gpointer"/>
         </array>
       </field>
@@ -44483,7 +44929,7 @@ gst_element_set_state(). Only @GST_STATE_CHANGE_FAILURE is a real failure.</doc>
         </parameters>
       </function>
     </enumeration>
-    <record name="StaticCaps" c:type="GstStaticCaps">
+    <record name="StaticCaps" c:type="GstStaticCaps" glib:type-name="GstStaticCaps" glib:get-type="gst_static_caps_get_type" c:symbol-prefix="static_caps">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstcaps.h">Data structure to initialize #GstCaps from a string description usually
 used in conjunction with GST_STATIC_CAPS() and gst_static_caps_get() to
 instantiate a #GstCaps.</doc>
@@ -44531,7 +44977,7 @@ instantiate a #GstCaps.</doc>
         </parameters>
       </method>
     </record>
-    <record name="StaticPadTemplate" c:type="GstStaticPadTemplate">
+    <record name="StaticPadTemplate" c:type="GstStaticPadTemplate" glib:type-name="GstStaticPadTemplate" glib:get-type="gst_static_pad_template_get_type" c:symbol-prefix="static_pad_template">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstpadtemplate.h">Structure describing the #GstStaticPadTemplate.</doc>
       <source-position filename="../subprojects/gstreamer/gst/gstpadtemplate.h"/>
       <field name="name_template" writable="1">
@@ -47905,10 +48351,36 @@ Subclasses can however override all of the important methods for sync and
 async notifications to implement their own callback methods or blocking
 wait operations.</doc>
       <source-position filename="../subprojects/gstreamer/gst/gstsystemclock.h"/>
+      <constructor name="new" c:identifier="gst_system_clock_new" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstsystemclock.c">Creates a new instance of the system clock. Unlike gst_system_clock_obtain()
+this allows to apply custom calibration to it via
+gst_clock_set_calibration(), set a master clock via gst_clock_set_master() or
+change the `clock-type` property without changing the behaviour of the
+default system clock for the whole process.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gstsystemclock.h"/>
+        <return-value transfer-ownership="full">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstsystemclock.c">the new system clock instance.</doc>
+          <type name="Clock" c:type="GstClock*"/>
+        </return-value>
+        <parameters>
+          <parameter name="name" transfer-ownership="none" nullable="1" allow-none="1">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstsystemclock.c">name of the new clock</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="clock_type" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstsystemclock.c">#GstClockType for the new clock</doc>
+            <type name="ClockType" c:type="GstClockType"/>
+          </parameter>
+        </parameters>
+      </constructor>
       <function name="obtain" c:identifier="gst_system_clock_obtain">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstsystemclock.c">Get a handle to the default system clock. The refcount of the
 clock will be increased so you need to unref the clock after
-usage.</doc>
+usage.
+
+Changing the calibration via gst_clock_set_calibration(), setting a master
+clock via gst_clock_set_master() or changing the `clock-type` property on the
+returned clock will change the behaviour for the whole process.</doc>
         <source-position filename="../subprojects/gstreamer/gst/gstsystemclock.h"/>
         <return-value transfer-ownership="full">
           <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstsystemclock.c">the default clock.
@@ -48912,6 +49384,63 @@ character, a newline character will be added automatically.</doc>
         </parameter>
       </parameters>
     </function-macro>
+    <function-macro name="TRACE_BEGIN" c:identifier="GST_TRACE_BEGIN" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Opens a span and returns its #GstTraceSpanId. When @format has no
+listening tracer the values are not evaluated and %GST_TRACE_SPAN_ID_NONE
+is returned. The caller closes the span with gst_trace_span_end()
+or gst_trace_span_end_and_clear() at the desired point; use this
+when the span lifetime does not match a lexical scope (see GST_TRACE_FUNC()
+for the auto-closed variant).</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="format">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #GstTraceFormat (typically the result of a getter declared
+  with GST_DEFINE_TRACE_FORMAT())</doc>
+        </parameter>
+        <parameter name="...">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">one or more GST_TRACE_VALUE_* entries, in the field order declared
+  on @format</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_EVENT" c:identifier="GST_TRACE_EVENT" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Emits a point event for @format. Unlike GST_TRACE_BEGIN(), an
+event has no duration and no matching end; it is the structured
+equivalent of the legacy #GstTracerRecord log entry and is emitted whenever
+the GST_TRACER debug level is enabled. As with gst_tracer_record_log() the
+values are always evaluated, so keep them cheap.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="format">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #GstTraceFormat (typically the result of a getter declared
+  with GST_DEFINE_TRACE_FORMAT())</doc>
+        </parameter>
+        <parameter name="...">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">one or more GST_TRACE_VALUE_* entries, in the field order declared
+  on @format</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_FUNC" c:identifier="GST_TRACE_FUNC" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Opens a span like GST_TRACE_SCOPE_BEGIN() but closes it automatically when
+the enclosing block exits via `return`, `goto`, or fall-through, so no
+GST_TRACE_SCOPE_END() call is needed.
+
+Implemented with `__attribute__((cleanup))`. On compilers that do not
+support the attribute (stock MSVC) this macro expands to nothing and its
+arguments are not evaluated; use the GST_TRACE_SCOPE_BEGIN() /
+GST_TRACE_SCOPE_END() pair there instead.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="format">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a span format getter declared with GST_DEFINE_TRACE_FORMAT()</doc>
+        </parameter>
+        <parameter name="...">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">one or more GST_TRACE_VALUE_* entries, in the field order declared
+  on @format</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
     <function-macro name="TRACE_ID" c:identifier="GST_TRACE_ID" version="1.22" introspectable="0">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstinfo.h">Output a tracing message for the given identifier in the default category.
 
@@ -48983,6 +49512,143 @@ character, a newline character will be added automatically.</doc>
         </parameter>
         <parameter name="...">
           <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstinfo.h">format string and optional arguments</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_SCOPE_BEGIN" c:identifier="GST_TRACE_SCOPE_BEGIN" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Opens a span and stores its #GstTraceSpanId in a local variable named after
+@format, so the matching GST_TRACE_SCOPE_END() can close it without the
+caller declaring a span-id variable. When no tracer is listening the values
+are not evaluated and %GST_TRACE_SPAN_ID_NONE is stored.
+
+Calling GST_TRACE_SCOPE_BEGIN() twice for the same @format in the same scope
+is not allowed, since the variable name is derived from @format.
+
+The span remains open until the matching GST_TRACE_SCOPE_END() is called</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="format">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a span format getter declared with GST_DEFINE_TRACE_FORMAT()</doc>
+        </parameter>
+        <parameter name="...">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">one or more GST_TRACE_VALUE_* entries, in the field order declared
+  on @format</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_SCOPE_END" c:identifier="GST_TRACE_SCOPE_END" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Closes the span opened by GST_TRACE_SCOPE_BEGIN() for @format and resets the
+variable to %GST_TRACE_SPAN_ID_NONE.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="format">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">the span format getter passed to the matching
+  GST_TRACE_SCOPE_BEGIN()</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <constant name="TRACE_SPAN_ID_NONE" value="0" c:type="GST_TRACE_SPAN_ID_NONE" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Sentinel #GstTraceSpanId value meaning "no span". Returned by
+gst_trace_span_begin() when no tracer is listening, and accepted
+as a no-op by gst_trace_span_end().</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <type name="TraceSpanId" c:type="GstTraceSpanId"/>
+    </constant>
+    <function-macro name="TRACE_VALUES" c:identifier="GST_TRACE_VALUES" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Builds a positional `GstTraceValue` array suitable for
+gst_trace_span_begin(). Values are positional and must match the
+field order declared on the corresponding #GstTraceFormat.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="...">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">one or more short value entries, e.g. `STRING (s)`, `UINT (n)`,
+  `OBJECT (o)`; each names a `GST_TRACE_VALUE_*` constructor without the
+  `GST_TRACE_VALUE_` prefix</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_BOOLEAN" c:identifier="GST_TRACE_VALUE_BOOLEAN" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Builds a `GstTraceValue` holding @x for use inside GST_TRACE_VALUES().</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gboolean value</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_CLOCK_TIME" c:identifier="GST_TRACE_VALUE_CLOCK_TIME" version="1.30" introspectable="0">
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #GstClockTime value</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_DOUBLE" c:identifier="GST_TRACE_VALUE_DOUBLE" version="1.30" introspectable="0">
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gdouble value</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_INT" c:identifier="GST_TRACE_VALUE_INT" version="1.30" introspectable="0">
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gint value</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_INT64" c:identifier="GST_TRACE_VALUE_INT64" version="1.30" introspectable="0">
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gint64 value</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_OBJECT" c:identifier="GST_TRACE_VALUE_OBJECT" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">@x must outlive the trace call.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed #GObject</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_STRING" c:identifier="GST_TRACE_VALUE_STRING" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">@x must outlive the trace call. %NULL is passed through unchanged so tracers
+can distinguish unset from empty strings.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed #gchar pointer; %NULL means the field is unset</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_STRUCTURE" c:identifier="GST_TRACE_VALUE_STRUCTURE" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">@x must outlive the trace call.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed #GstStructure</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_UINT" c:identifier="GST_TRACE_VALUE_UINT" version="1.30" introspectable="0">
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #guint value</doc>
+        </parameter>
+      </parameters>
+    </function-macro>
+    <function-macro name="TRACE_VALUE_UINT64" c:identifier="GST_TRACE_VALUE_UINT64" version="1.30" introspectable="0">
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <parameters>
+        <parameter name="x">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #guint64 value</doc>
         </parameter>
       </parameters>
     </function-macro>
@@ -52215,6 +52881,428 @@ unreffed before setting a new one.</doc>
         <type name="GObject.TypeInterface" c:type="GTypeInterface"/>
       </field>
     </record>
+    <record name="TraceField" c:type="GstTraceField" disguised="1" opaque="1" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Transient field descriptor created by gst_trace_field_new() and added
+to a #GstTraceFormatBuilder.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <method name="free" c:identifier="gst_trace_field_free" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Frees a field that has not been added to a builder.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <type name="none" c:type="void"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="field" transfer-ownership="full" nullable="1" allow-none="1">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceField</doc>
+            <type name="TraceField" c:type="GstTraceField*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <method name="set_description" c:identifier="gst_trace_field_set_description" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Sets the description metadata on @field. Tracers and documentation
+generators surface this string when describing the field.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">@field for chaining</doc>
+          <type name="TraceField" c:type="GstTraceField*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="field" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceField</doc>
+            <type name="TraceField" c:type="GstTraceField*"/>
+          </instance-parameter>
+          <parameter name="description" transfer-ownership="none" nullable="1" allow-none="1">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a human-readable description; %NULL clears any
+  previously set description</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="set_flags" c:identifier="gst_trace_field_set_flags" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Sets metadata flags on @field. %GST_TRACER_VALUE_FLAGS_OPTIONAL marks the
+field as optional: when emitting an event, the field's value must be
+preceded by a #gboolean value telling whether it is present.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">@field for chaining</doc>
+          <type name="TraceField" c:type="GstTraceField*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="field" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceField</doc>
+            <type name="TraceField" c:type="GstTraceField*"/>
+          </instance-parameter>
+          <parameter name="flags" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the #GstTracerValueFlags describing the field</doc>
+            <type name="TracerValueFlags" c:type="GstTracerValueFlags"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="set_scope" c:identifier="gst_trace_field_set_scope" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Declares which entity (process, thread, element or pad) the field's value
+relates to. Post-processing tools such as `gst-stats` use this to group
+measurements.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">@field for chaining</doc>
+          <type name="TraceField" c:type="GstTraceField*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="field" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceField</doc>
+            <type name="TraceField" c:type="GstTraceField*"/>
+          </instance-parameter>
+          <parameter name="scope" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the #GstTracerValueScope the field relates to</doc>
+            <type name="TracerValueScope" c:type="GstTracerValueScope"/>
+          </parameter>
+        </parameters>
+      </method>
+      <function name="new" c:identifier="gst_trace_field_new" version="1.30" introspectable="0">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Creates a transient field descriptor that can be configured with chainable
+setters and then consumed by
+gst_trace_format_builder_add_field_full().</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="full">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a new #GstTraceField</doc>
+          <type name="TraceField" c:type="GstTraceField*"/>
+        </return-value>
+        <parameters>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the field name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="type" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the field #GstTracerFieldType</doc>
+            <type name="TracerFieldType" c:type="GstTracerFieldType"/>
+          </parameter>
+        </parameters>
+      </function>
+    </record>
+    <record name="TraceFormat" c:type="GstTraceFormat" disguised="1" opaque="1" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Opaque registered format describing the fields of a trace span.
+Obtain one via gst_trace_format_register() or
+GST_DEFINE_TRACE_FORMAT() and pass it to
+gst_trace_span_begin().</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <method name="get_description" c:identifier="gst_trace_format_get_description" version="1.30">
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none" nullable="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the description set on the builder, or
+  %NULL if none was set</doc>
+          <type name="utf8" c:type="const gchar*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <method name="get_field_description" c:identifier="gst_trace_format_get_field_description" version="1.30">
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none" nullable="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the description declared for the field
+  at @index, or %NULL if no description was set (or @index is out of range)</doc>
+          <type name="utf8" c:type="const gchar*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+          <parameter name="index" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a field index</doc>
+            <type name="guint" c:type="guint"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="get_field_name" c:identifier="gst_trace_format_get_field_name" version="1.30">
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the name of the field at @index, or %NULL if
+  @index is out of range</doc>
+          <type name="utf8" c:type="const gchar*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+          <parameter name="index" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a field index</doc>
+            <type name="guint" c:type="guint"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="get_field_structure" c:identifier="gst_trace_format_get_field_structure" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Returns the raw #GstStructure describing the field at @index. The structure
+carries the field's type (`"type"`, a #GstTracerFieldType stored as #gint)
+and any optional metadata declared via
+gst_trace_format_builder_add_field_full() (e.g. `"description"`).</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none" nullable="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the field structure, or %NULL if
+  @index is out of range</doc>
+          <type name="Structure" c:type="const GstStructure*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+          <parameter name="index" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a field index</doc>
+            <type name="guint" c:type="guint"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="get_field_type" c:identifier="gst_trace_format_get_field_type" version="1.30">
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the #GstTracerFieldType of the field at @index (defaults to
+  %GST_TRACER_FIELD_TYPE_BOOLEAN if @index is out of range)</doc>
+          <type name="TracerFieldType" c:type="GstTracerFieldType"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+          <parameter name="index" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a field index</doc>
+            <type name="guint" c:type="guint"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="get_n_fields" c:identifier="gst_trace_format_get_n_fields" version="1.30">
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the number of fields declared on @format</doc>
+          <type name="guint" c:type="guint"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <method name="get_name" c:identifier="gst_trace_format_get_name" version="1.30">
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the registered span name</doc>
+          <type name="utf8" c:type="const gchar*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <method name="is_enabled" c:identifier="gst_trace_format_is_enabled" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Cheap check that lets callers skip preparing span values when no tracer
+is active. Returns %TRUE whenever any tracer is registered, regardless
+of which hooks it listens for.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">%TRUE if any tracer is active</doc>
+          <type name="gboolean" c:type="gboolean"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="format" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+            <type name="TraceFormat" c:type="GstTraceFormat*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <function name="register" c:identifier="gst_trace_format_register" version="1.30" introspectable="0">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Convenience wrapper around #GstTraceFormatBuilder for the common case
+where only the field names and types are declared. Equivalent to creating
+a builder, calling gst_trace_format_builder_add_field() for each pair
+and then gst_trace_format_builder_register().</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the registered #GstTraceFormat</doc>
+          <type name="TraceFormat" c:type="GstTraceFormat*"/>
+        </return-value>
+        <parameters>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the span name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="..." transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">%NULL-terminated list of (field-name, #GType) pairs</doc>
+            <varargs/>
+          </parameter>
+        </parameters>
+      </function>
+    </record>
+    <record name="TraceFormatBuilder" c:type="GstTraceFormatBuilder" disguised="1" opaque="1" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Opaque, chainable builder used to assemble a #GstTraceFormat field by
+field; consumed by gst_trace_format_builder_register().</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <method name="add_field" c:identifier="gst_trace_format_builder_add_field" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Adds a positional field to the format. @type must be one of %G_TYPE_BOOLEAN,
+%G_TYPE_INT, %G_TYPE_UINT, %G_TYPE_INT64, %G_TYPE_UINT64, %G_TYPE_DOUBLE,
+%G_TYPE_STRING or %G_TYPE_POINTER, matching the `GstTraceValue` union
+member callers will pass to gst_trace_span_begin(). Duplicate
+field names are rejected.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">@builder for chaining</doc>
+          <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="builder" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormatBuilder</doc>
+            <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+          </instance-parameter>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the field name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+          <parameter name="type" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the field #GType</doc>
+            <type name="TracerFieldType" c:type="GstTracerFieldType"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="add_field_full" c:identifier="gst_trace_format_builder_add_field_full" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Adds a positional field with optional metadata to the format. The field is
+consumed and freed by this call; do not use @field afterwards.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">@builder for chaining</doc>
+          <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="builder" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormatBuilder</doc>
+            <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+          </instance-parameter>
+          <parameter name="field" transfer-ownership="full">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceField built via gst_trace_field_new()
+  and optionally configured with chainable setters such as
+  gst_trace_field_set_description()</doc>
+            <type name="TraceField" c:type="GstTraceField*"/>
+          </parameter>
+        </parameters>
+      </method>
+      <method name="free" c:identifier="gst_trace_format_builder_free" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Frees an unregistered builder.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <type name="none" c:type="void"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="builder" transfer-ownership="full" nullable="1" allow-none="1">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormatBuilder</doc>
+            <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <method name="register" c:identifier="gst_trace_format_builder_register" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Registers the format declared by @builder and consumes the builder.
+The returned format is valid until gst_deinit().</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the registered #GstTraceFormat</doc>
+          <type name="TraceFormat" c:type="GstTraceFormat*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="builder" transfer-ownership="full">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormatBuilder</doc>
+            <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+          </instance-parameter>
+        </parameters>
+      </method>
+      <method name="set_description" c:identifier="gst_trace_format_builder_set_description" version="1.30">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Sets a human-readable description on the format being built. Replaces any
+previous description.</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">@builder for chaining</doc>
+          <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+        </return-value>
+        <parameters>
+          <instance-parameter name="builder" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormatBuilder</doc>
+            <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+          </instance-parameter>
+          <parameter name="description" transfer-ownership="none" nullable="1" allow-none="1">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a human-readable description</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+        </parameters>
+      </method>
+      <function name="new" c:identifier="gst_trace_format_builder_new" version="1.30" introspectable="0">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Creates a new builder for a span format. The builder is used to
+declare the span's field schema before registering it with
+gst_trace_format_builder_register().</doc>
+        <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+        <return-value transfer-ownership="full">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a new #GstTraceFormatBuilder</doc>
+          <type name="TraceFormatBuilder" c:type="GstTraceFormatBuilder*"/>
+        </return-value>
+        <parameters>
+          <parameter name="name" transfer-ownership="none">
+            <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the span name</doc>
+            <type name="utf8" c:type="const gchar*"/>
+          </parameter>
+        </parameters>
+      </function>
+    </record>
+    <union name="TraceValue" c:type="GstTraceValue" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">A single borrowed value for a trace span row.
+
+Values are positional and interpreted according to the format description
+used when registering the corresponding #GstTraceFormat. The value order
+matches the field order declared on the builder.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <field name="v_boolean" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gboolean</doc>
+        <type name="gboolean" c:type="gboolean"/>
+      </field>
+      <field name="v_int" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gint</doc>
+        <type name="gint" c:type="gint"/>
+      </field>
+      <field name="v_uint" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #guint</doc>
+        <type name="guint" c:type="guint"/>
+      </field>
+      <field name="v_int64" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gint64</doc>
+        <type name="gint64" c:type="gint64"/>
+      </field>
+      <field name="v_uint64" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #guint64 (also carries %GST_TRACER_FIELD_TYPE_CLOCK_TIME)</doc>
+        <type name="guint64" c:type="guint64"/>
+      </field>
+      <field name="v_double" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gdouble</doc>
+        <type name="gdouble" c:type="gdouble"/>
+      </field>
+      <field name="v_string" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed string (may be %NULL)</doc>
+        <type name="utf8" c:type="const gchar*"/>
+      </field>
+      <field name="v_structure" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed #GstStructure (may be %NULL)</doc>
+        <type name="Structure" c:type="GstStructure*"/>
+      </field>
+      <field name="v_object" writable="1">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed #GObject (may be %NULL)</doc>
+        <type name="GObject.Object" c:type="GObject*"/>
+      </field>
+      <field name="_gst_reserved" readable="0" private="1">
+        <array zero-terminated="0" fixed-size="4">
+          <type name="gpointer" c:type="gpointer"/>
+        </array>
+      </field>
+    </union>
     <class name="Tracer" c:symbol-prefix="tracer" c:type="GstTracer" version="1.8" parent="Object" abstract="1" glib:type-name="GstTracer" glib:get-type="gst_tracer_get_type" glib:type-struct="TracerClass">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.c">Tracing modules will subclass #GstTracer and register through
 gst_tracer_register(). Modules can attach to various hook-types - see
@@ -52349,14 +53437,50 @@ the factory is not loaded.</doc>
     <record name="TracerFactoryClass" c:type="GstTracerFactoryClass" disguised="1" opaque="1" glib:is-gtype-struct-for="TracerFactory">
       <source-position filename="../subprojects/gstreamer/gst/gsttracerfactory.h"/>
     </record>
+    <enumeration name="TracerFieldType" version="1.30" glib:type-name="GstTracerFieldType" glib:get-type="gst_tracer_field_type_get_type" c:type="GstTracerFieldType">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">The type of a trace format field. This is a deliberately small, self
+contained set rather than a #GType so the tracer stream stays independent
+of the GObject type system.</doc>
+      <member name="boolean" value="0" c:identifier="GST_TRACER_FIELD_TYPE_BOOLEAN" glib:nick="boolean" glib:name="GST_TRACER_FIELD_TYPE_BOOLEAN">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gboolean</doc>
+      </member>
+      <member name="int" value="1" c:identifier="GST_TRACER_FIELD_TYPE_INT" glib:nick="int" glib:name="GST_TRACER_FIELD_TYPE_INT">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gint</doc>
+      </member>
+      <member name="uint" value="2" c:identifier="GST_TRACER_FIELD_TYPE_UINT" glib:nick="uint" glib:name="GST_TRACER_FIELD_TYPE_UINT">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #guint</doc>
+      </member>
+      <member name="int64" value="3" c:identifier="GST_TRACER_FIELD_TYPE_INT64" glib:nick="int64" glib:name="GST_TRACER_FIELD_TYPE_INT64">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gint64</doc>
+      </member>
+      <member name="uint64" value="4" c:identifier="GST_TRACER_FIELD_TYPE_UINT64" glib:nick="uint64" glib:name="GST_TRACER_FIELD_TYPE_UINT64">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #guint64</doc>
+      </member>
+      <member name="double" value="5" c:identifier="GST_TRACER_FIELD_TYPE_DOUBLE" glib:nick="double" glib:name="GST_TRACER_FIELD_TYPE_DOUBLE">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #gdouble</doc>
+      </member>
+      <member name="string" value="6" c:identifier="GST_TRACER_FIELD_TYPE_STRING" glib:nick="string" glib:name="GST_TRACER_FIELD_TYPE_STRING">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed string (may be %NULL)</doc>
+      </member>
+      <member name="clock_time" value="7" c:identifier="GST_TRACER_FIELD_TYPE_CLOCK_TIME" glib:nick="clock-time" glib:name="GST_TRACER_FIELD_TYPE_CLOCK_TIME">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a #GstClockTime</doc>
+      </member>
+      <member name="structure" value="8" c:identifier="GST_TRACER_FIELD_TYPE_STRUCTURE" glib:nick="structure" glib:name="GST_TRACER_FIELD_TYPE_STRUCTURE">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed #GstStructure (may be %NULL)</doc>
+      </member>
+      <member name="object" value="9" c:identifier="GST_TRACER_FIELD_TYPE_OBJECT" glib:nick="object" glib:name="GST_TRACER_FIELD_TYPE_OBJECT">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">a borrowed #GObject (may be %NULL)</doc>
+      </member>
+    </enumeration>
     <record name="TracerPrivate" c:type="GstTracerPrivate" disguised="1" opaque="1">
       <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
     </record>
-    <class name="TracerRecord" c:symbol-prefix="tracer_record" c:type="GstTracerRecord" version="1.8" parent="Object" glib:type-name="GstTracerRecord" glib:get-type="gst_tracer_record_get_type" glib:type-struct="TracerRecordClass">
+    <class name="TracerRecord" c:symbol-prefix="tracer_record" c:type="GstTracerRecord" version="1.8" deprecated="1" deprecated-version="1.30" parent="Object" glib:type-name="GstTracerRecord" glib:get-type="gst_tracer_record_get_type" glib:type-struct="TracerRecordClass">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.c">Tracing modules will create instances of this class to announce the data they
 will log and create a log formatter.</doc>
+      <doc-deprecated xml:space="preserve">Use #GstTraceFormat and gst_trace_event() instead.</doc-deprecated>
       <source-position filename="../subprojects/gstreamer/gst/gsttracerrecord.h"/>
-      <constructor name="new" c:identifier="gst_tracer_record_new" version="1.8" introspectable="0">
+      <constructor name="new" c:identifier="gst_tracer_record_new" version="1.8" introspectable="0" deprecated="1" deprecated-version="1.30">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.c">Create a new tracer record. The record instance can be used to efficiently
 log entries using gst_tracer_record_log().
 %NULL terminator required after the last argument.
@@ -52373,9 +53497,9 @@ the optional field, that if %TRUE signals that the optional field is valid
 and %FALSE signals that the optional field should be ignored. One must still
 log a placeholder value for the optional field though. Please also note, that
 pointer type values must not be NULL - the underlying serialisation can not
-handle that right now.
-
-&gt; Please note that this is still under discussion and subject to change.</doc>
+handle that right now.</doc>
+        <doc-deprecated xml:space="preserve">Build a #GstTraceFormat with
+  gst_trace_format_builder_new() / gst_trace_format_register() instead.</doc-deprecated>
         <source-position filename="../subprojects/gstreamer/gst/gsttracerrecord.h"/>
         <return-value transfer-ownership="full">
           <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.c">a new #GstTracerRecord</doc>
@@ -52396,13 +53520,12 @@ handle that right now.
           </parameter>
         </parameters>
       </constructor>
-      <method name="log" c:identifier="gst_tracer_record_log" version="1.8" introspectable="0">
+      <method name="log" c:identifier="gst_tracer_record_log" version="1.8" introspectable="0" deprecated="1" deprecated-version="1.30">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.c">Serialzes the trace event into the log.
 
 Right now this is using the gstreamer debug log with the level TRACE (7) and
-the category "GST_TRACER".
-
-&gt; Please note that this is still under discussion and subject to change.</doc>
+the category "GST_TRACER".</doc>
+        <doc-deprecated xml:space="preserve">Use gst_trace_event() instead.</doc-deprecated>
         <source-position filename="../subprojects/gstreamer/gst/gsttracerrecord.h"/>
         <return-value transfer-ownership="none">
           <type name="none" c:type="void"/>
@@ -52423,41 +53546,41 @@ the category "GST_TRACER".
       <source-position filename="../subprojects/gstreamer/gst/gsttracerrecord.h"/>
     </record>
     <bitfield name="TracerValueFlags" glib:type-name="GstTracerValueFlags" glib:get-type="gst_tracer_value_flags_get_type" c:type="GstTracerValueFlags">
-      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">Flag that describe the value. These flags help applications processing the
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Flag that describe the value. These flags help applications processing the
 logs to understand the values.</doc>
       <member name="none" value="0" c:identifier="GST_TRACER_VALUE_FLAGS_NONE" glib:nick="none" glib:name="GST_TRACER_VALUE_FLAGS_NONE">
-        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">no flags</doc>
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">no flags</doc>
       </member>
       <member name="optional" value="1" c:identifier="GST_TRACER_VALUE_FLAGS_OPTIONAL" glib:nick="optional" glib:name="GST_TRACER_VALUE_FLAGS_OPTIONAL">
-        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">the value is optional. When using this flag
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">the value is optional. When using this flag
   one need to have an additional boolean arg before this value in the
   var-args list passed to  gst_tracer_record_log().</doc>
       </member>
       <member name="aggregated" value="2" c:identifier="GST_TRACER_VALUE_FLAGS_AGGREGATED" glib:nick="aggregated" glib:name="GST_TRACER_VALUE_FLAGS_AGGREGATED">
-        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">the value is a combined figure, since the
-  start of tracing. Examples are averages or timestamps.</doc>
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">the value is a combined figure, since the
+  start of tracing. Examples are averages or accumulated durations.</doc>
       </member>
     </bitfield>
     <enumeration name="TracerValueScope" version="1.8" glib:type-name="GstTracerValueScope" glib:get-type="gst_tracer_value_scope_get_type" c:type="GstTracerValueScope">
-      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">Tracing record will contain fields that contain a measured value or extra
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">Tracing record will contain fields that contain a measured value or extra
 meta-data. One such meta data are values that tell where a measurement was
-taken. This enumerating declares to which scope such a meta data field
+taken. This enumeration declares to which scope such a meta data field
 relates to. If it is e.g. %GST_TRACER_VALUE_SCOPE_PAD, then each of the log
 events may contain values for different #GstPads.</doc>
       <member name="process" value="0" c:identifier="GST_TRACER_VALUE_SCOPE_PROCESS" glib:nick="process" glib:name="GST_TRACER_VALUE_SCOPE_PROCESS">
-        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">the value is related to the process</doc>
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">the value is related to the process</doc>
       </member>
       <member name="thread" value="1" c:identifier="GST_TRACER_VALUE_SCOPE_THREAD" glib:nick="thread" glib:name="GST_TRACER_VALUE_SCOPE_THREAD">
-        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">the value is related to a thread</doc>
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">the value is related to a thread</doc>
       </member>
       <member name="element" value="2" c:identifier="GST_TRACER_VALUE_SCOPE_ELEMENT" glib:nick="element" glib:name="GST_TRACER_VALUE_SCOPE_ELEMENT">
-        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">the value is related to an #GstElement</doc>
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">the value is related to an #GstElement</doc>
       </member>
       <member name="pad" value="3" c:identifier="GST_TRACER_VALUE_SCOPE_PAD" glib:nick="pad" glib:name="GST_TRACER_VALUE_SCOPE_PAD">
-        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerrecord.h">the value is related to a #GstPad</doc>
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracer.h">the value is related to a #GstPad</doc>
       </member>
     </enumeration>
-    <record name="TypeFind" c:type="GstTypeFind">
+    <record name="TypeFind" c:type="GstTypeFind" glib:type-name="GstTypeFind" glib:get-type="gst_type_find_get_type" c:symbol-prefix="type_find">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttypefind.c">The following functions allow you to detect the media type of an unknown
 stream.</doc>
       <source-position filename="../subprojects/gstreamer/gst/gsttypefind.h"/>
@@ -54392,7 +55515,7 @@ determine a order for the two provided values.</doc>
       <source-position filename="../subprojects/gstreamer/gst/gstversion.h"/>
       <type name="gint" c:type="gint"/>
     </constant>
-    <constant name="VERSION_MICRO" value="1" c:type="GST_VERSION_MICRO">
+    <constant name="VERSION_MICRO" value="2" c:type="GST_VERSION_MICRO">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstversion.h">The micro version of GStreamer at compile time:</doc>
       <source-position filename="../subprojects/gstreamer/gst/gstversion.h"/>
       <type name="gint" c:type="gint"/>
@@ -56237,6 +57360,13 @@ Either @new_context or the #GstContext pointed to by @old_context may be %NULL.<
       <source-position filename="../subprojects/gstreamer/gst/gstcpuid.h"/>
       <return-value transfer-ownership="none">
         <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstcpuid.c">%TRUE if NEON (64-bit) is supported by the CPU, %FALSE otherwise.</doc>
+        <type name="gboolean" c:type="gboolean"/>
+      </return-value>
+    </function>
+    <function name="cpuid_supports_riscv_v" c:identifier="gst_cpuid_supports_riscv_v" version="1.30">
+      <source-position filename="../subprojects/gstreamer/gst/gstcpuid.h"/>
+      <return-value transfer-ownership="none">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstcpuid.c">%TRUE if RISC-V Vector extension is supported by the CPU, %FALSE otherwise.</doc>
         <type name="gboolean" c:type="gboolean"/>
       </return-value>
     </function>
@@ -59390,6 +60520,46 @@ An error does not mean that the pipeline could not be constructed.</doc>
         </parameter>
       </parameters>
     </function>
+    <function name="parse_untrusted_report" c:identifier="gst_parse_untrusted_report" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">Unpacks an `untrusted-content` report into its parts, so a caller does not
+have to know the field names and nesting the structure uses. Each output is
+filled with the corresponding part when it is present, and set to %NULL when
+it is not; pass %NULL for the parts you do not care about.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gstparse.h"/>
+      <return-value transfer-ownership="none">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">%TRUE if @report is an `untrusted-content` report.</doc>
+        <type name="gboolean" c:type="gboolean"/>
+      </return-value>
+      <parameters>
+        <parameter name="report" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">an `untrusted-content` #GstStructure, as returned by
+    gst_parse_context_get_untrusted_report()</doc>
+          <type name="Structure" c:type="const GstStructure*"/>
+        </parameter>
+        <parameter name="elements" direction="out" caller-allocates="0" transfer-ownership="full" nullable="1" optional="1" allow-none="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">
+    the factory names refused because they are not untrusted-aware, or %NULL</doc>
+          <array c:type="gchar***">
+            <type name="utf8"/>
+          </array>
+        </parameter>
+        <parameter name="properties" direction="out" caller-allocates="0" transfer-ownership="full" nullable="1" optional="1" allow-none="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">the refused sensitive
+    property assignments, a #GstStructure named
+    `untrusted-sensitive-properties` with one `element-name:property` field
+    per assignment holding the refused value (in the property's own type
+    when known, the string as written otherwise), or %NULL</doc>
+          <type name="Structure" c:type="GstStructure**"/>
+        </parameter>
+        <parameter name="unresolved_properties" direction="out" caller-allocates="0" transfer-ownership="full" nullable="1" optional="1" allow-none="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstparse.c">the refused
+    assignments to children that never materialized, a #GstStructure named
+    `untrusted-unresolved-properties` of the same shape but with the value
+    always the string as written, since the type is not known, or %NULL</doc>
+          <type name="Structure" c:type="GstStructure**"/>
+        </parameter>
+      </parameters>
+    </function>
     <function name="plugin_error_quark" c:identifier="gst_plugin_error_quark" moved-to="PluginError.quark">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstplugin.h">Get the error quark.</doc>
       <return-value transfer-ownership="none">
@@ -59854,20 +61024,6 @@ the GStreamer core. See gst_segtrap_is_enabled() for more information.</doc>
         </parameter>
       </parameters>
     </function>
-    <function name="static_caps_get_type" c:identifier="gst_static_caps_get_type">
-      <attribute name="doc.skip" value="true"/>
-      <source-position filename="../subprojects/gstreamer/gst/gstcaps.h"/>
-      <return-value transfer-ownership="none">
-        <type name="GType" c:type="GType"/>
-      </return-value>
-    </function>
-    <function name="static_pad_template_get_type" c:identifier="gst_static_pad_template_get_type">
-      <attribute name="doc.skip" value="true"/>
-      <source-position filename="../subprojects/gstreamer/gst/gstpadtemplate.h"/>
-      <return-value transfer-ownership="none">
-        <type name="GType" c:type="GType"/>
-      </return-value>
-    </function>
     <function name="stream_error_quark" c:identifier="gst_stream_error_quark" moved-to="StreamError.quark">
       <attribute name="doc.skip" value="true"/>
       <return-value transfer-ownership="none">
@@ -60286,6 +61442,108 @@ even from dynamically loaded plugins.)</doc>
         </parameter>
       </parameters>
     </function-macro>
+    <function name="trace_event" c:identifier="gst_trace_event" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Emits a point event for @format: a single timestamped record with no
+duration, the counterpart to the begin/end pair of gst_trace_span_begin()
+and the structured replacement for gst_tracer_record_log().
+
+The event is delivered to tracers through the "event" hook; the `log` tracer
+renders it to the GST_TRACER debug log. Values are positional and must match
+@format; keep their computation cheap as they are built whenever tracing is
+enabled.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <return-value transfer-ownership="none">
+        <type name="none" c:type="void"/>
+      </return-value>
+      <parameters>
+        <parameter name="format" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat describing the fields of the event</doc>
+          <type name="TraceFormat" c:type="GstTraceFormat*"/>
+        </parameter>
+        <parameter name="values" transfer-ownership="none" nullable="1" allow-none="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the positional values for @format's fields, in
+  declaration order; %NULL logs all fields as unset</doc>
+          <array zero-terminated="0" c:type="const GstTraceValue*">
+            <type name="TraceValue" c:type="GstTraceValue"/>
+          </array>
+        </parameter>
+      </parameters>
+    </function>
+    <function name="trace_format_register" c:identifier="gst_trace_format_register" moved-to="TraceFormat.register" version="1.30" introspectable="0">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Convenience wrapper around #GstTraceFormatBuilder for the common case
+where only the field names and types are declared. Equivalent to creating
+a builder, calling gst_trace_format_builder_add_field() for each pair
+and then gst_trace_format_builder_register().</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <return-value transfer-ownership="none">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the registered #GstTraceFormat</doc>
+        <type name="TraceFormat" c:type="GstTraceFormat*"/>
+      </return-value>
+      <parameters>
+        <parameter name="name" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">the span name</doc>
+          <type name="utf8" c:type="const gchar*"/>
+        </parameter>
+        <parameter name="..." transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">%NULL-terminated list of (field-name, #GType) pairs</doc>
+          <varargs/>
+        </parameter>
+      </parameters>
+    </function>
+    <function name="trace_span_begin" c:identifier="gst_trace_span_begin" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Emits a span begin hook for @format.
+
+Values are borrowed for the duration of the hook call. The number of
+@values must match the fields of the structure used to register @format.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <return-value transfer-ownership="none">
+        <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a span id to pass to gst_trace_span_end(), or
+%GST_TRACE_SPAN_ID_NONE if no tracer is listening for spans</doc>
+        <type name="TraceSpanId" c:type="GstTraceSpanId"/>
+      </return-value>
+      <parameters>
+        <parameter name="format" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a #GstTraceFormat</doc>
+          <type name="TraceFormat" c:type="GstTraceFormat*"/>
+        </parameter>
+        <parameter name="values" transfer-ownership="none" nullable="1" allow-none="1">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">positional values matching @format</doc>
+          <array zero-terminated="0" c:type="const GstTraceValue*">
+            <type name="TraceValue" c:type="GstTraceValue"/>
+          </array>
+        </parameter>
+      </parameters>
+    </function>
+    <function name="trace_span_end" c:identifier="gst_trace_span_end" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Emits a span end hook. Passing %GST_TRACE_SPAN_ID_NONE is allowed and
+is a no-op.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <return-value transfer-ownership="none">
+        <type name="none" c:type="void"/>
+      </return-value>
+      <parameters>
+        <parameter name="span_id" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a span id returned by gst_trace_span_begin()</doc>
+          <type name="TraceSpanId" c:type="GstTraceSpanId"/>
+        </parameter>
+      </parameters>
+    </function>
+    <function name="trace_span_end_and_clear" c:identifier="gst_trace_span_end_and_clear" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Ends the span pointed to by @span_id and resets it to
+%GST_TRACE_SPAN_ID_NONE. Safe to call when @span_id already holds
+%GST_TRACE_SPAN_ID_NONE. Intended for spans stored on long-lived state
+(struct fields) where the slot must be cleared after closing the span.</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gsttracer.h"/>
+      <return-value transfer-ownership="none">
+        <type name="none" c:type="void"/>
+      </return-value>
+      <parameters>
+        <parameter name="span_id" direction="inout" caller-allocates="0" transfer-ownership="full">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">a pointer to a #GstTraceSpanId; may not be %NULL</doc>
+          <type name="TraceSpanId" c:type="GstTraceSpanId*"/>
+        </parameter>
+      </parameters>
+    </function>
     <function name="tracing_get_active_tracers" c:identifier="gst_tracing_get_active_tracers" version="1.18">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttracerutils.c">Get a list of all active tracer objects owned by the tracing framework for
 the entirety of the run-time of the process or till gst_deinit() is called.</doc>
@@ -60319,13 +61577,6 @@ Use %NULL for @detail to register to all hooks.</doc>
           <type name="GObject.Callback" c:type="GCallback"/>
         </parameter>
       </parameters>
-    </function>
-    <function name="type_find_get_type" c:identifier="gst_type_find_get_type">
-      <attribute name="doc.skip" value="true"/>
-      <source-position filename="../subprojects/gstreamer/gst/gsttypefind.h"/>
-      <return-value transfer-ownership="none">
-        <type name="GType" c:type="GType"/>
-      </return-value>
     </function>
     <function name="type_find_register" c:identifier="gst_type_find_register" moved-to="TypeFind.register">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gsttypefind.c">Registers a new typefind function to be used for typefinding. After
@@ -62342,6 +63593,23 @@ Note that this means subtraction as in sets, not as in mathematics.</doc>
         </parameter>
       </parameters>
     </function-macro>
+    <function name="value_take_structure" c:identifier="gst_value_take_structure" version="1.30">
+      <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstvalue.c">Sets the contents of @value to @structure. Takes ownership of the structure</doc>
+      <source-position filename="../subprojects/gstreamer/gst/gstvalue.h"/>
+      <return-value transfer-ownership="none">
+        <type name="none" c:type="void"/>
+      </return-value>
+      <parameters>
+        <parameter name="value" transfer-ownership="none">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstvalue.c">a GValue initialized to GST_TYPE_STRUCTURE</doc>
+          <type name="GObject.Value" c:type="GValue*"/>
+        </parameter>
+        <parameter name="structure" transfer-ownership="full">
+          <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstvalue.c">the structure to set the value to</doc>
+          <type name="Structure" c:type="GstStructure*"/>
+        </parameter>
+      </parameters>
+    </function>
     <function name="value_union" c:identifier="gst_value_union">
       <doc xml:space="preserve" filename="../subprojects/gstreamer/gst/gstvalue.c">Creates a GValue corresponding to the union of @value1 and @value2.</doc>
       <source-position filename="../subprojects/gstreamer/gst/gstvalue.h"/>

@@ -42,6 +42,7 @@
 #include <stdio.h>
 #include <gst/base/gstbytereader.h>
 #include <gst/base/gstbytewriter.h>
+#include <gst/pbutils/codec-utils.h>
 #include <gst/pbutils/descriptions.h>
 #include <gst/pbutils/pbutils.h>
 #include <gst/audio/audio.h>
@@ -73,7 +74,8 @@ GST_DEBUG_CATEGORY_EXTERN (flvdemux_debug);
         video/x-vp6-flash; " "video/x-vp6-alpha; \
         video/x-h264, stream-format=avc;"
 
-#define FLV_ENHANCED_VIDEO_CAPS "video/x-h265, stream-format=(string)hvc1, alignment=(string)au;"
+#define FLV_ENHANCED_VIDEO_CAPS "video/x-h265, stream-format=(string)hvc1, alignment=(string)au; \
+        video/x-av1, stream-format=(string)obu-stream, alignment=(string)tu;"
 
 // The following three are non-standard but apparently used, see in ffmpeg
 
@@ -1944,7 +1946,7 @@ gst_flv_demux_parse_tag_audio (GstFlvDemux * demux, GstBuffer * buffer)
     track->need_discont = FALSE;
   }
 
-  demux->segment.position = GST_BUFFER_TIMESTAMP (outbuf);
+  demux->segment.position = GST_BUFFER_DTS_OR_PTS (outbuf);
 
   /* Do we need a newsegment event ? */
   if (G_UNLIKELY (track->need_segment)) {
@@ -2086,6 +2088,21 @@ gst_flv_demux_video_negotiate (GstFlvDemux * demux, guint32 codec_tag,
       caps = gst_caps_new_simple ("video/x-h265",
           "stream-format", G_TYPE_STRING, "hvc1",
           "alignment", G_TYPE_STRING, "au", NULL);
+      break;
+    case FLV_VIDEO_CODEC_AV1_AV01_FOURCC:
+      if (!track->codec_data) {
+        GST_DEBUG_OBJECT (demux, "don't have av1 codec data yet");
+        ret = TRUE;
+        goto done;
+      }
+      caps = gst_codec_utils_av1_create_caps_from_av1c (track->codec_data);
+      if (!caps) {
+        GST_WARNING_OBJECT (demux, "failed to parse av1 codec data");
+        goto beach;
+      }
+      gst_caps_set_simple (caps,
+          "stream-format", G_TYPE_STRING, "obu-stream",
+          "alignment", G_TYPE_STRING, "tu", NULL);
       break;
     default:
       GST_WARNING_OBJECT (demux, "unsupported video codec tag %u", codec_tag);
@@ -2677,7 +2694,7 @@ gst_flv_demux_parse_tag_video (GstFlvDemux * demux, GstBuffer * buffer)
     track->need_discont = FALSE;
   }
 
-  demux->segment.position = GST_BUFFER_TIMESTAMP (outbuf);
+  demux->segment.position = GST_BUFFER_DTS_OR_PTS (outbuf);
 
   /* Do we need a newsegment event ? */
   if (G_UNLIKELY (track->need_segment)) {
@@ -2707,8 +2724,8 @@ gst_flv_demux_parse_tag_video (GstFlvDemux * demux, GstBuffer * buffer)
   if (!GST_CLOCK_TIME_IS_VALID (track->start)) {
     track->start = GST_BUFFER_TIMESTAMP (outbuf);
   }
-  if (!GST_CLOCK_TIME_IS_VALID (demux->audio_first_ts)) {
-    demux->video_first_ts = GST_BUFFER_TIMESTAMP (outbuf);
+  if (!GST_CLOCK_TIME_IS_VALID (demux->video_first_ts)) {
+    demux->video_first_ts = GST_BUFFER_PTS (outbuf);
   }
 
   if (G_UNLIKELY (!demux->streams_aware && !demux->no_more_pads
@@ -4144,7 +4161,8 @@ exit:
     gst_pad_pause_task (demux->sinkpad);
   } else {
     gst_pad_start_task (demux->sinkpad,
-        (GstTaskFunction) gst_flv_demux_loop, demux->sinkpad, NULL);
+        (GstTaskFunction) gst_flv_demux_loop, gst_object_ref (demux->sinkpad),
+        gst_object_unref);
   }
 
   GST_PAD_STREAM_UNLOCK (demux->sinkpad);
@@ -4211,7 +4229,7 @@ gst_flv_demux_sink_activate_mode (GstPad * sinkpad, GstObject * parent,
         demux->random_access = TRUE;
         demux->segment_seqnum = gst_util_seqnum_next ();
         res = gst_pad_start_task (sinkpad, (GstTaskFunction) gst_flv_demux_loop,
-            sinkpad, NULL);
+            gst_object_ref (sinkpad), gst_object_unref);
       } else {
         demux->random_access = FALSE;
         res = gst_pad_stop_task (sinkpad);

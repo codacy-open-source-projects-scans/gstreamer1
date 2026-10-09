@@ -117,7 +117,7 @@ typedef struct _GstWlWindowPrivate
   struct wl_callback *commit_callback;
 
   /* wl_buffer cache */
-  GMutex buffers_mutex;
+  GRecMutex buffers_mutex;
   GHashTable *buffers;
   gboolean shutting_down;
 } GstWlWindowPrivate;
@@ -248,7 +248,7 @@ gst_wl_window_init (GstWlWindow * self)
   g_mutex_init (&priv->window_lock);
   priv->buffers = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL,
       (GDestroyNotify) gst_object_unref);
-  g_mutex_init (&priv->buffers_mutex);
+  g_rec_mutex_init (&priv->buffers_mutex);
 }
 
 static void
@@ -259,10 +259,10 @@ gstmemory_disposed (GstWlWindow * self, gpointer gstmem)
 
   GST_DEBUG_OBJECT (self, "Uncaching disposed GstMemory %p.", gstmem);
 
-  g_mutex_lock (&priv->buffers_mutex);
+  g_rec_mutex_lock (&priv->buffers_mutex);
   wlbuffer = g_hash_table_lookup (priv->buffers, gstmem);
   g_hash_table_steal (priv->buffers, gstmem);
-  g_mutex_unlock (&priv->buffers_mutex);
+  g_rec_mutex_unlock (&priv->buffers_mutex);
 
   gst_clear_object (&wlbuffer);
 }
@@ -289,14 +289,14 @@ gst_wl_window_finalize (GObject * gobject)
 
   /* to avoid buffers being unregistered from another thread
    * at the same time */
-  g_mutex_lock (&priv->buffers_mutex);
+  g_rec_mutex_lock (&priv->buffers_mutex);
   priv->shutting_down = TRUE;
   g_hash_table_foreach (priv->buffers, (GHFunc) gst_wl_buffer_weak_unref, self);
-  g_mutex_unlock (&priv->buffers_mutex);
+  g_rec_mutex_unlock (&priv->buffers_mutex);
 
   g_hash_table_remove_all (priv->buffers);
   g_hash_table_unref (priv->buffers);
-  g_mutex_clear (&priv->buffers_mutex);
+  g_rec_mutex_clear (&priv->buffers_mutex);
 
   if (priv->pool) {
     gst_buffer_pool_set_active (priv->pool, FALSE);
@@ -526,7 +526,10 @@ gst_wl_window_new_toplevel_full (GstWlDisplay * display,
     struct wl_output *wl_output = NULL;
     if (output_name) {
       output = gst_wl_display_get_output_by_name (priv->display, output_name);
-      wl_output = gst_wl_output_get_wl_output (output);
+      if (output)
+        wl_output = gst_wl_output_get_wl_output (output);
+      else
+        GST_WARNING_OBJECT (self, "Output '%s' not found", output_name);
     }
 
     zwp_fullscreen_shell_v1_present_surface (fullscreen_shell,
@@ -1043,7 +1046,6 @@ gst_wl_window_import_buffer (GstWlWindow * self, GstBuffer * buffer,
 {
   GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
   GstWlBuffer *wlbuffer;
-  GstMemory *mem;
   struct wl_buffer *wbuf = NULL;
   GstFlowReturn ret = GST_FLOW_OK;
 
@@ -1056,8 +1058,6 @@ gst_wl_window_import_buffer (GstWlWindow * self, GstBuffer * buffer,
     *to_render = wlbuffer;
     return GST_FLOW_OK;
   }
-
-  mem = gst_buffer_peek_memory (buffer, 0);
 
   GST_LOG_OBJECT (self,
       "buffer %" GST_PTR_FORMAT " does not have a wl_buffer from our "
@@ -1120,9 +1120,8 @@ gst_wl_window_import_buffer (GstWlWindow * self, GstBuffer * buffer,
 handle_shm:
   if (!wbuf && gst_wl_display_check_format_for_shm (priv->display,
           &priv->src_video_info)) {
-    if (gst_buffer_n_memory (buffer) == 1 && gst_is_fd_memory (mem))
-      wbuf = gst_wl_shm_memory_construct_wl_buffer (mem, priv->display,
-          &priv->src_video_info);
+    wbuf = gst_wl_shm_memory_construct_wl_buffer (buffer, priv->display,
+        &priv->src_video_info);
 
     if (!wbuf) {
       GstBuffer *pool_buf;
@@ -1141,8 +1140,7 @@ handle_shm:
       wlbuffer = gst_buffer_get_wl_buffer (self, pool_buf);
 
       if (G_UNLIKELY (!wlbuffer)) {
-        mem = gst_buffer_peek_memory (pool_buf, 0);
-        wbuf = gst_wl_shm_memory_construct_wl_buffer (mem, priv->display,
+        wbuf = gst_wl_shm_memory_construct_wl_buffer (pool_buf, priv->display,
             &priv->src_video_info);
 
         if (G_UNLIKELY (!wbuf)) {
@@ -1203,11 +1201,11 @@ gst_wl_window_clear_buffers (GstWlWindow * self)
   GList *buffers;
 
   GST_DEBUG_OBJECT (self, "Removing all cached wl_buffer");
-  g_mutex_lock (&priv->buffers_mutex);
+  g_rec_mutex_lock (&priv->buffers_mutex);
   g_hash_table_foreach (priv->buffers, (GHFunc) gst_wl_buffer_weak_unref, self);
   buffers = g_hash_table_get_values (priv->buffers);
   g_hash_table_steal_all (priv->buffers);
-  g_mutex_unlock (&priv->buffers_mutex);
+  g_rec_mutex_unlock (&priv->buffers_mutex);
 
   g_list_free_full (buffers, gst_object_unref);
 }
@@ -1291,8 +1289,8 @@ gst_wl_window_render (GstWlWindow * self, GstBuffer * buffer)
 
   if (!priv->next_buffer) {
     priv->next_buffer = to_render;
-    priv->commit_callback =
-        gst_wl_display_sync (priv->display, &commit_listener, self);
+    gst_wl_display_sync_store (priv->display, &priv->commit_callback,
+        &commit_listener, self);
     wl_display_flush (gst_wl_display_get_display (priv->display));
   } else {
     priv->staged_buffer = to_render;
@@ -1321,6 +1319,8 @@ gboolean
 gst_wl_window_flush (GstWlWindow * self)
 {
   GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
+
+  gst_wl_display_callback_destroy (priv->display, &priv->frame_callback);
 
   g_mutex_lock (&priv->window_lock);
   if (priv->staged_buffer) {
@@ -1389,9 +1389,7 @@ gst_wl_window_update_borders (GstWlWindow * self)
     buf = gst_buffer_new_allocate (alloc, info.size, NULL);
     gst_buffer_memset (buf, 0, 0, info.size);
 
-    wlbuf =
-        gst_wl_shm_memory_construct_wl_buffer (gst_buffer_peek_memory (buf, 0),
-        priv->display, &info);
+    wlbuf = gst_wl_shm_memory_construct_wl_buffer (buf, priv->display, &info);
 
     g_object_unref (alloc);
   }
@@ -1868,12 +1866,12 @@ gst_wl_window_register_buffer (GstWlWindow * self, gpointer gstmem,
   GST_TRACE_OBJECT (self, "registering GstWlBuffer %p to GstMem %p",
       wlbuffer, gstmem);
 
-  g_mutex_lock (&priv->buffers_mutex);
+  g_rec_mutex_lock (&priv->buffers_mutex);
   gst_object_ref (wlbuffer);
   g_hash_table_replace (priv->buffers, gstmem, wlbuffer);
   gst_mini_object_weak_ref (GST_MINI_OBJECT (gstmem),
       (GstMiniObjectNotify) gstmemory_disposed, self);
-  g_mutex_unlock (&priv->buffers_mutex);
+  g_rec_mutex_unlock (&priv->buffers_mutex);
 }
 
 gpointer
@@ -1882,11 +1880,11 @@ gst_wl_window_lookup_buffer (GstWlWindow * self, gpointer gstmem)
   GstWlWindowPrivate *priv = gst_wl_window_get_instance_private (self);
   gpointer wlbuffer;
 
-  g_mutex_lock (&priv->buffers_mutex);
+  g_rec_mutex_lock (&priv->buffers_mutex);
   wlbuffer = g_hash_table_lookup (priv->buffers, gstmem);
   if (wlbuffer)
     gst_object_ref (wlbuffer);
-  g_mutex_unlock (&priv->buffers_mutex);
+  g_rec_mutex_unlock (&priv->buffers_mutex);
 
   GST_DEBUG_OBJECT (self, "Lookup up %p and fourn %p", gstmem, wlbuffer);
   return wlbuffer;
@@ -1899,11 +1897,11 @@ gst_wl_window_unregister_buffer (GstWlWindow * self, gpointer gstmem)
 
   GST_TRACE_OBJECT (self, "unregistering GstWlBuffer owned by %p", gstmem);
 
-  g_mutex_lock (&priv->buffers_mutex);
+  g_rec_mutex_lock (&priv->buffers_mutex);
   if (g_hash_table_contains (priv->buffers, gstmem)) {
     gst_mini_object_weak_unref (GST_MINI_OBJECT (gstmem),
         (GstMiniObjectNotify) gstmemory_disposed, self);
     g_hash_table_remove (priv->buffers, gstmem);
   }
-  g_mutex_unlock (&priv->buffers_mutex);
+  g_rec_mutex_unlock (&priv->buffers_mutex);
 }

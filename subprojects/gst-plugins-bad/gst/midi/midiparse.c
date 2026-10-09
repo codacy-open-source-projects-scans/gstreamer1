@@ -99,7 +99,7 @@ static gboolean gst_midi_parse_activate (GstPad * pad, GstObject * parent);
 static gboolean gst_midi_parse_activatemode (GstPad * pad, GstObject * parent,
     GstPadMode mode, gboolean active);
 
-static void gst_midi_parse_loop (GstPad * sinkpad);
+static void gst_midi_parse_loop (GstMidiParse * midiparse);
 static GstFlowReturn gst_midi_parse_chain (GstPad * sinkpad, GstObject * parent,
     GstBuffer * buffer);
 
@@ -373,7 +373,8 @@ gst_midi_parse_perform_seek (GstMidiParse * midiparse, GstEvent * event)
    * the FLUSH_START event we pushed out. */
   tres =
       gst_pad_start_task (midiparse->sinkpad,
-      (GstTaskFunction) gst_midi_parse_loop, midiparse->sinkpad, NULL);
+      (GstTaskFunction) gst_midi_parse_loop,
+      gst_object_ref (midiparse), gst_object_unref);
   if (res && !tres)
     res = FALSE;
 
@@ -454,7 +455,7 @@ gst_midi_parse_activatemode (GstPad * pad, GstObject * parent,
     case GST_PAD_MODE_PULL:
       if (active) {
         res = gst_pad_start_task (pad, (GstTaskFunction) gst_midi_parse_loop,
-            pad, NULL);
+            gst_object_ref (parent), gst_object_unref);
       } else {
         res = gst_pad_stop_task (pad);
       }
@@ -1384,7 +1385,8 @@ gst_midi_parse_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
       midiparse->state = GST_MIDI_PARSE_STATE_PARSE;
       /* now start the parsing task */
       res = gst_pad_start_task (midiparse->sinkpad,
-          (GstTaskFunction) gst_midi_parse_loop, midiparse->sinkpad, NULL);
+          (GstTaskFunction) gst_midi_parse_loop,
+          gst_object_ref (midiparse), gst_object_unref);
       /* don't forward the event */
       gst_event_unref (event);
       break;
@@ -1416,10 +1418,10 @@ gst_midi_parse_chain (GstPad * sinkpad, GstObject * parent, GstBuffer * buffer)
 }
 
 static void
-gst_midi_parse_loop (GstPad * sinkpad)
+gst_midi_parse_loop (GstMidiParse * midiparse)
 {
-  GstMidiParse *midiparse = GST_MIDI_PARSE (GST_PAD_PARENT (sinkpad));
   GstFlowReturn ret;
+  GstPad *sinkpad = midiparse->sinkpad;
 
   switch (midiparse->state) {
     case GST_MIDI_PARSE_STATE_LOAD:

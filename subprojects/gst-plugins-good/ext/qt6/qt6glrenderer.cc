@@ -206,6 +206,7 @@ GstQt6QuickRenderer::GstQt6QuickRenderer()
       gl_allocator(NULL),
       gl_params(NULL),
       gl_mem(NULL),
+      previous_gl_mem(NULL),
       m_sharedRenderData(NULL),
       m_needsGenerateCallback(NULL),
       m_needsGenerateCallbackData(NULL),
@@ -489,15 +490,11 @@ void GstQt6QuickRenderer::stopGL ()
     /* Invalidating the renderer will cause Qt6 to clear the current qt-tracked OpenGL context.
      * We however may be using the QOpenGLContext for multiple qml6gloverlay
      * elements so need to recurrent it */
-    if (current_qt_context)
-      g_assert (current_qt_context == m_sharedRenderData->m_context);
-    else
+    if (current_qt_context != m_sharedRenderData->m_context)
       m_sharedRenderData->m_context->makeCurrent(m_sharedRenderData->m_surface);
 
     if (m_renderControl)
         m_renderControl->invalidate();
-
-    GST_ERROR ("%p %p", this, QOpenGLContext::currentContext());
 
     QEventLoop loop;
     if (loop.processEvents())
@@ -509,9 +506,6 @@ void GstQt6QuickRenderer::stopAfterGL ()
     GST_DEBUG ("%p stop QOpenGLContext curent: %p stored: %p", this,
         QOpenGLContext::currentContext(), m_sharedRenderData->m_context);
     g_assert (QOpenGLContext::currentContext() == nullptr);
-
-    if (!m_sharedRenderData->m_context->makeCurrent(m_sharedRenderData->m_surface))
-      g_warn_if_reached();
 
     if (m_sharedRenderData)
         shared_render_data_unref (m_sharedRenderData);
@@ -525,6 +519,9 @@ void GstQt6QuickRenderer::stopAfterGL ()
 
 void GstQt6QuickRenderer::cleanup()
 {
+    if (previous_gl_mem)
+        gst_memory_unref (GST_MEMORY_CAST(previous_gl_mem));
+    previous_gl_mem = NULL;
     if (gl_context)
         gst_gl_context_thread_add (gl_context,
             (GstGLContextThreadFunc) GstQt6QuickRenderer::stop_c, this);
@@ -577,6 +574,7 @@ void
 GstQt6QuickRenderer::renderGstGL ()
 {
     const GstGLFuncs *gl = gl_context->gl_vtable;
+    GstMapInfo map_info = GST_MAP_INFO_INIT;
 
     GST_TRACE ("%p current QOpenGLContext %p", this,
         QOpenGLContext::currentContext());
@@ -602,6 +600,12 @@ GstQt6QuickRenderer::renderGstGL ()
 
       gl_mem = (GstGLMemory *) gst_gl_base_memory_alloc (gl_allocator, gl_params);
     }
+    if (!gst_memory_map(GST_MEMORY_CAST(gl_mem), &map_info, (GstMapFlags) (GST_MAP_WRITE | GST_MAP_GL))) {
+      GST_ERROR ("%p failed to map GL texture", this);
+      gst_memory_unref (GST_MEMORY_CAST (gl_mem));
+      gl_mem = NULL;
+      return;
+    }
     m_quickWindow->setRenderTarget(QQuickRenderTarget::fromOpenGLTexture(gst_gl_memory_get_texture_id (gl_mem), gl_memory_get_QSize(gl_mem)));
 
     m_renderControl->beginFrame();
@@ -613,6 +617,11 @@ GstQt6QuickRenderer::renderGstGL ()
 
     m_renderControl->render();
     m_renderControl->endFrame();
+    gst_memory_unmap (GST_MEMORY_CAST (gl_mem), &map_info);
+
+    if (previous_gl_mem)
+      gst_memory_unref (GST_MEMORY_CAST (previous_gl_mem));
+    previous_gl_mem = gst_memory_ref (GST_MEMORY_CAST(gl_mem));
 
     QQuickOpenGLUtils::resetOpenGLState ();
     /* Qt doesn't seem to reset this, breaking glimagesink */

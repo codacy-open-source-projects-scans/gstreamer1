@@ -31,12 +31,12 @@ plugin_init (GstPlugin * plugin)
 {
   gboolean ret = FALSE;
 
+  gst_plugin_set_static_features_flag (plugin);
+
   ret |= GST_ELEMENT_REGISTER (rtpac3depay, plugin);
   ret |= GST_ELEMENT_REGISTER (rtpac3pay, plugin);
   ret |= GST_ELEMENT_REGISTER (rtpbvdepay, plugin);
   ret |= GST_ELEMENT_REGISTER (rtpbvpay, plugin);
-  ret |= GST_ELEMENT_REGISTER (rtpceltdepay, plugin);
-  ret |= GST_ELEMENT_REGISTER (rtpceltpay, plugin);
   ret |= GST_ELEMENT_REGISTER (rtpdvdepay, plugin);
   ret |= GST_ELEMENT_REGISTER (rtpdvpay, plugin);
   ret |= GST_ELEMENT_REGISTER (rtpgstdepay, plugin);

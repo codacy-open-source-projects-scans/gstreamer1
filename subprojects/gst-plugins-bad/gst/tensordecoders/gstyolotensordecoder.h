@@ -55,6 +55,7 @@ typedef struct _BBox
   gint y;
   guint w;
   guint h;
+  gfloat r;
 } BBox;
 
 struct _GstYoloTensorDecoder
@@ -79,6 +80,8 @@ struct _GstYoloTensorDecoder
   gchar *label_file;
   /* Labels */
   GArray *labels;
+  /* TRUE if bbox coordinates are normalized (0-1), FALSE if in pixel space */
+  gboolean normalized_coords;
 };
 
 struct _GstYoloTensorDecoderClass
@@ -87,8 +90,10 @@ struct _GstYoloTensorDecoderClass
 
   void (*object_found) (GstYoloTensorDecoder *self,
       GstAnalyticsRelationMeta *rmeta, BBox *bb, gfloat confidence,
-      GQuark class_quark, const gfloat *candidate_masks, gsize offset,
+      GQuark class_quark, const gfloat *candidate_extras, gsize offset,
       guint count);
+
+  gfloat (*iou) (GstYoloTensorDecoder *self, BBox *bb1, BBox *bb2);
 };
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GstYoloTensorDecoder, g_object_unref)
@@ -98,6 +103,6 @@ GST_ELEMENT_REGISTER_DECLARE (yolo_tensor_decoder)
 gboolean
 gst_yolo_tensor_decoder_decode_f32 (GstYoloTensorDecoder * self,
     GstAnalyticsRelationMeta * rmeta, const GstTensor * detections_tensor,
-    guint num_masks);
+    guint num_extras);
 
 #endif /* __GST_YOLO_TENSOR_DECODER_H__ */

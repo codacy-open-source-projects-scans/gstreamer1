@@ -33,8 +33,10 @@
 #include <gst/video/video.h>
 #include <gst/video/video-sei.h>
 #include <gst/audio/gstaudiometa.h>
+#include <gst/audio/audio.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <glib/gprintf.h>
 
 #include "../../gst/validate/gst-validate-utils.h"
@@ -44,6 +46,12 @@ G_LOCK_DEFINE (checksums_as_id_lock);
 static GstStructure *checksums_as_id = NULL;
 
 #define CONSTIFY(strv) ((const gchar * const *) strv)
+
+static void format_time (gchar * dest_str, guint64 time);
+static gchar *validate_flow_format_segment (const GstSegment * segment,
+    gchar ** logged_fields, gchar ** ignored_fields);
+static gchar *validate_flow_format_caps (const GstCaps * caps,
+    gchar ** wanted_fields, gchar ** ignored_fields);
 
 static gboolean
 use_field (const gchar * field, gchar ** logged, gchar ** ignored)
@@ -282,13 +290,26 @@ format_sei_uuid (gchar * dest_str, const guint8 * uuid)
       uuid[12], uuid[13], uuid[14], uuid[15]);
 }
 
+static gboolean
+must_serialize_meta (const ValidateFlowOverride * flow, GstMeta * meta)
+{
+  const gchar *name = g_type_name (meta->info->type);
+  const gboolean is_serializable = meta->info->serialize_func != NULL;
+  const gchar *const *req_metas = CONSTIFY (flow->extra_serialized_metas);
+  const gboolean requested = req_metas && g_strv_contains (req_metas, name);
+  const gboolean requested_all = flow->extra_serialized_metas_all;
+
+  return is_serializable && (requested_all || requested);
+}
+
 /* Returns a newly-allocated string describing the metas on this buffer, or NULL */
 static gchar *
-buffer_get_meta_string (GstBuffer * buffer, gchar ** logged_sei_uuids)
+buffer_get_meta_string (const ValidateFlowOverride * flow, GstBuffer * buffer)
 {
   gpointer state = NULL;
   GstMeta *meta;
   GString *s = NULL;
+  gchar **logged_sei_uuids = flow->logged_unregistered_sei_uuids;
 
   while ((meta = gst_buffer_iterate_meta (buffer, &state))) {
     const gchar *desc = g_type_name (meta->info->type);
@@ -319,12 +340,35 @@ buffer_get_meta_string (GstBuffer * buffer, gchar ** logged_sei_uuids)
     else
       g_string_append (s, ", ");
 
-    if (meta->info->api == GST_VIDEO_REGION_OF_INTEREST_META_API_TYPE) {
+    if (must_serialize_meta (flow, meta)) {
+      g_string_append (s, desc);
+
+      // Append Base64 serialized metadata if possible
+      GByteArray *ba = g_byte_array_new ();
+      gboolean serialized = gst_meta_serialize_simple (meta, ba);
+      if (serialized && ba->data) {
+        g_string_append (s, "(");
+        gchar *serialized_meta = g_base64_encode (ba->data, ba->len);
+        g_string_append (s, serialized_meta);
+        g_free (serialized_meta);
+        g_string_append (s, ")");
+      }
+      g_byte_array_free (ba, TRUE);
+    } else if (meta->info->api == GST_VIDEO_REGION_OF_INTEREST_META_API_TYPE) {
       GstVideoRegionOfInterestMeta *roi = (GstVideoRegionOfInterestMeta *) meta;
       g_string_append_printf (s,
           "GstVideoRegionOfInterestMeta[x=%" G_GUINT32_FORMAT ", y=%"
           G_GUINT32_FORMAT ", width=%" G_GUINT32_FORMAT ", height=%"
           G_GUINT32_FORMAT "]", roi->x, roi->y, roi->w, roi->h);
+
+    } else if (meta->info->api == GST_AUDIO_CLIPPING_META_API_TYPE) {
+      GstAudioClippingMeta *cmeta = (GstAudioClippingMeta *) meta;
+      /* GST_FORMAT_DEFAULT means samples for audio */
+      const gchar *format = cmeta->format == GST_FORMAT_DEFAULT ?
+          "samples" : gst_format_get_name (cmeta->format);
+      g_string_append_printf (s,
+          "GstAudioClippingMeta[format=%s, start=%" G_GUINT64_FORMAT ", end=%"
+          G_GUINT64_FORMAT "]", format, cmeta->start, cmeta->end);
 
     } else if (meta->info->api == GST_AUDIO_META_API_TYPE) {
       GstAudioMeta *audio_meta = (GstAudioMeta *) meta;
@@ -399,15 +443,116 @@ buffer_get_meta_string (GstBuffer * buffer, gchar ** logged_sei_uuids)
   return (s != NULL) ? g_string_free (s, FALSE) : NULL;
 }
 
+/* Dominant frequency (Hz) of @buffer's first audio channel, or -1 if @caps is
+ * not interleaved raw audio in a supported format. */
+static gint
+buffer_dominant_frequency (GstBuffer * buffer, GstCaps * caps)
+{
+  GstAudioInfo info;
+  GstMapInfo map;
+  gint rate, channels, bpf, freq = -1;
+  gsize nframes, i, k, kmin, kmax, best_k = 0;
+  gdouble mean = 0, *mono = NULL, best_mag = -1;
+
+  if (!caps || !gst_audio_info_from_caps (&info, caps))
+    return -1;
+  if (GST_AUDIO_INFO_LAYOUT (&info) != GST_AUDIO_LAYOUT_INTERLEAVED)
+    return -1;
+
+  rate = GST_AUDIO_INFO_RATE (&info);
+  channels = GST_AUDIO_INFO_CHANNELS (&info);
+  bpf = GST_AUDIO_INFO_BPF (&info);
+  if (rate <= 0 || channels <= 0 || bpf <= 0)
+    return -1;
+
+  if (!gst_buffer_map (buffer, &map, GST_MAP_READ))
+    return -1;
+  nframes = map.size / bpf;
+  if (nframes < 8) {
+    gst_buffer_unmap (buffer, &map);
+    return -1;
+  }
+
+  mono = g_new (gdouble, nframes);
+#define READ_MONO(TYPE, SCALE) G_STMT_START {                           \
+    const TYPE *d = (const TYPE *) map.data;                            \
+    for (i = 0; i < nframes; i++)                                       \
+      mono[i] = (gdouble) d[i * channels] / (SCALE);                    \
+  } G_STMT_END
+
+  switch (GST_AUDIO_INFO_FORMAT (&info)) {
+    case GST_AUDIO_FORMAT_S16LE:
+      READ_MONO (gint16, 32768.0);
+      break;
+    case GST_AUDIO_FORMAT_S32LE:
+      READ_MONO (gint32, 2147483648.0);
+      break;
+    case GST_AUDIO_FORMAT_F32LE:
+      READ_MONO (gfloat, 1.0);
+      break;
+    case GST_AUDIO_FORMAT_F64LE:
+      READ_MONO (gdouble, 1.0);
+      break;
+    default:
+      g_free (mono);
+      gst_buffer_unmap (buffer, &map);
+      return -1;
+  }
+#undef READ_MONO
+  gst_buffer_unmap (buffer, &map);
+
+  /* remove DC so silence/offset does not bias the correlation */
+  for (i = 0; i < nframes; i++)
+    mean += mono[i];
+  mean /= nframes;
+  for (i = 0; i < nframes; i++)
+    mono[i] -= mean;
+
+  /* Find the strongest DFT bin over ~50 Hz to ~4 kHz with the Goertzel
+   * algorithm. The bin magnitude is phase-independent, so the peak bin - and
+   * thus the reported frequency - is identical for every buffer of the same
+   * tone, unlike a zero-crossing or raw-autocorrelation estimate. */
+  kmin = MAX (1, (gsize) (50.0 * nframes / rate));
+  kmax = MIN (nframes / 2 - 1, (gsize) (4000.0 * nframes / rate));
+  for (k = kmin; k <= kmax; k++) {
+    gdouble omega = 2.0 * G_PI * k / nframes;
+    gdouble coeff = 2.0 * cos (omega);
+    gdouble s0 = 0, s1 = 0, s2 = 0, mag;
+
+    for (i = 0; i < nframes; i++) {
+      s2 = s1;
+      s1 = s0;
+      s0 = mono[i] + coeff * s1 - s2;
+    }
+    mag = s0 * s0 + s1 * s1 - coeff * s0 * s1;
+    if (mag > best_mag) {
+      best_mag = mag;
+      best_k = k;
+    }
+  }
+
+  g_free (mono);
+
+  /* report the peak bin's centre frequency */
+  if (best_k > 0)
+    freq = (gint) round ((gdouble) best_k * rate / nframes);
+
+  return freq;
+}
+
 gchar *
-validate_flow_format_buffer (GstBuffer * buffer, gint checksum_type,
-    GstStructure * logged_fields_struct, GstStructure * ignored_fields_struct,
-    gchar ** logged_sei_uuids)
+validate_flow_format_buffer (const ValidateFlowOverride * flow,
+    GstBuffer * buffer)
 {
   gchar *flags_str, *meta_str, *buffer_str;
   gchar *buffer_parts[7];
   int buffer_parts_index = 0;
   GstMapInfo map;
+  gint checksum_type = flow->checksum_type;
+  GstCaps *caps = flow->current_caps;
+  GstStructure *logged_fields_struct = flow->logged_fields;
+  GstStructure *ignored_fields_struct = flow->ignored_fields;
+
   gchar **logged_fields =
       logged_fields_struct ? gst_validate_utils_get_strv (logged_fields_struct,
       "buffer") : NULL;
@@ -415,7 +560,19 @@ validate_flow_format_buffer (GstBuffer * buffer, gint checksum_type,
       ignored_fields_struct ?
       gst_validate_utils_get_strv (ignored_fields_struct, "buffer") : NULL;
 
-  if (checksum_type != CHECKSUM_TYPE_NONE || (logged_fields
+  if (checksum_type == CHECKSUM_TYPE_DOMINANT_FREQUENCY) {
+    gint freq = buffer_dominant_frequency (buffer, caps);
+
+    /* NULL tells the caller the buffer is not interleaved raw audio in a
+     * supported format, so it can report the misconfiguration. */
+    if (freq < 0) {
+      g_strfreev (logged_fields);
+      g_strfreev (ignored_fields);
+      return NULL;
+    }
+    buffer_parts[buffer_parts_index++] =
+        g_strdup_printf ("dominant-frequency=%d", freq);
+  } else if (checksum_type != CHECKSUM_TYPE_NONE || (logged_fields
           && g_strv_contains (CONSTIFY (logged_fields), "checksum"))) {
     if (!gst_buffer_map (buffer, &map, GST_MAP_READ)) {
       GST_ERROR ("Buffer could not be mapped.");
@@ -495,7 +652,7 @@ validate_flow_format_buffer (GstBuffer * buffer, gint checksum_type,
         g_strdup_printf ("flags=%s", flags_str);
   }
 
-  meta_str = buffer_get_meta_string (buffer, logged_sei_uuids);
+  meta_str = buffer_get_meta_string (flow, buffer);
   if (meta_str && use_field ("meta", logged_fields, ignored_fields))
     buffer_parts[buffer_parts_index++] = g_strdup_printf ("meta=%s", meta_str);
 
@@ -515,19 +672,21 @@ validate_flow_format_buffer (GstBuffer * buffer, gint checksum_type,
 }
 
 gchar *
-validate_flow_format_event (GstEvent * event,
-    const gchar * const *caps_properties,
-    GstStructure * logged_fields_struct,
-    GstStructure * ignored_fields_struct,
-    const gchar * const *ignored_event_types,
-    const gchar * const *logged_event_types,
-    const gchar * const *logged_upstream_event_types)
+validate_flow_format_event (const ValidateFlowOverride * flow, GstEvent * event)
 {
   const gchar *event_type;
   gchar *structure_string;
   gchar *event_string;
   gchar **ignored_fields;
   gchar **logged_fields;
+  gchar **caps_properties = flow->caps_properties;
+  GstStructure *logged_fields_struct = flow->logged_fields;
+  GstStructure *ignored_fields_struct = flow->ignored_fields;
+  const gchar *const *ignored_event_types =
+      CONSTIFY (flow->ignored_event_types);
+  const gchar *const *logged_event_types = CONSTIFY (flow->logged_event_types);
+  const gchar *const *logged_upstream_event_types =
+      CONSTIFY (flow->logged_upstream_event_types);
 
   event_type = gst_event_type_get_name (GST_EVENT_TYPE (event));
 

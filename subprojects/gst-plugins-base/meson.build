@@ -1,8 +1,9 @@
 project('gst-plugins-base', 'c',
-  version : '1.29.1.1',
+  version : '1.29.2.1',
   meson_version : '>= 1.4',
   default_options : [ 'warning_level=1',
-                      'buildtype=debugoptimized' ])
+                      'buildtype=debugoptimized',
+                      'c_std=gnu11,c11' ])
 
 gst_version = meson.project_version()
 version_arr = gst_version.split('.')
@@ -70,7 +71,10 @@ if cc.get_id() == 'msvc'
       '/wd4146', # unary minus on unsigned (beware INT_MIN)
       '/wd4244', # lossy type conversion (e.g. double -> int)
       '/wd4305', # truncating type conversion (e.g. double -> float)
-      cc.get_supported_arguments(['/utf-8']), # set the input encoding to utf-8
+      cc.get_supported_arguments([
+        '/utf-8', # set the input encoding to utf-8
+        '/Zc:preprocessor', # enable preprocessor conformance mode (disable legacy preprocessor)
+      ]),
   ]
 
   if gst_version_is_dev
@@ -162,6 +166,8 @@ host_defines = [
   [ 'hppa', 'HAVE_CPU_HPPA' ],
   [ 'm68k', 'HAVE_CPU_M68K' ],
   [ 's390', 'HAVE_CPU_S390' ],
+  [ 'riscv32', 'HAVE_CPU_RISCV32' ],
+  [ 'riscv64', 'HAVE_CPU_RISCV64' ],
 ]
 foreach h : host_defines
   if h.get(0) == host_machine.cpu_family()
@@ -342,7 +348,7 @@ endif
 gmodule_dep = dependency('gmodule-no-export-2.0')
 
 # some of the examples can use gdk-pixbuf and GTK+3
-gdk_pixbuf_dep = dependency('gdk-pixbuf-2.0', required : get_option('examples'))
+gdk_pixbuf_dep = dependency('gdk-pixbuf-2.0', required : get_option('examples'), default_options: {'man': false, 'tests': false})
 gtk_dep = dependency('gtk+-3.0', version : '>= 3.10', required : get_option('examples'))
 # TODO: https://github.com/mesonbuild/meson/issues/3941
 if not get_option('x11').disabled()
@@ -463,6 +469,25 @@ int32x4_t testfunc(int16_t *a, int16_t *b) {
   endif
 endif
 
+have_rvv = false
+rvv_args = ''
+if host_machine.cpu_family() == 'riscv64'
+  rvv_args = '-march=rv64gcv'
+  have_rvv = cc.compiles('''
+#include <riscv_vector.h>
+int testfunc(int16_t *a, int16_t *b, int n) {
+  size_t vl = __riscv_vsetvl_e16m4(n);
+  vint16m4_t va = __riscv_vle16_v_i16m4(a, vl);
+  vint16m4_t vb = __riscv_vle16_v_i16m4(b, vl);
+  vint32m8_t prod = __riscv_vwmul_vv_i32m8(va, vb, vl);
+  return 0;
+}
+''', args : rvv_args, name : 'RVV support')
+  if have_rvv
+    core_conf.set('HAVE_RISCV_RVV', true)
+  endif
+endif
+
 # Disable compiler warnings for unused variables and args if gst debug system is disabled
 if gst_dep.type_name() == 'internal'
   gst_proj = subproject('gstreamer')
@@ -508,7 +533,7 @@ gnome = import('gnome')
 build_gir = gir.found() and (not meson.is_cross_build() or get_option('introspection').enabled())
 gir_init_section = [ '--add-init-section=extern void gst_init(gint*,gchar**);' + \
     'g_setenv("GST_REGISTRY_DISABLE", "yes", TRUE);' + \
-    'g_setenv("GST_REGISTRY_1.0", "@0@", TRUE);'.format(meson.current_build_dir() + '/gir_empty_registry.reg') + \
+    'g_setenv("GST_REGISTRY_1_0", "@0@", TRUE);'.format(meson.current_build_dir() + '/gir_empty_registry.reg') + \
     'g_setenv("GST_PLUGIN_PATH_1_0", "", TRUE);' + \
     'g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);' + \
     'g_setenv("GST_TRACERS", "", TRUE);' + \

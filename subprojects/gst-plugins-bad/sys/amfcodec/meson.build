@@ -3,6 +3,8 @@ amf_sources = [
   'gstamfh264enc.cpp',
   'gstamfh265enc.cpp',
   'gstamfav1enc.cpp',
+  'gstamfbasefilter.cpp',
+  'gstamfd3dcommon.cpp',
   'gstamfutils.cpp',
   'plugin.cpp',
 ]
@@ -13,8 +15,16 @@ amf_headers = [
   'gstamfh265enc.h',
   'gstamfh264enc.h',
   'gstamfav1enc.h',
-  'gstamfplatform.h',
+  'gstamfbasefilter.h',
+  'gstamfd3dcommon.h',
 ]
+
+if host_system == 'windows'
+  amf_sources += 'gstamfhqscaler.cpp'
+  amf_headers += 'gstamfhqscaler.h'
+  amf_sources += 'gstamfvqenhancer.cpp'
+  amf_headers += 'gstamfvqenhancer.h'
+endif
 
 doc_sources = []
 foreach s: amf_sources + amf_headers
@@ -40,6 +50,16 @@ endif
 platform_deps = []
 extra_args = ['-DGST_USE_UNSTABLE_API']
 extra_cpp_args = []
+
+# Optional integration with the GStreamer Vulkan helpers: when available we
+# advertise to neighbouring elements (via a #GstContext query) the Vulkan
+# instance/device extensions AMF expects to be enabled on a shared
+# #GstVulkanInstance / #GstVulkanDevice.
+if gstvulkan_dep.found()
+  platform_deps += [gstvulkan_dep]
+  extra_args += ['-DHAVE_GST_VULKAN=1']
+endif
+
 if host_system == 'windows'
   if not gstd3d11_dep.found()
     if amf_option.enabled()
@@ -73,6 +93,11 @@ if host_system == 'windows'
   endif
 
   platform_deps += [gstd3d11_dep, winmm_lib]
+
+  if gstd3d12_dep.found()
+    platform_deps += [gstd3d12_dep]
+    extra_args += ['-DHAVE_GST_D3D12=1']
+  endif
 endif
 
 if cxx.get_id() != 'msvc'

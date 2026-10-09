@@ -56,13 +56,12 @@ llvm-devel
 log4c-devel
 make
 mesa-dri-drivers
-mesa-libd3d-devel
 mesa-libgbm-devel
 mesa-libGL-devel
 mesa-libGLES-devel
 mesa-libGLU-devel
 mesa-libOpenCL-devel
-mesa-libOSMesa-devel
+mesa-compat-libOSMesa-devel
 mesa-va-drivers
 mesa-vulkan-drivers
 nasm
@@ -99,6 +98,7 @@ redhat-rpm-config
 soundtouch-devel
 subunit-devel
 systemd-udev
+valgrind
 vulkan-loader
 wildmidi-devel
 xorg-x11-server-Xvfb
@@ -175,6 +175,7 @@ pkgconfig(libmfx)
 pkgconfig(libmodplug)
 pkgconfig(libmpeg2)
 pkgconfig(libmpg123)
+pkgconfig(libonnxruntime)
 pkgconfig(libopenjp2)
 pkgconfig(libopenmpt)
 pkgconfig(libpng)
@@ -231,8 +232,6 @@ pkgconfig(sndfile)
 pkgconfig(spandsp)
 pkgconfig(speex)
 pkgconfig(srt)
-pkgconfig(SvtAv1Dec)
-pkgconfig(SvtAv1Enc)
 pkgconfig(SvtHevcEnc)
 pkgconfig(SvtVp9Enc)
 pkgconfig(taglib)

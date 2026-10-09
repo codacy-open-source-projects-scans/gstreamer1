@@ -38,7 +38,9 @@
 static GstHarness *
 harness_new_with_model (const gchar * model_path)
 {
-  gchar *launch = g_strdup_printf ("tfliteinference model-file=%s", model_path);
+  gchar *launch =
+      g_strdup_printf ("tfliteinference name=inference model-file=%s",
+      model_path);
   GstHarness *h = gst_harness_new_parse (launch);
 
   gst_harness_play (h);
@@ -253,7 +255,7 @@ GST_START_TEST (test_gbrp_caps_input)
       "Expected sink caps to advertise GBRP");
   gst_caps_unref (probe);
 
-  /* Non-passthrough 3-channel model must not advertise GRAY8 */
+  /* Non in-place 3-channel model must not advertise GRAY8 */
   probe = gst_caps_from_string ("video/x-raw, format=GRAY8");
   fail_if (gst_caps_can_intersect (caps, probe),
       "Expected sink caps to NOT advertise GRAY8");
@@ -280,28 +282,172 @@ GST_START_TEST (test_gbrp_caps_input)
 
 GST_END_TEST;
 
-/* Test that planar RGBP input fed to a uint8 CHW model passes through without conversion and yields correct float32 output. */
-GST_START_TEST (test_planar_uint8_input_passthrough)
+/* Test that a non-in-place model whose modelinfo declares an explicit input
+ * format advertises and accepts only that format, not the whole family of
+ * heuristic-compatible formats. */
+GST_START_TEST (test_declared_caps_restricts_to_single_format)
+{
+  static const gchar modelinfo_content[] =
+      "[modelinfo]\n"
+      "version=1.1\n"
+      "group-id=declared-caps-group\n"
+      "\n"
+      "[serving_default_input_f32:0]\n"
+      "id=input-0\n"
+      "type=float32\n"
+      "dims=1,4,4,3\n"
+      "dir=input\n"
+      "caps=video/x-raw, format=RGB\n"
+      "ranges=0.0,255.0\n"
+      "\n"
+      "[PartitionedCall_1:0]\n"
+      "id=output-0\n" "type=float32\n" "dims=1,48\n" "dir=output\n";
+  gchar *tmp_model = setup_model_with_modelinfo (GST_TFLITE_TEST_DATA_PATH,
+      "tfliteinference", "flatten_float32in_float32out.tflite",
+      modelinfo_content);
+  GstHarness *h = harness_new_with_model (tmp_model);
+  GstPad *sinkpad = gst_element_get_static_pad (h->element, "sink");
+  GstCaps *caps = gst_pad_query_caps (sinkpad, NULL);
+  GstCaps *probe;
+  GstCaps *accept;
+
+  fail_unless (caps != NULL);
+
+  probe = gst_caps_from_string ("video/x-raw, format=RGB");
+  fail_unless (gst_caps_can_intersect (caps, probe),
+      "Expected sink caps to advertise the declared format RGB");
+  gst_caps_unref (probe);
+
+  /* Modelinfo pins the format to RGB, so other formats from the same
+   * heuristic-compatible family must no longer be advertised. */
+  probe = gst_caps_from_string ("video/x-raw, format=GBRP");
+  fail_if (gst_caps_can_intersect (caps, probe),
+      "Expected sink caps to NOT advertise GBRP when modelinfo declares RGB");
+  gst_caps_unref (probe);
+
+  gst_caps_unref (caps);
+
+  accept =
+      gst_caps_from_string ("video/x-raw,format=RGB,width=4,height=4,"
+      "framerate=30/1");
+  fail_unless (gst_pad_query_accept_caps (sinkpad, accept));
+  gst_caps_unref (accept);
+
+  accept =
+      gst_caps_from_string ("video/x-raw,format=RGBA,width=4,height=4,"
+      "framerate=30/1");
+  fail_if (gst_pad_query_accept_caps (sinkpad, accept));
+  gst_caps_unref (accept);
+
+  gst_object_unref (sinkpad);
+  gst_harness_teardown (h);
+  cleanup_temp_model (tmp_model);
+}
+
+GST_END_TEST;
+
+/* Test that a model whose modelinfo declares an input format outside the
+ * element's supported pad template fails to reach PAUSED, instead of
+ * silently falling back to the dims-based heuristic. */
+GST_START_TEST (test_declared_caps_unsupported_format_fails_to_start)
+{
+  static const gchar modelinfo_content[] =
+      "[modelinfo]\n"
+      "version=1.1\n"
+      "group-id=unsupported-caps-group\n"
+      "\n"
+      "[serving_default_input_f32:0]\n"
+      "id=input-0\n"
+      "type=float32\n"
+      "dims=1,4,4,3\n"
+      "dir=input\n"
+      "caps=video/x-raw, format=I420\n"
+      "ranges=0.0,255.0\n"
+      "\n"
+      "[PartitionedCall_1:0]\n"
+      "id=output-0\n" "type=float32\n" "dims=1,48\n" "dir=output\n";
+  gchar *tmp_model = setup_model_with_modelinfo (GST_TFLITE_TEST_DATA_PATH,
+      "tfliteinference", "flatten_float32in_float32out.tflite",
+      modelinfo_content);
+  GstElement *e = gst_element_factory_make ("tfliteinference", NULL);
+
+  g_object_set (e, "model-file", tmp_model, NULL);
+  fail_if (gst_element_set_state (e, GST_STATE_PAUSED)
+      != GST_STATE_CHANGE_FAILURE);
+
+  gst_element_set_state (e, GST_STATE_NULL);
+  gst_object_unref (e);
+  cleanup_temp_model (tmp_model);
+}
+
+GST_END_TEST;
+
+
+static void
+_caught_log_func (GstDebugCategory * category,
+    GstDebugLevel level,
+    const gchar * file,
+    const gchar * function,
+    gint line, GObject * object, GstDebugMessage * message, gpointer user_data)
+{
+  const gchar *msg = gst_debug_message_get (message);
+
+  fail_unless (user_data);
+  fail_unless (msg);
+
+  fail_if (strstr (msg, user_data), "Unexpected debug message: %s", msg);
+}
+
+#define RUN_WITHOUT_LOG(CODE, CAT, LEVEL, LOG) G_STMT_START {    \
+  GstDebugLevel old_threshold;                                   \
+  GST_DEBUG_CATEGORY (_caught_cat);                              \
+                                                                 \
+  GST_DEBUG_CATEGORY_GET (_caught_cat, CAT);                            \
+  fail_unless (_caught_cat);                                            \
+                                                                        \
+  old_threshold = gst_debug_category_get_threshold (_caught_cat);       \
+  gst_debug_category_set_threshold (_caught_cat, LEVEL);                \
+  gst_debug_add_log_function (_caught_log_func, (gpointer) LOG, NULL);  \
+                                                                        \
+  CODE;                                                                 \
+                                                                        \
+  gst_debug_category_set_threshold (_caught_cat, old_threshold);        \
+  } G_STMT_END
+
+/* Run one in-place uint8 model test where the input tensor index is intentionally not 0 */
+static void
+run_uint8_input_in_place_test (const gchar * model_name,
+    const gchar * group_name, GstVideoFormat format, gboolean planar)
 {
   gchar *tmp_model = setup_model_with_ranges (GST_TFLITE_TEST_DATA_PATH,
-      "tfliteinference", "planar_chw_uint8in_float32out.tflite",
+      "tfliteinference", model_name,
       "0.0,255.0;0.0,255.0;0.0,255.0");
   GstHarness *h = harness_new_with_model (tmp_model);
-  GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGBP,
-      TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
+  GstAllocationParams alloc_params = { 0, 63, 0, 0 };
+  GstBuffer *in = create_solid_color_buffer_aligned (format,
+      &alloc_params, TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
   GstBuffer *out;
   GstTensorMeta *tmeta;
   const GstTensor *tensor;
   gfloat expected[TEST_NUM_PIXELS * TEST_NUM_CHANNELS];
+  gchar *caps_str;
   GstCaps *actual_caps, *expected_caps;
   const TfliteTestTensorInfo out_tensors[] = {
     {"output-0", "float32", "row-major", {1, 48}, 2}
   };
 
-  gst_harness_set_src_caps_str (h,
-      "video/x-raw,format=RGBP,width=4,height=4,framerate=30/1");
+  /* This model keeps the input tensor at global index 2 on purpose so
+   * in-place allocation must use TfLiteInterpreterGetInputTensorIndex().
+   */
+  caps_str = g_strdup_printf ("video/x-raw,format=%s,width=4,height=4,"
+      "framerate=30/1", gst_video_format_to_string (format));
+  gst_harness_set_src_caps_str (h, caps_str);
+  g_free (caps_str);
 
-  out = gst_harness_push_and_pull (h, in);
+  RUN_WITHOUT_LOG (out = gst_harness_push_and_pull (h, in),
+      "GST_PERFORMANCE", GST_LEVEL_WARNING,
+      "Could not pass buffer in-place as-is");
+
   fail_unless (out);
   fail_unless (gst_buffer_get_tensor_meta (out) != NULL);
 
@@ -322,20 +468,41 @@ GST_START_TEST (test_planar_uint8_input_passthrough)
   fail_unless_equals_int ((gint) tensor->dims[1], 48);
 
   actual_caps = pull_output_caps (h);
-  expected_caps = build_expected_output_caps ("RGBP",
-      TEST_WIDTH, TEST_HEIGHT, 30, 1,
-      "planar_chw_uint8in_float32out-group",
+  expected_caps = build_expected_output_caps (gst_video_format_to_string
+      (format), TEST_WIDTH, TEST_HEIGHT, 30, 1, group_name,
       out_tensors, G_N_ELEMENTS (out_tensors));
   fail_unless (gst_caps_is_equal (actual_caps, expected_caps));
   gst_caps_unref (actual_caps);
   gst_caps_unref (expected_caps);
 
-  fill_expected_chw_rgb_f32 (expected, TEST_NUM_PIXELS, 11.f, 22.f, 33.f);
+  if (planar)
+    fill_expected_chw_rgb_f32 (expected, TEST_NUM_PIXELS, 11.f, 22.f, 33.f);
+  else
+    fill_expected_flat_rgb_f32 (expected, TEST_NUM_PIXELS, 11.f, 22.f, 33.f);
+
   TFLITE_TEST_ASSERT_TENSOR_VALUES_F32 (tensor, expected,
       G_N_ELEMENTS (expected), 1e-6f);
   gst_buffer_unref (out);
   gst_harness_teardown (h);
   cleanup_temp_model (tmp_model);
+}
+
+/* Test that planar RGBP input can run in-place with a model using input tensor index 2. */
+GST_START_TEST (test_planar_uint8_input_in_place)
+{
+  run_uint8_input_in_place_test
+      ("offset_input_planar_chw_uint8in_float32out.tflite",
+      "offset_input_planar_chw_uint8in_float32out-group", GST_VIDEO_FORMAT_RGBP,
+      TRUE);
+}
+
+GST_END_TEST;
+
+/* Test that interleaved RGB input can run in-place with a model using input tensor index 2. */
+GST_START_TEST (test_interleaved_uint8_input_in_place)
+{
+  run_uint8_input_in_place_test ("offset_input_hwc_uint8in_float32out.tflite",
+      "offset_input_hwc_uint8in_float32out-group", GST_VIDEO_FORMAT_RGB, FALSE);
 }
 
 GST_END_TEST;
@@ -389,8 +556,8 @@ GST_START_TEST (test_gray8_input_conversion)
   gchar *tmp_model = setup_model_with_ranges (GST_TFLITE_TEST_DATA_PATH,
       "tfliteinference", "grayscale_4d.tflite", "0.0,1.0");
   GstHarness *h = harness_new_with_model (tmp_model);
-  GstBuffer *in = create_solid_gray_buffer (GST_VIDEO_FORMAT_GRAY8, TEST_WIDTH,
-      TEST_HEIGHT, 42);
+  GstBuffer *in = create_solid_gray_buffer (GST_VIDEO_FORMAT_GRAY8, NULL,
+      TEST_WIDTH, TEST_HEIGHT, 42);
   GstBuffer *out;
   GstTensorMeta *tmeta;
   const GstTensor *tensor;
@@ -440,7 +607,7 @@ GST_START_TEST (test_gray8_input_conversion)
   gst_caps_unref (actual_caps);
   gst_caps_unref (expected_caps);
 
-  /* Non-passthrough 1-channel model must advertise GRAY8 and no RGB family */
+  /* Non in-place 1-channel model must advertise GRAY8 and no RGB family */
   sinkpad = gst_element_get_static_pad (h->element, "sink");
   queried = gst_pad_query_caps (sinkpad, NULL);
 
@@ -476,17 +643,18 @@ GST_START_TEST (test_gray8_input_conversion)
 
 GST_END_TEST;
 
-/* Test that a GRAY8 input to a passthrough model (where input and output are
+/* Test that a GRAY8 input to a in-place model (where input and output are
  * the same tensor) is correctly converted to a float32 tensor, and that the
  * sink caps advertise GRAY8.
  */
-GST_START_TEST (test_gray8_input_passthrough)
+GST_START_TEST (test_gray8_input_in_place)
 {
   gchar *tmp_model = setup_model_with_ranges (GST_TFLITE_TEST_DATA_PATH,
       "tfliteinference", "grayscale_uint8in_float32out.tflite", "0.0,255.0");
   GstHarness *h = harness_new_with_model (tmp_model);
-  GstBuffer *in = create_solid_gray_buffer (GST_VIDEO_FORMAT_GRAY8, TEST_WIDTH,
-      TEST_HEIGHT, 42);
+  GstAllocationParams alloc_params = { 0, 63, 0, 0 };
+  GstBuffer *in = create_solid_gray_buffer (GST_VIDEO_FORMAT_GRAY8,
+      &alloc_params, TEST_WIDTH, TEST_HEIGHT, 42);
   GstBuffer *out;
   GstTensorMeta *tmeta;
   const GstTensor *tensor;
@@ -499,7 +667,9 @@ GST_START_TEST (test_gray8_input_passthrough)
   gst_harness_set_src_caps_str (h,
       "video/x-raw,format=GRAY8,width=4,height=4,framerate=30/1");
 
-  out = gst_harness_push_and_pull (h, in);
+  RUN_WITHOUT_LOG (out = gst_harness_push_and_pull (h, in), "GST_PERFORMANCE",
+      GST_LEVEL_WARNING, "Could not pass buffer in-place as-is");
+
   fail_unless (out);
   fail_unless (gst_buffer_get_tensor_meta (out) != NULL);
 
@@ -557,7 +727,10 @@ GST_START_TEST (test_normalization_variants)
           11.f * (2.f / 255.f) - 1.f, 22.f * (2.f / 255.f) - 1.f,
         33.f * (2.f / 255.f) - 1.f}, {
           "0.0,255.0;-1.0,1.0;0.0,1.0",
-        11.f, 22.f * (2.f / 255.f) - 1.f, 33.f / 255.f},
+        11.f, 22.f * (2.f / 255.f) - 1.f, 33.f / 255.f}, {
+          /* Single range broadcasts to all channels */
+          "0.0,1.0",
+        11.f / 255.f, 22.f / 255.f, 33.f / 255.f},
   };
   guint i;
 
@@ -944,7 +1117,7 @@ GST_START_TEST (test_transform_caps_and_accept_caps)
   fail_if (gst_pad_query_accept_caps (sinkpad, caps));
   gst_caps_unref (caps);
 
-  /* Passthrough uint8 model exposes only the exact guessed format (RGB), not
+  /* In-place uint8 model exposes only the exact guessed format (RGB), not
    * the full RGB family — so RGBA and GRAY8 must be rejected. */
   caps =
       gst_caps_from_string
@@ -961,12 +1134,12 @@ GST_START_TEST (test_transform_caps_and_accept_caps)
   caps = gst_pad_query_caps (sinkpad, NULL);
   probe = gst_caps_from_string ("video/x-raw, format=RGBA");
   fail_if (gst_caps_can_intersect (caps, probe),
-      "Passthrough model must not advertise RGBA in caps");
+      "In-place model must not advertise RGBA in caps");
   gst_caps_unref (probe);
 
   probe = gst_caps_from_string ("video/x-raw, format=GRAY8");
   fail_if (gst_caps_can_intersect (caps, probe),
-      "Passthrough RGB model must not advertise GRAY8 in caps");
+      "In-place RGB model must not advertise GRAY8 in caps");
   gst_caps_unref (probe);
   gst_caps_unref (caps);
 
@@ -1226,6 +1399,349 @@ GST_START_TEST (test_accept_caps_dimension_mismatch)
 
 GST_END_TEST;
 
+GST_START_TEST (test_invalid_range_count)
+{
+  /* 2 ranges for a 3-channel model must fail */
+  gchar *tmp_model = setup_model_with_ranges (GST_TFLITE_TEST_DATA_PATH,
+      "tfliteinference", "flatten_float32in_float32out.tflite",
+      "0.0,1.0;0.0,1.0");
+  GstElement *e = gst_element_factory_make ("tfliteinference", NULL);
+
+  g_object_set (e, "model-file", tmp_model, NULL);
+  fail_if (gst_element_set_state (e, GST_STATE_PAUSED)
+      != GST_STATE_CHANGE_FAILURE);
+
+  gst_element_set_state (e, GST_STATE_NULL);
+  gst_object_unref (e);
+  cleanup_temp_model (tmp_model);
+}
+
+GST_END_TEST;
+
+/* Test that in-place models strip GstVideoMeta from upstream allocation. */
+GST_START_TEST (test_in_place_drops_videometa)
+{
+  gchar *model = g_build_filename (GST_TFLITE_TEST_DATA_PATH,
+      "flatten_uint8in_float32out.tflite", NULL);
+  GstHarness *h = harness_new_with_model (model);
+  GstPad *sinkpad;
+  GstQuery *query;
+  GstCaps *caps;
+  guint i, n_metas;
+
+  gst_harness_add_propose_allocation_meta (h, GST_VIDEO_META_API_TYPE, NULL);
+
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=RGB,width=4,height=4,framerate=30/1");
+
+  sinkpad = gst_element_get_static_pad (h->element, "sink");
+  caps = gst_pad_get_current_caps (sinkpad);
+  fail_unless (caps != NULL);
+  query = gst_query_new_allocation (caps, FALSE);
+  fail_unless (gst_pad_query (sinkpad, query));
+
+  n_metas = gst_query_get_n_allocation_metas (query);
+  for (i = 0; i < n_metas; i++) {
+    fail_if (gst_query_parse_nth_allocation_meta (query, i, NULL)
+        == GST_VIDEO_META_API_TYPE,
+        "GstVideoMeta should be stripped from upstream allocation "
+        "for in-place");
+  }
+
+  gst_query_unref (query);
+  gst_caps_unref (caps);
+  gst_object_unref (sinkpad);
+  gst_harness_teardown (h);
+  g_free (model);
+}
+
+GST_END_TEST;
+
+/* Test that buffers with GstVideoMeta and non-default strides are read correctly */
+GST_START_TEST (test_padded_stride_with_videometa)
+{
+  gchar *tmp_model = setup_model_with_ranges (GST_TFLITE_TEST_DATA_PATH,
+      "tfliteinference", "flatten_float32in_float32out.tflite",
+      "0.0,255.0;0.0,255.0;0.0,255.0");
+  GstHarness *h = harness_new_with_model (tmp_model);
+  GstVideoInfo vinfo;
+  gint padded_stride;
+  gsize buf_size;
+  gsize offsets[4] = { 0, 0, 0, 0 };
+  gint strides[4] = { 0, 0, 0, 0 };
+  GstBuffer *in, *out;
+  GstMapInfo map;
+  GstTensorMeta *tmeta;
+  const GstTensor *tensor;
+  gfloat expected[TEST_NUM_PIXELS * TEST_NUM_CHANNELS];
+  guint8 *row;
+  gint j, i;
+
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=RGB,width=4,height=4,framerate=30/1");
+
+  gst_video_info_set_format (&vinfo, GST_VIDEO_FORMAT_RGB,
+      TEST_WIDTH, TEST_HEIGHT);
+  padded_stride = GST_VIDEO_INFO_COMP_STRIDE (&vinfo, 0) + 16;
+  buf_size = padded_stride * TEST_HEIGHT;
+
+  in = gst_buffer_new_allocate (NULL, buf_size, NULL);
+
+  gst_buffer_map (in, &map, GST_MAP_WRITE);
+  memset (map.data, 0xAA, buf_size);
+  for (j = 0; j < TEST_HEIGHT; j++) {
+    row = map.data + j * padded_stride;
+    for (i = 0; i < TEST_WIDTH; i++) {
+      row[i * 3 + 0] = 11;
+      row[i * 3 + 1] = 22;
+      row[i * 3 + 2] = 33;
+    }
+  }
+  gst_buffer_unmap (in, &map);
+
+  strides[0] = padded_stride;
+  gst_buffer_add_video_meta_full (in, GST_VIDEO_FRAME_FLAG_NONE,
+      GST_VIDEO_FORMAT_RGB, TEST_WIDTH, TEST_HEIGHT, 1, offsets, strides);
+
+  RUN_WITHOUT_LOG (out = gst_harness_push_and_pull (h, in), "GST_PERFORMANCE",
+      GST_LEVEL_WARNING, "Could not pass buffer in-place as-is");
+  fail_unless (out != NULL);
+
+  tmeta = gst_buffer_get_tensor_meta (out);
+  fail_unless (tmeta != NULL);
+  tensor = gst_tensor_meta_get (tmeta, 0);
+  fail_unless (tensor != NULL);
+
+  fill_expected_flat_rgb_f32 (expected, TEST_NUM_PIXELS, 11, 22, 33);
+  TFLITE_TEST_ASSERT_TENSOR_VALUES_F32 (tensor, expected,
+      G_N_ELEMENTS (expected), 1e-6f);
+
+  gst_buffer_unref (out);
+  gst_harness_teardown (h);
+  cleanup_temp_model (tmp_model);
+}
+
+GST_END_TEST;
+
+/* Verify that the "tensors" field is stripped from all downstream caps
+ * structures when transforming in the upstream direction, not just the first. */
+GST_START_TEST (test_transform_caps_multi_struct_no_tensors_leak)
+{
+  gchar *model = g_build_filename (GST_TFLITE_TEST_DATA_PATH,
+      "flatten_uint8in_float32out.tflite", NULL);
+  GstHarness *h = harness_new_with_model (model);
+  GstPad *sinkpad = gst_element_get_static_pad (h->element, "sink");
+  GstStructure *tensors_s = gst_structure_new ("tensorgroups",
+      "flatten_uint8in_float32out-group", G_TYPE_INT, 0, NULL);
+  GstCaps *downstream, *sinkpad_caps;
+  guint i;
+
+  /* Build downstream caps with two structures, both carrying "tensors" with
+   * our own model's group-id, which the element must strip. */
+  downstream = gst_caps_new_simple ("video/x-raw",
+      "format", G_TYPE_STRING, "RGB",
+      "width", G_TYPE_INT, TEST_WIDTH, "height", G_TYPE_INT, TEST_HEIGHT,
+      "framerate", GST_TYPE_FRACTION, 30, 1,
+      "tensors", GST_TYPE_STRUCTURE, tensors_s, NULL);
+  gst_caps_append_structure (downstream,
+      gst_structure_new ("video/x-raw",
+          "format", G_TYPE_STRING, "RGB",
+          "width", G_TYPE_INT, TEST_WIDTH, "height", G_TYPE_INT, TEST_HEIGHT,
+          "framerate", GST_TYPE_FRACTION, 15, 1,
+          "tensors", GST_TYPE_STRUCTURE, tensors_s, NULL));
+  gst_structure_free (tensors_s);
+
+  gst_harness_set_sink_caps (h, downstream);
+
+  sinkpad_caps = gst_pad_query_caps (sinkpad, NULL);
+  fail_unless (sinkpad_caps != NULL);
+  fail_if (gst_caps_is_empty (sinkpad_caps));
+
+  for (i = 0; i < gst_caps_get_size (sinkpad_caps); i++) {
+    const GstStructure *s = gst_caps_get_structure (sinkpad_caps, i);
+    fail_if (gst_structure_has_field (s, "tensors"),
+        "tensors leaked to upstream caps in structure %u", i);
+  }
+
+  gst_caps_unref (sinkpad_caps);
+  gst_object_unref (sinkpad);
+  gst_harness_teardown (h);
+  g_free (model);
+}
+
+GST_END_TEST;
+
+/* Descend into a "tensors" caps field and return its nested "tensorgroups"
+ * structure, or NULL if the field isn't present. */
+static const GstStructure *
+get_tensorgroups (const GstStructure * s)
+{
+  const GValue *tensors_value = gst_structure_get_value (s, "tensors");
+
+  if (!tensors_value)
+    return NULL;
+
+  return gst_value_get_structure (tensors_value);
+}
+
+/* Test that each caps alternative keeps its own upstream tensor groups */
+GST_START_TEST (test_transform_caps_preserves_alternative_tensor_groups)
+{
+  gchar *model = g_build_filename (GST_TFLITE_TEST_DATA_PATH,
+      "flatten_uint8in_float32out.tflite", NULL);
+  GstHarness *h = harness_new_with_model (model);
+  GstElement *element = gst_harness_find_element (h, "tfliteinference");
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (element);
+  GstStructure *groups_30;
+  GstStructure *groups_15;
+  GstCaps *caps;
+  GstCaps *transformed;
+  guint i;
+
+  groups_30 = gst_structure_new ("tensorgroups",
+      "upstream-30", G_TYPE_INT, 0, NULL);
+  groups_15 = gst_structure_new ("tensorgroups",
+      "upstream-15", G_TYPE_INT, 0, NULL);
+  caps = gst_caps_new_simple ("video/x-raw",
+      "format", G_TYPE_STRING, "RGB",
+      "width", G_TYPE_INT, TEST_WIDTH,
+      "height", G_TYPE_INT, TEST_HEIGHT,
+      "framerate", GST_TYPE_FRACTION, 30, 1,
+      "tensors", GST_TYPE_STRUCTURE, groups_30, NULL);
+  gst_caps_append_structure (caps,
+      gst_structure_new ("video/x-raw",
+          "format", G_TYPE_STRING, "RGB",
+          "width", G_TYPE_INT, TEST_WIDTH,
+          "height", G_TYPE_INT, TEST_HEIGHT,
+          "framerate", GST_TYPE_FRACTION, 15, 1,
+          "tensors", GST_TYPE_STRUCTURE, groups_15, NULL));
+  gst_structure_free (groups_15);
+  gst_structure_free (groups_30);
+
+  transformed = klass->transform_caps (GST_BASE_TRANSFORM (element),
+      GST_PAD_SINK, caps, NULL);
+  fail_unless_equals_int (gst_caps_get_size (transformed), 2);
+
+  for (i = 0; i < gst_caps_get_size (transformed); i++) {
+    const GstStructure *s = gst_caps_get_structure (transformed, i);
+    const GstStructure *tensorgroups = get_tensorgroups (s);
+    gint fps_n;
+    gint fps_d;
+
+    fail_unless (gst_structure_get_fraction (s, "framerate", &fps_n, &fps_d));
+    fail_unless_equals_int (fps_d, 1);
+    fail_unless (tensorgroups != NULL);
+    fail_unless (gst_structure_has_field (tensorgroups,
+            "flatten_uint8in_float32out-group"));
+    if (fps_n == 30) {
+      fail_unless (gst_structure_has_field (tensorgroups, "upstream-30"));
+      fail_if (gst_structure_has_field (tensorgroups, "upstream-15"));
+    } else {
+      fail_unless_equals_int (fps_n, 15);
+      fail_unless (gst_structure_has_field (tensorgroups, "upstream-15"));
+      fail_if (gst_structure_has_field (tensorgroups, "upstream-30"));
+    }
+  }
+
+  gst_caps_unref (transformed);
+  gst_caps_unref (caps);
+  gst_object_unref (element);
+  gst_harness_teardown (h);
+  g_free (model);
+}
+
+GST_END_TEST;
+
+/* Test that chaining two tfliteinference elements using different models
+ * accumulates both tensor groups downstream, and that both groups are
+ * removed again when querying caps upstream. */
+GST_START_TEST (test_transform_caps_accumulates_tensor_groups)
+{
+  gchar *model1 = g_build_filename (GST_TFLITE_TEST_DATA_PATH,
+      "flatten_uint8in_float32out.tflite", NULL);
+  gchar *model2 = g_build_filename (GST_TFLITE_TEST_DATA_PATH,
+      "flatten_float32in_float32out.tflite", NULL);
+  gchar *launch = g_strdup_printf ("tfliteinference model-file=%s ! "
+      "tfliteinference model-file=%s", model1, model2);
+  GstHarness *h = gst_harness_new_parse (launch);
+  GstPad *sinkpad = gst_element_get_static_pad (h->element, "sink");
+  GstPad *srcpad = gst_element_get_static_pad (h->element, "src");
+  GstBuffer *in, *out;
+  GstCaps *downstream_caps, *upstream_caps;
+  const GstStructure *tensorgroups;
+
+  g_free (launch);
+  gst_harness_play (h);
+
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=RGB,width=4,height=4,framerate=30/1");
+  in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
+      TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 255);
+  out = gst_harness_push_and_pull (h, in);
+  fail_unless (out != NULL);
+  gst_buffer_unref (out);
+
+  /* Downstream: the src pad of the chain must offer both group-ids. */
+  downstream_caps = gst_pad_query_caps (srcpad, NULL);
+  fail_unless (downstream_caps != NULL);
+  fail_if (gst_caps_is_empty (downstream_caps));
+  tensorgroups = get_tensorgroups (gst_caps_get_structure (downstream_caps, 0));
+  fail_unless (tensorgroups != NULL);
+  fail_unless (gst_structure_has_field (tensorgroups,
+          "flatten_uint8in_float32out-group"));
+  fail_unless (gst_structure_has_field (tensorgroups,
+          "flatten_float32in_float32out-group"));
+  gst_caps_unref (downstream_caps);
+
+  /* Upstream: the sink pad of the chain must not carry any tensor group. */
+  upstream_caps = gst_pad_query_caps (sinkpad, NULL);
+  fail_unless (upstream_caps != NULL);
+  fail_if (gst_caps_is_empty (upstream_caps));
+  fail_unless (get_tensorgroups (gst_caps_get_structure (upstream_caps,
+              0)) == NULL);
+  gst_caps_unref (upstream_caps);
+
+  gst_object_unref (sinkpad);
+  gst_object_unref (srcpad);
+  gst_harness_teardown (h);
+  g_free (model1);
+  g_free (model2);
+}
+
+GST_END_TEST;
+
+/* Test that chaining two tfliteinference elements using the same model (and
+ * therefore the same tensor group-id) fails to negotiate. */
+GST_START_TEST (test_transform_caps_duplicate_group_fails)
+{
+  gchar *model = g_build_filename (GST_TFLITE_TEST_DATA_PATH,
+      "flatten_uint8in_float32out.tflite", NULL);
+  GstHarness *h = harness_new_with_model (model);
+  GstElement *element = gst_harness_find_element (h, "tfliteinference");
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (element);
+  GstStructure *groups;
+  GstCaps *caps;
+
+  groups = gst_structure_new ("tensorgroups",
+      "flatten_uint8in_float32out-group", G_TYPE_INT, 0, NULL);
+  caps = gst_caps_new_simple ("video/x-raw",
+      "format", G_TYPE_STRING, "RGB",
+      "width", G_TYPE_INT, TEST_WIDTH,
+      "height", G_TYPE_INT, TEST_HEIGHT,
+      "framerate", GST_TYPE_FRACTION, 30, 1,
+      "tensors", GST_TYPE_STRUCTURE, groups, NULL);
+  gst_structure_free (groups);
+
+  fail_if (klass->set_caps (GST_BASE_TRANSFORM (element), caps, caps));
+
+  gst_caps_unref (caps);
+  gst_object_unref (element);
+  gst_harness_teardown (h);
+  g_free (model);
+}
+
+GST_END_TEST;
+
 static Suite *
 tfliteinference_suite (void)
 {
@@ -1235,9 +1751,12 @@ tfliteinference_suite (void)
   suite_add_tcase (s, tc);
   tcase_add_test (tc, test_input_formats);
   tcase_add_test (tc, test_gbrp_caps_input);
-  tcase_add_test (tc, test_planar_uint8_input_passthrough);
+  tcase_add_test (tc, test_declared_caps_restricts_to_single_format);
+  tcase_add_test (tc, test_declared_caps_unsupported_format_fails_to_start);
+  tcase_add_test (tc, test_planar_uint8_input_in_place);
+  tcase_add_test (tc, test_interleaved_uint8_input_in_place);
   tcase_add_test (tc, test_gray8_input_conversion);
-  tcase_add_test (tc, test_gray8_input_passthrough);
+  tcase_add_test (tc, test_gray8_input_in_place);
   tcase_add_test (tc, test_normalization_variants);
   tcase_add_test (tc, test_output_dtypes);
   tcase_add_test (tc, test_dynamic_dims);
@@ -1251,6 +1770,13 @@ tfliteinference_suite (void)
   tcase_add_test (tc, test_no_input_modelinfo);
   tcase_add_test (tc, test_timestamp_and_flags_propagation);
   tcase_add_test (tc, test_accept_caps_dimension_mismatch);
+  tcase_add_test (tc, test_invalid_range_count);
+  tcase_add_test (tc, test_in_place_drops_videometa);
+  tcase_add_test (tc, test_padded_stride_with_videometa);
+  tcase_add_test (tc, test_transform_caps_multi_struct_no_tensors_leak);
+  tcase_add_test (tc, test_transform_caps_preserves_alternative_tensor_groups);
+  tcase_add_test (tc, test_transform_caps_accumulates_tensor_groups);
+  tcase_add_test (tc, test_transform_caps_duplicate_group_fails);
 
   return s;
 }

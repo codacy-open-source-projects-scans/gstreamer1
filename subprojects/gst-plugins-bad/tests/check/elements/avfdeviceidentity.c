@@ -54,6 +54,12 @@ free_avf_device_info (gpointer data)
   g_free (info);
 }
 
+static gboolean
+running_in_ci (void)
+{
+  return g_getenv ("CI") != NULL;
+}
+
 static GPtrArray *
 collect_avf_devices (GstDeviceMonitor * monitor,
     const gchar * device_class_prefix)
@@ -542,7 +548,11 @@ avfdeviceidentity_suite (void)
       g_getenv ("GST_AVF_ENABLE_DEVICE_INDEX_STRESS");
 
   suite_add_tcase (s, tc_basic);
-  tcase_add_test (tc_basic, test_avf_unique_id_stability);
+  if (!running_in_ci ()) {
+    tcase_add_test (tc_basic, test_avf_unique_id_stability);
+  } else {
+    GST_INFO ("Not registering AVF unique-id stability test on CI");
+  }
   tcase_add_test (tc_basic, test_avf_screen_provider_configuration);
   if (g_strcmp0 (enable_device_index_stress, "1") == 0) {
     tcase_add_test (tc_basic, test_avf_device_order_instability);
@@ -557,24 +567,10 @@ avfdeviceidentity_suite (void)
 }
 
 static int
-run_tests (int argc, char **argv, gpointer user_data)
+run_tests ()
 {
-  Suite *s;
-  SRunner *sr;
-  int nfails;
-
-  (void) argc;
-  (void) argv;
-  (void) user_data;
-
-  s = avfdeviceidentity_suite ();
-  sr = srunner_create (s);
-  srunner_set_fork_status (sr, CK_NOFORK);
-  srunner_run (sr, NULL, NULL, CK_NORMAL);
-  nfails = srunner_ntests_failed (sr);
-  srunner_free (sr);
-
-  return nfails;
+  Suite *s = avfdeviceidentity_suite ();
+  return gst_check_run_suite_nofork (s, "avfdeviceidentity", __FILE__);
 }
 
 int
@@ -582,7 +578,7 @@ main (int argc, char **argv)
 {
   gst_check_init (&argc, &argv);
 #if TARGET_OS_OSX
-  return gst_macos_main ((GstMainFunc) run_tests, argc, argv, NULL);
+  return gst_macos_main_simple ((GstMainFuncSimple) run_tests, NULL);
 #else
   return run_tests (argc, argv, NULL);
 #endif

@@ -866,6 +866,7 @@ gst_gl_download_element_class_init (GstGLDownloadElementClass * klass)
   gst_element_class_set_static_metadata (element_class,
       "OpenGL downloader", "Filter/Video/Downloader",
       "Downloads data from OpenGL", "Matthew Waters <matthew@centricular.com>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   object_class->finalize = gst_gl_download_element_finalize;
 }
@@ -976,7 +977,7 @@ _convert_dma_drm (GstGLContext * context, GstStructure * s)
     if (!context) {
       gst_structure_remove_field (s, "drm-format");
     } else if (gst_gl_dma_buf_transform_gst_formats_to_drm_formats (context,
-            fmtval, GST_GL_DRM_FORMAT_DIRECT_IMPORT, &drmfmtval)) {
+            fmtval, GST_GL_DRM_FORMAT_INCLUDE_EMULATED, &drmfmtval)) {
       gst_structure_set_value (s, "drm-format", &drmfmtval);
       g_value_unset (&drmfmtval);
     } else {

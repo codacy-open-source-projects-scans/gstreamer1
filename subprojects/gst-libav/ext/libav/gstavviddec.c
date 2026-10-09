@@ -2997,12 +2997,15 @@ gst_ffmpegviddec_register (GstPlugin * plugin)
     }
 
     /* no quasi codecs, please */
-    if (in_plugin->id == AV_CODEC_ID_RAWVIDEO ||
-        in_plugin->id == AV_CODEC_ID_V210 ||
-        in_plugin->id == AV_CODEC_ID_V210X ||
-        in_plugin->id == AV_CODEC_ID_V308 ||
-        in_plugin->id == AV_CODEC_ID_V408 ||
-        in_plugin->id == AV_CODEC_ID_V410 || in_plugin->id == AV_CODEC_ID_R210
+    if (in_plugin->id == AV_CODEC_ID_RAWVIDEO
+        || in_plugin->id == AV_CODEC_ID_V210
+        || in_plugin->id == AV_CODEC_ID_V210X
+        || in_plugin->id == AV_CODEC_ID_R210
+#if LIBAVCODEC_VERSION_MAJOR < 63
+        || in_plugin->id == AV_CODEC_ID_V308
+        || in_plugin->id == AV_CODEC_ID_V408
+        || in_plugin->id == AV_CODEC_ID_V410
+#endif
 #if LIBAVCODEC_VERSION_MAJOR < 61
         || in_plugin->id == AV_CODEC_ID_AYUV
 #endif
@@ -3093,7 +3096,8 @@ gst_ffmpegviddec_register (GstPlugin * plugin)
         !strcmp (in_plugin->name, "dvdsub") ||
         !strcmp (in_plugin->name, "dvbsub") ||
         !strcmp (in_plugin->name, "cdgraphics") ||
-        !strcmp (in_plugin->name, "av1")) {
+        !strcmp (in_plugin->name, "av1") ||
+        g_str_has_suffix (in_plugin->name, "_omx")) {
       GST_LOG ("Ignoring decoder %s", in_plugin->name);
       continue;
     }

@@ -1,8 +1,9 @@
 project('gstreamer', 'c',
-  version : '1.29.1.1',
+  version : '1.29.2.1',
   meson_version : '>= 1.4',
   default_options : [ 'warning_level=1',
-                      'buildtype=debugoptimized' ])
+                      'buildtype=debugoptimized',
+                      'c_std=gnu11,c11' ])
 
 gst_version = meson.project_version()
 version_arr = gst_version.split('.')
@@ -58,7 +59,10 @@ if cc.get_id() == 'msvc'
       '/wd4146', # unary minus on unsigned (beware INT_MIN)
       '/wd4244', # lossy type conversion (e.g. double -> int)
       '/wd4305', # truncating type conversion (e.g. double -> float)
-      cc.get_supported_arguments(['/utf-8']), # set the input encoding to utf-8
+      cc.get_supported_arguments([
+        '/utf-8', # set the input encoding to utf-8
+        '/Zc:preprocessor', # enable preprocessor conformance mode (disable legacy preprocessor)
+      ]),
   ]
 
   if gst_version_is_dev
@@ -201,6 +205,8 @@ host_defines = [
   [ 'hppa', 'HAVE_CPU_HPPA' ],
   [ 'm68k', 'HAVE_CPU_M68K' ],
   [ 's390', 'HAVE_CPU_S390' ],
+  [ 'riscv32', 'HAVE_CPU_RISCV32' ],
+  [ 'riscv64', 'HAVE_CPU_RISCV64' ],
 ]
 foreach h : host_defines
   if h.get(0) == host_machine.cpu_family()
@@ -401,6 +407,14 @@ if host_system != 'windows'
 elif cc.has_function('_pipe', prefix : '#include <io.h>')
   cdata.set('HAVE_PIPE', 1)
 endif
+if host_system == 'windows'
+  if cc.has_function('_wfsopen', prefix : '#include <stdio.h>')
+    cdata.set('HAVE__WFSOPEN', 1)
+  endif
+endif
+if cc.has_function('elf_aux_info', prefix : '#include <sys/auxv.h>')
+  cdata.set('HAVE_ELF_AUX_INFO', 1)
+endif
 
 # Platform deps; only ws2_32 and execinfo for now
 platform_deps = []
@@ -549,7 +563,7 @@ cdata.set('HAVE_GSL', gsl_dep.found() and gslcblas_dep.found())
 test_deps = [gmp_dep, gsl_dep, gslcblas_dep]
 
 # Used by gstinfo.c
-dl_dep = cc.find_library('dl', required : false)
+dl_dep = dependency('dl', required : false)
 cdata.set('HAVE_DLADDR', cc.has_function('dladdr', dependencies : dl_dep))
 cdata.set('GST_ENABLE_EXTRA_CHECKS', not get_option('extra-checks').disabled())
 cdata.set('USE_POISONING', get_option('poisoning'))
@@ -568,7 +582,8 @@ glib_dep = dependency('glib-2.0', version: glib_req,
 gobject_dep = dependency('gobject-2.0')
 gmodule_dep = dependency('gmodule-no-export-2.0')
 if host_system == 'windows'
-    gio_dep = dependency('gio-2.0')
+    gio_dep = [dependency('gio-2.0'),
+               dependency('gio-windows-2.0')]
 else
     gio_dep = [dependency('gio-2.0'),
                dependency('gio-unix-2.0')]
@@ -609,7 +624,7 @@ build_gir = gir.found() and (not meson.is_cross_build() or get_option('introspec
 
 gir_init_section = [ '--add-init-section=extern void gst_init(gint*,gchar**);' + \
     'g_setenv("GST_REGISTRY_DISABLE", "yes", TRUE);' + \
-    'g_setenv("GST_REGISTRY_1.0", "/no/way/this/exists.reg", TRUE);' + \
+    'g_setenv("GST_REGISTRY_1_0", "@0@", TRUE);'.format(meson.current_build_dir() + '/gir_empty_registry.reg') + \
     'g_setenv("GST_PLUGIN_PATH_1_0", "", TRUE);' + \
     'g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);' + \
     'g_setenv("GST_TRACERS", "", TRUE);' + \

@@ -124,6 +124,13 @@ several overrides and listening to different pads with different settings.
 * `pad`: Required. Name of the pad that will be monitored.
 * `record-buffers`: Default: false. Whether buffers will be logged. By default
    only events are logged.
+* `record-buffers-after-event`: Default: unset. Only record buffers once the
+   given event sequence has been seen in order. Can be a single event type name
+   or a list of event types (e.g., `{flush-stop,segment}`). Unrelated events in
+   between are ignored, and seeing the sequence's first event restarts the
+   match, so a fresh seek re-arms it. Recording starts disabled and is enabled
+   once the whole sequence has been observed. This is useful for tests where the
+   number of buffers before a seek is non-deterministic.
 * `buffers-checksum`: Default: 'none'. Define the type of checksums to be used
    valid values are:
   * `none`: No checksum recorded
@@ -135,6 +142,10 @@ several overrides and listening to different pads with different settings.
   * `sha512`: sha512 checksum
   * `raw-hex`: Rather than a checksum, record hex-encoded raw buffer contents
   * `raw-text`: Record raw buffer contents assuming they contain text (e.g. subtitles)
+  * `dominant-frequency`: Rather than a checksum, record the dominant frequency (in
+             Hz) of the buffer's first audio channel. Useful to check that the
+             expected audio stream reached a pad regardless of how it was
+             (re)encoded. Only applies to raw audio buffers.
   * *Note*: for backward compatibility reasons, this can be passed as a
             boolean and it will default to 'sha1' if true, 'none' if false.
 * `ignored-fields`: Default: `"stream-start={ stream-id }"` (as they are often
@@ -167,7 +178,12 @@ several overrides and listening to different pads with different settings.
    expectation file will be required. If a validateflow config is used without
    specifying any other parametters, the validateflow plugin will consider that
    all validateflow overrides will use that value.
-
+* `extra-serialized-metas`: Default: 'none'. List of serializable `GstMeta` to
+  record in Base64.
+  * `none`: No serializable `GstMeta` will be recorded.
+  * `all`: Record every serializable `GstMeta`
+  * `{<gst_meta_type_name>[, ...]}`: List of serializable `GstMeta` types to
+    record.
 
 ## Scenario actions
 

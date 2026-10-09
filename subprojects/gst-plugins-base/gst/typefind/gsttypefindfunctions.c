@@ -1901,7 +1901,8 @@ ac3_type_find (GstTypeFind * tf, gpointer unused)
 }
 
 /*** audio/x-ac4 ***/
-static GstStaticCaps ac4_caps = GST_STATIC_CAPS ("audio/x-ac4");
+static GstStaticCaps ac4_caps = GST_STATIC_CAPS ("audio/x-ac4, "
+    "stream-format=(string)syncframe");
 
 #define AC4_CAPS (gst_static_caps_get(&ac4_caps))
 #define AC4_MAX_PROBE_LENGTH 1024       /* 1KB should be enough for AC4 audio streams */
@@ -3812,7 +3813,7 @@ qt_type_find (GstTypeFind * tf, gpointer unused)
 done:
   if (tip > 0) {
     if (variant) {
-      GstCaps *caps = gst_caps_copy (QT_CAPS);
+      GstCaps *caps = gst_caps_make_writable (QT_CAPS);
 
       gst_caps_set_simple (caps, "variant", G_TYPE_STRING, variant, NULL);
       gst_type_find_suggest (tf, tip, caps);
@@ -4305,7 +4306,7 @@ jpeg_type_find (GstTypeFind * tf, gpointer unused)
   num_markers = 1;
   data_scan_ctx_advance (tf, &c, 2);
 
-  caps = gst_caps_copy (JPEG_CAPS);
+  caps = gst_caps_make_writable (JPEG_CAPS);
 
   while (data_scan_ctx_ensure_data (tf, &c, 4) && c.offset < (200 * 1024)) {
     guint16 len;
@@ -5980,7 +5981,7 @@ ipmovie_type_find (GstTypeFind * tf, gpointer unused)
     return;
 
   for (gsize i = 0; i < length - sizeof (signature); i++) {
-    if (memcmp (data + i, signature, sizeof (signature)) != 0) {
+    if (memcmp (data + i, signature, sizeof (signature)) == 0) {
       gst_type_find_suggest (tf, GST_TYPE_FIND_LIKELY, IPMOVIE_CAPS);
       return;
     }
@@ -6172,6 +6173,69 @@ pxstr_type_find (GstTypeFind * tf, gpointer unused)
     gst_type_find_suggest (tf, GST_TYPE_FIND_POSSIBLE, PXSTR_CAPS);
   else if (n_aud + n_vid)
     gst_type_find_suggest (tf, GST_TYPE_FIND_MINIMUM, PXSTR_CAPS);
+}
+
+/* image/png (animated=true) */
+
+static GstStaticCaps png_caps = GST_STATIC_CAPS ("image/png");
+#define PNG_CAPS (gst_static_caps_get(&png_caps))
+
+/* how many chunks we check before we give up */
+#define PNG_MAXCHUNKS 25
+
+static void
+png_type_find (GstTypeFind * tf, gpointer unused)
+{
+  DataScanCtx c = { 0, NULL, 0 };
+  gboolean animated = FALSE;
+  GstTypeFindProbability prob = GST_TYPE_FIND_NONE;
+  guint chunks = 0;
+  static const guint8 signature[] =
+      { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+
+  if (!data_scan_ctx_ensure_data (tf, &c, 8))
+    return;
+
+  if (memcmp (c.data, signature, sizeof (signature)) != 0)
+    return;
+
+  /* At least we found the right magic */
+  prob = GST_TYPE_FIND_LIKELY;
+  data_scan_ctx_advance (tf, &c, 8);
+
+  while (data_scan_ctx_ensure_data (tf, &c, 8)) {
+    // length: uint32_be
+    // type: fourcc
+    // <data>
+    // <crc32>: uint8[4]
+    const guint32 length = GST_READ_UINT32_BE (&c.data[0]);
+    const guint32 chunk = GST_READ_UINT32_LE (&c.data[4]);
+    // Test for critical chunks and the acTL chunk
+    if (chunk == GST_MAKE_FOURCC ('a', 'c', 'T', 'L')) {
+      animated = TRUE;
+      prob = GST_TYPE_FIND_NEARLY_CERTAIN;
+    } else if (chunk == GST_MAKE_FOURCC ('P', 'L', 'T', 'E')) {
+      prob = GST_TYPE_FIND_NEARLY_CERTAIN;
+    } else if (chunk == GST_MAKE_FOURCC ('I', 'D', 'A', 'T')) {
+      prob = GST_TYPE_FIND_MAXIMUM;
+      break;
+    }
+
+    data_scan_ctx_advance (tf, &c, 4 + 4);
+    data_scan_ctx_advance (tf, &c, length);
+    data_scan_ctx_advance (tf, &c, 4);
+    chunks++;
+
+    if (chunks >= PNG_MAXCHUNKS)
+      break;
+  }
+
+  if (animated) {
+    gst_type_find_suggest_simple (tf, prob, "image/png", "animated",
+        G_TYPE_BOOLEAN, TRUE, NULL);
+  } else {
+    gst_type_find_suggest (tf, prob, PNG_CAPS);
+  }
 }
 
 /*** application/x-smk ***/
@@ -6559,7 +6623,7 @@ wbmp_typefind (GstTypeFind * find, gpointer user_data)
   if (data == NULL)
     return;
 
-  /* want 0x00 0x00 at start */
+  /* want WBMP type 0 + empty FixHeaderField */
   if (*data++ != 0 || *data++ != 0)
     return;
 
@@ -6569,8 +6633,10 @@ wbmp_typefind (GstTypeFind * find, gpointer user_data)
   /* let's assume max width/height is 65536 */
   w = *data++;
   if ((w & 0x80)) {
-    w = (w << 8) | *data++;
-    if ((w & 0x80))
+    /* It's a multibyte integer, mask continuation bit and add */
+    w = ((w & 0x7F) << 7) | (*data & 0x7F);
+    /* Block > 65536px images */
+    if ((*data & 0x80))
       return;
     ++size;
     data = gst_type_find_peek (find, 4, 2);
@@ -6579,8 +6645,8 @@ wbmp_typefind (GstTypeFind * find, gpointer user_data)
   }
   h = *data++;
   if ((h & 0x80)) {
-    h = (h << 8) | *data++;
-    if ((h & 0x80))
+    h = ((h & 0x7F) << 7) | (*data & 0x7F);
+    if ((*data & 0x80))
       return;
     ++size;
   }
@@ -6993,6 +7059,34 @@ av1_type_find (GstTypeFind * tf, gpointer unused)
         "alignment", G_TYPE_STRING, "none", NULL);
 }
 
+/*** image/vnd.radiance ***/
+
+static GstStaticCaps radiance_hdr_caps = GST_STATIC_CAPS ("image/vnd.radiance");
+
+#define RADIANCE_HDR_CAPS gst_static_caps_get(&radiance_hdr_caps)
+
+static void
+radiance_type_find (GstTypeFind * tf, gpointer unused)
+{
+  const guint8 *data;
+
+  data = gst_type_find_peek (tf, 0, 10);
+  if (!data)
+    return;
+
+  if (memcmp (data, "#?RADIANCE", 10) == 0) {
+    // Modern Radiance HDR file
+    gst_type_find_suggest_empty_simple (tf, GST_TYPE_FIND_NEARLY_CERTAIN,
+        "image/vnd.radiance");
+    return;
+  } else if (memcmp (data, "#?RGBE", 6) == 0) {
+    // Older Radiance HDR file; the rest use signatureless format
+    gst_type_find_suggest_empty_simple (tf, GST_TYPE_FIND_NEARLY_CERTAIN,
+        "image/vnd.radiance");
+    return;
+  }
+}
+
 /*Type find definition by functions */
 GST_TYPE_FIND_REGISTER_DEFINE (musepack, "audio/x-musepack", GST_RANK_PRIMARY,
     musepack_type_find, "mpc,mpp,mp+", MUSEPACK_CAPS, NULL, NULL);
@@ -7134,6 +7228,8 @@ GST_TYPE_FIND_REGISTER_DEFINE (tiff, "image/tiff", GST_RANK_PRIMARY,
     tiff_type_find, "tif,tiff", TIFF_CAPS, NULL, NULL);
 GST_TYPE_FIND_REGISTER_DEFINE (exr, "image/x-exr", GST_RANK_PRIMARY,
     exr_type_find, "exr", EXR_CAPS, NULL, NULL);
+GST_TYPE_FIND_REGISTER_DEFINE (png, "image/png", GST_RANK_PRIMARY + 14,
+    png_type_find, "png", PNG_CAPS, NULL, NULL);
 GST_TYPE_FIND_REGISTER_DEFINE (pnm, "image/x-portable-pixmap",
     GST_RANK_SECONDARY, pnm_type_find, "pnm,ppm,pgm,pbm", PNM_CAPS, NULL, NULL);
 GST_TYPE_FIND_REGISTER_DEFINE (matroska, "video/x-matroska", GST_RANK_PRIMARY,
@@ -7262,3 +7358,7 @@ GST_TYPE_FIND_REGISTER_DEFINE (wsvqa, "application/x-wsvqa", GST_RANK_MARGINAL,
     wsvqa_type_find, "wsvqa", WSVQA_CAPS, NULL, NULL);
 GST_TYPE_FIND_REGISTER_DEFINE (av1, "video/x-av1", GST_RANK_MARGINAL,
     av1_type_find, "av1", AV1_CAPS, NULL, NULL);
+
+GST_TYPE_FIND_REGISTER_DEFINE (radiance, "image/vnd.radiance",
+    GST_RANK_MARGINAL, radiance_type_find, "hdr", RADIANCE_HDR_CAPS, NULL,
+    NULL);

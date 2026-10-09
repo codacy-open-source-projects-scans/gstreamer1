@@ -1506,6 +1506,8 @@ gst_av1_parse_metadata_itut_t35 (GstAV1Parser * parser, GstBitReader * br,
     GstAV1MetadataITUT_T35 * itut_t35)
 {
   GstAV1ParserResult ret;
+  const guint8 *payload_start;
+  guint remaining;
 
   itut_t35->itu_t_t35_country_code = AV1_READ_BITS_CHECKED (br, 8, &ret);
   if (ret != GST_AV1_PARSER_OK)
@@ -1517,8 +1519,17 @@ gst_av1_parse_metadata_itut_t35 (GstAV1Parser * parser, GstBitReader * br,
     if (ret != GST_AV1_PARSER_OK)
       return ret;
   }
-  itut_t35->itu_t_t35_payload_bytes = (guint8 *) br->data + br->byte;
-  itut_t35->itu_t_t35_payload_size = AV1_REMAINING_BYTES (br);
+
+  payload_start = (const guint8 *) br->data + br->byte;
+  remaining = AV1_REMAINING_BYTES (br);
+
+  while (remaining > 0 && payload_start[remaining - 1] == 0)
+    remaining--;
+  if (remaining > 0 && payload_start[remaining - 1] == 0x80)
+    remaining--;
+
+  itut_t35->itu_t_t35_payload_bytes = (guint8 *) payload_start;
+  itut_t35->itu_t_t35_payload_size = remaining;
 
   return GST_AV1_PARSER_OK;
 }
@@ -4348,6 +4359,8 @@ gst_av1_parser_parse_tile_list_obu (GstAV1Parser * parser,
   }
 
   for (tile = 0; tile <= tile_list->tile_count_minus_1; tile++) {
+    guint32 tile_data_size;
+
     if (AV1_REMAINING_BITS (br) < 8 + 8 + 8 + 16) {
       retval = GST_AV1_PARSER_NO_MORE_DATA;
       goto error;
@@ -4362,8 +4375,8 @@ gst_av1_parser_parse_tile_list_obu (GstAV1Parser * parser,
     tile_list->entry[tile].coded_tile_data =
         obu->data + gst_bit_reader_get_pos (br) / 8;
     /* skip the coded_tile_data */
-    if (!gst_bit_reader_skip (br,
-            tile_list->entry[tile].tile_data_size_minus_1 + 1)) {
+    tile_data_size = tile_list->entry[tile].tile_data_size_minus_1 + 1;
+    if (!gst_bit_reader_skip (br, tile_data_size * 8)) {
       retval = GST_AV1_PARSER_NO_MORE_DATA;
       goto error;
     }

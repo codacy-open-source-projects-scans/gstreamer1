@@ -227,9 +227,12 @@ gst_h26x_gop_mapper_generate (GstH26XGOPMapper * self)
   for (i = 0; i < params->idr_period; i++) {
     GstH26XGOP *pic = &g_array_index (self->frame_map, GstH26XGOP, i);
 
+    pic->is_idr = FALSE;
+
     if (i == 0) {
       pic->type = GST_H26X_GOP_TYPE_I;
       pic->is_ref = TRUE;
+      pic->is_idr = TRUE;
       continue;
     }
 
@@ -365,4 +368,12 @@ gst_h26x_gop_mapper_reset (GstH26XGOPMapper * self)
 
   if (self->frame_map)
     self->frame_map = g_array_set_size (self->frame_map, 0);
+}
+
+gboolean
+gst_h26x_gop_mapper_is_generated (GstH26XGOPMapper * self)
+{
+  g_return_val_if_fail (GST_IS_H26X_GOP_MAPPER (self), FALSE);
+
+  return (self->frame_map && self->frame_map->len > 0);
 }

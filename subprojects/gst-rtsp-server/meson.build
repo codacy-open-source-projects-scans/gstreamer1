@@ -1,7 +1,9 @@
 project('gst-rtsp-server', 'c',
-  version : '1.29.1.1',
+  version : '1.29.2.1',
   meson_version : '>= 1.4',
-  default_options : ['warning_level=1', 'buildtype=debugoptimized'])
+  default_options : [ 'warning_level=1',
+                      'buildtype=debugoptimized',
+                      'c_std=gnu11,c11' ])
 
 gst_version = meson.project_version()
 version_arr = gst_version.split('.')
@@ -181,7 +183,8 @@ gir = find_program('g-ir-scanner', required : get_option('introspection'))
 gnome = import('gnome')
 build_gir = gir.found() and (not meson.is_cross_build() or get_option('introspection').enabled())
 gir_init_section = [ '--add-init-section=extern void gst_init(gint*,gchar**);' + \
-    'g_setenv("GST_REGISTRY_1.0", "@0@", TRUE);'.format(meson.current_build_dir() + '/gir_empty_registry.reg') + \
+    'g_setenv("GST_REGISTRY_DISABLE", "yes", TRUE);' + \
+    'g_setenv("GST_REGISTRY_1_0", "@0@", TRUE);'.format(meson.current_build_dir() + '/gir_empty_registry.reg') + \
     'g_setenv("GST_PLUGIN_PATH_1_0", "", TRUE);' + \
     'g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);' + \
     'g_setenv("GST_TRACERS", "", TRUE);' + \

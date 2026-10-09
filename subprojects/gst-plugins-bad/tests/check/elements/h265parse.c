@@ -404,7 +404,6 @@ static inline GstBuffer *wrap_buffer (const guint8 * buf, gsize size,
     GstClockTime pts, GstBufferFlags flags);
 static inline GstBuffer *composite_buffer (GstClockTime pts,
     GstBufferFlags flags, gint count, ...);
-static GstCaps *pull_last_caps_event (GstHarness * h);
 
 /* Verify that mastering-display-info, content-light-level and hdr-format are
  * removed from caps when the HDR SEIs disappear from the bitstream.
@@ -442,7 +441,7 @@ GST_START_TEST (test_parse_detect_stream_hdr_sei_expiry)
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
   fail_unless (gst_harness_buffers_in_queue (h) == 1);
 
-  caps = pull_last_caps_event (h);
+  caps = gst_pad_get_current_caps (h->sinkpad);
   fail_unless (caps != NULL);
   s = gst_caps_get_structure (caps, 0);
   fail_unless_structure_field_string_equals (s, "mastering-display-info",
@@ -460,7 +459,7 @@ GST_START_TEST (test_parse_detect_stream_hdr_sei_expiry)
    * WITHOUT HDR fields */
   buf = wrap_buffer (h265_idr, sizeof (h265_idr), 20, 0);
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
-  caps = pull_last_caps_event (h);
+  caps = gst_pad_get_current_caps (h->sinkpad);
   fail_unless (caps != NULL);
   s = gst_caps_get_structure (caps, 0);
   fail_if (gst_structure_has_field (s, "mastering-display-info"));
@@ -472,11 +471,16 @@ GST_START_TEST (test_parse_detect_stream_hdr_sei_expiry)
     gst_buffer_unref (b);
   }
 
-  /* AU3: IDR without HDR SEIs → state is EXPIRED, no caps event */
+  /* AU3: IDR without HDR SEIs → state stays EXPIRED, caps still without HDR */
   buf = wrap_buffer (h265_idr, sizeof (h265_idr), 30, 0);
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
-  caps = pull_last_caps_event (h);
-  fail_if (caps != NULL);
+  caps = gst_pad_get_current_caps (h->sinkpad);
+  fail_unless (caps != NULL);
+  s = gst_caps_get_structure (caps, 0);
+  fail_if (gst_structure_has_field (s, "mastering-display-info"));
+  fail_if (gst_structure_has_field (s, "content-light-level"));
+  fail_if (gst_structure_has_field (s, "hdr-format"));
+  gst_caps_unref (caps);
   while (gst_harness_buffers_in_queue (h) > 0) {
     GstBuffer *b = gst_harness_pull (h);
     gst_buffer_unref (b);
@@ -676,28 +680,6 @@ bytestream_push_first_au_inalign_au (GstHarness * h, gboolean sliced)
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
 }
 
-static GstCaps *
-pull_last_caps_event (GstHarness * h)
-{
-  GstCaps *caps = NULL;
-  GstEvent *event;
-
-  while ((event = gst_harness_try_pull_event (h)) != NULL) {
-    if (GST_EVENT_TYPE (event) == GST_EVENT_CAPS) {
-      GstCaps *event_caps;
-
-      gst_event_parse_caps (event, &event_caps);
-      if (caps)
-        gst_caps_unref (caps);
-      caps = gst_caps_copy (event_caps);
-    }
-
-    gst_event_unref (event);
-  }
-
-  return caps;
-}
-
 /* tests */
 
 static void
@@ -829,13 +811,8 @@ test_headers_outalign_nal (GstHarness * h)
   pull_and_check (h, h265_128x128_sps, 10, 0);
   pull_and_check (h, h265_128x128_pps, 10, 0);
 
-  /* FIXME The timestamp should be 10 really, but base parse refuse to repeat
-   * the same TS for two consecutive calls to _finish_frame(), see [0] for
-   * more details. It's not a huge issue, the decoder can fix it for now.
-   *
-   * [0] https://gitlab.freedesktop.org/gstreamer/gstreamer/-/merge_requests/287
-   */
-  pull_and_check (h, h265_128x128_slice_idr_n_lp, -1, 0);
+  /* The slice retains the PTS from the input buffer (same as headers) */
+  pull_and_check (h, h265_128x128_slice_idr_n_lp, 10, 0);
 }
 
 static void
@@ -1044,9 +1021,9 @@ GST_START_TEST (test_sliced_nal_nal)
   while (gst_harness_buffers_in_queue (h) > 2)
     pull_and_drop (h);
 
-  /* but expect 2 slices */
-  pull_and_check (h, h265_128x128_slice_1_idr_n_lp, -1, 0);
-  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, -1, 0);
+  /* but expect 2 slices, both with the PTS from the input buffer */
+  pull_and_check (h, h265_128x128_slice_1_idr_n_lp, 10, 0);
+  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, 10, 0);
 
   /* push some more */
   buf = wrap_buffer (h265_128x128_slice_1_idr_n_lp,
@@ -1059,7 +1036,7 @@ GST_START_TEST (test_sliced_nal_nal)
       sizeof (h265_128x128_slice_2_idr_n_lp), 100, 0);
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
   fail_unless_equals_int (gst_harness_buffers_in_queue (h), 1);
-  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, -1, 0);
+  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, 100, 0);
 
   gst_harness_teardown (h);
 }
@@ -1079,9 +1056,9 @@ GST_START_TEST (test_sliced_au_nal)
   while (gst_harness_buffers_in_queue (h) > 2)
     pull_and_drop (h);
 
-  /* but expect 2 slices */
-  pull_and_check (h, h265_128x128_slice_1_idr_n_lp, -1, 0);
-  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, -1, 0);
+  /* Both slices from the first AU should have the PTS from the input buffer */
+  pull_and_check (h, h265_128x128_slice_1_idr_n_lp, 10, 0);
+  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, 10, 0);
 
   /* push some more */
   buf = composite_buffer (100, 0, 2,
@@ -1090,7 +1067,7 @@ GST_START_TEST (test_sliced_au_nal)
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
   fail_unless_equals_int (gst_harness_buffers_in_queue (h), 2);
   pull_and_check (h, h265_128x128_slice_1_idr_n_lp, 100, 0);
-  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, -1, 0);
+  pull_and_check (h, h265_128x128_slice_2_idr_n_lp, 100, 0);
 
   gst_harness_teardown (h);
 }

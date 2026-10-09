@@ -104,16 +104,55 @@
 #include "config.h"
 #endif
 
+#include "gstonnx-config.h"
+#include "gstonnx-utils.h"
 #include "gstonnxinference.h"
+#include "gstonnximporter-cpu.h"
 
 #include <gst/gst.h>
+#include <string.h>
+#include <math.h>
 #include <gst/analytics/analytics.h>
 
 #include <onnxruntime_c_api.h>
 
-#ifdef HAVE_VSI_NPU
-#include <core/providers/vsinpu/vsinpu_provider_factory.h>
+#if HAVE_WINML
+#include "gstonnx-winml.h"
 #endif
+
+#if HAVE_DIRECTML
+#include "gstonnximporter-dml.h"
+#else
+#define GST_CAPS_FEATURE_MEMORY_D3D12_MEMORY "memory:D3D12Memory"
+#endif
+
+#if HAVE_GST_HIP
+#include <gst/hip/gsthip.h>
+#include "gstonnximporter-hip.h"
+#else
+/* define to reduce ifdefs */
+#define GST_CAPS_FEATURE_MEMORY_HIP_MEMORY "memory:HIPMemory"
+#endif
+
+#define HIP_DYNAMIC_EP_NAME "hipgpu"
+#define MIGRAPHX_DYNAMIC_EP_NAME "MIGraphXExecutionProvider"
+#define GST_ONNX_MAX_OUTPUT_COUNT 128
+
+/* TODO: Add F16 formats */
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+#define GST_ONNX_VIDEO_FORMATS \
+    "{ RGB, RGBP, GRAY8, RGB_F32LE, RGBP_F32LE, GRAY_F32LE }"
+#else
+#define GST_ONNX_VIDEO_FORMATS \
+    "{ RGB, RGBP, GRAY8, RGB_F32BE, RGBP_F32BE, GRAY_F32BE }"
+#endif
+
+#define DOC_CAPS_STR \
+  GST_VIDEO_CAPS_MAKE (GST_ONNX_VIDEO_FORMATS) "; " \
+  GST_VIDEO_CAPS_MAKE_WITH_FEATURES (GST_CAPS_FEATURE_MEMORY_HIP_MEMORY, \
+      GST_ONNX_VIDEO_FORMATS) "; " \
+  GST_VIDEO_CAPS_MAKE_WITH_FEATURES (GST_CAPS_FEATURE_MEMORY_D3D12_MEMORY, \
+      GST_ONNX_VIDEO_FORMATS)
 
 typedef enum
 {
@@ -128,7 +167,17 @@ typedef enum
   GST_ONNX_EXECUTION_PROVIDER_CPU,
   GST_ONNX_EXECUTION_PROVIDER_CUDA,
   GST_ONNX_EXECUTION_PROVIDER_VSI,
+  GST_ONNX_EXECUTION_PROVIDER_MIGRAPHX,
+  GST_ONNX_EXECUTION_PROVIDER_HIP,
+  GST_ONNX_EXECUTION_PROVIDER_DIRECTML,
+  GST_ONNX_EXECUTION_PROVIDER_VITIS_AI,
 } GstOnnxExecutionProvider;
+
+typedef struct
+{
+  gsize tensor_size;
+  GstBufferPool *pool;
+} GstOnnxOutputPool;
 
 struct _GstOnnxInference
 {
@@ -136,35 +185,70 @@ struct _GstOnnxInference
   gchar *model_file;
   GstOnnxOptimizationLevel optimization_level;
   GstOnnxExecutionProvider execution_provider;
+  gchar *device;
+  gchar *model_cache_dir;
+  gchar *vitisai_config_file;
   GstVideoInfo video_info;
   GstCaps *input_tensors_caps;
   GstCaps *output_tensors_caps;
+  GRecMutex context_lock;
+  gchar *group_id;
 
   OrtEnv *env;
   OrtSession *session;
-  OrtMemoryInfo *memory_info;
   OrtAllocator *allocator;
-  int32_t width;
-  int32_t height;
+  int32_t model_in_width;
+  int32_t model_in_height;
   int32_t channels;
   gboolean planar;
   gint height_dim;
   gint width_dim;
   gint channels_dim;
   gint batch_dim;
-  uint8_t *dest;
   size_t output_count;
   gchar **output_names;
   GQuark *output_ids;
   GstTensorDimOrder *output_dims_orders;
-  GstTensorDataType input_data_type;
-  bool fixedInputImageSize;
-  double *scales;
-  double *offsets;
+  gchar *input_name;
+  /* Raw dimensions returned from OrtApi::GetDimensions() */
+  gint64 input_dims_model[GST_ONNX_IMPORTER_MAX_DIMS];
+  GPtrArray *output_tensors;
+  GArray *output_pools;
+
+#if HAVE_DIRECTML
+  GstD3D12Device *device12;
+#endif
+#ifdef HAVE_GST_HIP
+  GstHipDevice *device_hip;
+#endif
+  GstOnnxImporterConfig importer_config;
+  GstOnnxImporter *cpu_importer;
+  GstOnnxImporter *device_importer;
+  /* Currently active importer without holding ownership */
+  GstOnnxImporter *active_importer;
+  /* DXGI adapter luid of selected device on Windows */
+  gint64 adapter_luid;
+  /* Device ID selected for the execution provider */
+  guint selected_device_id;
+  /* PCI bus ID of plugin loaded execution provider on Linux */
+  gchar *pci_bus_id;
 };
 
+/* Protects api, api_base and onnxruntime_module while loading the library */
+G_LOCK_DEFINE_STATIC (onnx_api);
 static const OrtApi *api = NULL;
+static const OrtApiBase *api_base = NULL;
+static guint loaded_api_version = 0;
 
+#ifdef G_OS_WIN32
+static HMODULE onnxruntime_module = NULL;
+#else
+static void *onnxruntime_module = NULL;
+#endif
+
+typedef const OrtApiBase *(ORT_API_CALL * GstOrtGetApiBaseFunc) (void);
+
+static gboolean have_hip_rtc = FALSE;
 
 GST_DEBUG_CATEGORY (onnx_inference_debug);
 GST_DEBUG_CATEGORY (onnx_runtime_debug);
@@ -180,33 +264,23 @@ enum
   PROP_MODEL_FILE,
   PROP_OPTIMIZATION_LEVEL,
   PROP_EXECUTION_PROVIDER,
-  PROP_INPUT_OFFSET,
-  PROP_INPUT_SCALE
+  PROP_DEVICE,
+  PROP_MODEL_CACHE_DIR,
+  PROP_VITISAI_CONFIG_FILE
 };
 
 #define GST_ONNX_INFERENCE_DEFAULT_EXECUTION_PROVIDER    GST_ONNX_EXECUTION_PROVIDER_CPU
 #define GST_ONNX_INFERENCE_DEFAULT_OPTIMIZATION_LEVEL    GST_ONNX_OPTIMIZATION_LEVEL_ENABLE_EXTENDED
-
-static GstStaticPadTemplate gst_onnx_inference_src_template =
-GST_STATIC_PAD_TEMPLATE ("src",
-    GST_PAD_SRC,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE ("{ RGB,RGBA,BGR,BGRA }"))
-    );
-
-static GstStaticPadTemplate gst_onnx_inference_sink_template =
-GST_STATIC_PAD_TEMPLATE ("sink",
-    GST_PAD_SINK,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE ("{ RGB,RGBA,BGR,BGRA }"))
-    );
-
 
 static void gst_onnx_inference_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec);
 static void gst_onnx_inference_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec);
 static void gst_onnx_inference_finalize (GObject * object);
+static void gst_onnx_inference_set_context (GstElement * element,
+    GstContext * context);
+static gboolean gst_onnx_inference_query (GstBaseTransform * trans,
+    GstPadDirection direction, GstQuery * query);
 static GstFlowReturn gst_onnx_inference_transform_ip (GstBaseTransform *
     trans, GstBuffer * buf);
 static GstCaps *gst_onnx_inference_transform_caps (GstBaseTransform *
@@ -214,9 +288,13 @@ static GstCaps *gst_onnx_inference_transform_caps (GstBaseTransform *
 static gboolean
 gst_onnx_inference_set_caps (GstBaseTransform * trans, GstCaps * incaps,
     GstCaps * outcaps);
+static gboolean
+gst_onnx_inference_propose_allocation (GstBaseTransform * trans,
+    GstQuery * decide_query, GstQuery * query);
 static gboolean gst_onnx_inference_start (GstBaseTransform * trans);
 static gboolean gst_onnx_inference_stop (GstBaseTransform * trans);
 
+#define gst_onnx_inference_parent_class parent_class
 G_DEFINE_TYPE (GstOnnxInference, gst_onnx_inference, GST_TYPE_BASE_TRANSFORM);
 
 GType gst_onnx_optimization_level_get_type (void);
@@ -263,24 +341,77 @@ gst_onnx_execution_provider_get_type (void)
     static GEnumValue execution_provider_types[] = {
       {GST_ONNX_EXECUTION_PROVIDER_CPU, "CPU execution provider",
           "cpu"},
-#if HAVE_CUDA
       {GST_ONNX_EXECUTION_PROVIDER_CUDA,
             "CUDA execution provider",
           "cuda"},
-#else
-      {GST_ONNX_EXECUTION_PROVIDER_CUDA,
-            "CUDA execution provider (compiled out, will use CPU)",
-          "cuda"},
-#endif
-#ifdef HAVE_VSI_NPU
+      /**
+       * GstOnnxExecutionProvider::vsi
+       *
+       * VeriSilicon NPU execution provider
+       *
+       * Since: 1.28
+       */
+
       {GST_ONNX_EXECUTION_PROVIDER_VSI,
             "VeriSilicon NPU execution provider",
           "vsi"},
+
+      /**
+       * GstOnnxExecutionProvider::migraphx
+       *
+       * AMD MIGraphX execution provider
+       *
+       * Since: 1.30
+       */
+
+      {GST_ONNX_EXECUTION_PROVIDER_MIGRAPHX,
+            "AMD MIGraphX execution provider",
+          "migraphx"},
+
+      /**
+       * GstOnnxExecutionProvider::hip
+       *
+       * AMD HIP execution provider
+       *
+       * Since: 1.30
+       */
+
+      {GST_ONNX_EXECUTION_PROVIDER_HIP,
+#if ORT_API_VERSION >= 22
+            "AMD HIP execution provider",
 #else
-      {GST_ONNX_EXECUTION_PROVIDER_VSI,
-            "VeriSilicon NPU execution provider (compiled out, will use CPU)",
-          "vsi"},
+            "AMD HIP execution provider (compiled out, requires ONNX Runtime >= 1.22)",
 #endif
+          "hip"},
+      /**
+       * GstOnnxExecutionProvider::dml
+       *
+       * Microsoft DirectML execution provider
+       *
+       * Since: 1.30
+       */
+#if HAVE_DIRECTML
+      {GST_ONNX_EXECUTION_PROVIDER_DIRECTML,
+          "Microsoft DirectML execution provider", "dml"},
+#else
+      {GST_ONNX_EXECUTION_PROVIDER_DIRECTML,
+            "Microsoft DirectML execution provider (compiled out, will error)",
+          "dml"},
+#endif
+      /**
+       * GstOnnxExecutionProvider::vitisai
+       *
+       * AMD Vitis AI execution provider
+       *
+       * Since: 1.30
+       */
+      {GST_ONNX_EXECUTION_PROVIDER_VITIS_AI,
+#if ORT_API_VERSION >= 18
+            "AMD Vitis AI execution provider",
+#else
+            "AMD Vitis AI execution provider (compiled out, requires ONNX Runtime >= 1.18)",
+#endif
+          "vitisai"},
       {0, NULL, NULL},
     };
 
@@ -299,6 +430,9 @@ gst_onnx_inference_class_init (GstOnnxInferenceClass * klass)
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *element_class = (GstElementClass *) klass;
   GstBaseTransformClass *basetransform_class = (GstBaseTransformClass *) klass;
+  GstPadTemplate *pad_templ;
+  GstCaps *templ_caps;
+  GstCaps *doc_caps;
 
   GST_DEBUG_CATEGORY_INIT (onnx_inference_debug, "onnxinference",
       0, "ONNX Runtime Inference");
@@ -311,13 +445,24 @@ gst_onnx_inference_class_init (GstOnnxInferenceClass * klass)
   /**
    * GstOnnxInference:model-file
    *
-   * ONNX model file
+   * Path to the ONNX model file.
+   *
+   * A modelinfo file describing the model's input and output tensors is
+   * required alongside it, and is looked up as `<model-file>.modelinfo`
+   * first, then as `<model-file without extension>.modelinfo`. For
+   * `/path/model.onnx` that is `/path/model.onnx.modelinfo`, then
+   * `/path/model.modelinfo`.
+   *
+   * Use the modelinfo-generator.py tool to generate one.
    *
    * Since: 1.24
    */
   g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_MODEL_FILE,
       g_param_spec_string ("model-file",
-          "ONNX model file", "ONNX model file", NULL, (GParamFlags)
+          "ONNX model file",
+          "Path to the ONNX model file. A companion modelinfo file is "
+          "required, looked up as <model-file>.modelinfo then "
+          "<model-file without extension>.modelinfo", NULL, (GParamFlags)
           (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
    /**
@@ -352,20 +497,107 @@ gst_onnx_inference_class_init (GstOnnxInferenceClass * klass)
           GST_ONNX_EXECUTION_PROVIDER_CPU, (GParamFlags)
           (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+  /**
+   * GstOnnxInference:device
+   *
+   * Device identifier to use for inference, interpreted per execution provider.
+   * For CUDA, MIGraphX and HIP this is the integer device index (e.g. "0").
+   * When NULL (the default) the execution provider default is used.
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_DEVICE,
+      g_param_spec_string ("device",
+          "Device",
+          "Device identifier for inference, interpreted per execution provider "
+          "(e.g. \"0\" for device index). NULL means use the provider default.",
+          NULL, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstOnnxInference:model-cache-dir
+   *
+   * Directory used by the execution provider to cache compiled models.
+   * Currently supported by the MIGraphX, Vitis AI and HIP execution providers.
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_MODEL_CACHE_DIR,
+      g_param_spec_string ("model-cache-dir",
+          "Model cache directory",
+          "Directory used by the execution provider to cache compiled models",
+          NULL, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstOnnxInference:vitisai-config-file
+   *
+   * Vitis AI execution provider configuration file. This is passed to the
+   * provider as its `config_file` option when execution-provider is "vitisai".
+   *
+   * Since: 1.30
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_VITISAI_CONFIG_FILE,
+      g_param_spec_string ("vitisai-config-file",
+          "Vitis AI configuration file",
+          "Configuration file for the Vitis AI execution provider. NULL "
+          "means use the provider default.", NULL,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
   gst_element_class_set_static_metadata (element_class, "onnxinference",
       "Filter/Video",
       "Apply neural network to video frames and create tensor output",
       "Aaron Boxer <aaron.boxer@collabora.com>");
-  gst_element_class_add_pad_template (element_class,
-      gst_static_pad_template_get (&gst_onnx_inference_sink_template));
-  gst_element_class_add_pad_template (element_class,
-      gst_static_pad_template_get (&gst_onnx_inference_src_template));
+
+  templ_caps =
+      gst_caps_from_string (GST_VIDEO_CAPS_MAKE (GST_ONNX_VIDEO_FORMATS));
+#if HAVE_DIRECTML
+  {
+    GstCaps *d3d12_caps = gst_caps_copy (templ_caps);
+    gst_caps_set_features_simple (d3d12_caps,
+        gst_caps_features_new_single_static_str
+        (GST_CAPS_FEATURE_MEMORY_D3D12_MEMORY));
+    gst_caps_append (templ_caps, d3d12_caps);
+  }
+#endif
+#if HAVE_GST_HIP
+  if (gst_hip_rtc_load_library (GST_HIP_VENDOR_AMD)) {
+    GstCaps *hip_caps = gst_caps_copy (templ_caps);
+    gst_caps_set_features_simple (hip_caps,
+        gst_caps_features_new_single_static_str
+        (GST_CAPS_FEATURE_MEMORY_HIP_MEMORY));
+    gst_caps_append (templ_caps, hip_caps);
+    have_hip_rtc = TRUE;
+  }
+#endif
+
+  pad_templ = gst_pad_template_new ("sink",
+      GST_PAD_SINK, GST_PAD_ALWAYS, templ_caps);
+  doc_caps = gst_caps_from_string (DOC_CAPS_STR);
+  gst_pad_template_set_documentation_caps (pad_templ, doc_caps);
+  gst_element_class_add_pad_template (element_class, pad_templ);
+
+  pad_templ = gst_pad_template_new ("src",
+      GST_PAD_SRC, GST_PAD_ALWAYS, templ_caps);
+  gst_pad_template_set_documentation_caps (pad_templ, doc_caps);
+  gst_element_class_add_pad_template (element_class, pad_templ);
+  gst_caps_unref (doc_caps);
+  gst_caps_unref (templ_caps);
+
+  gst_element_class_mark_as_untrusted_aware (element_class);
+
+  element_class->set_context =
+      GST_DEBUG_FUNCPTR (gst_onnx_inference_set_context);
+
+  basetransform_class->query = GST_DEBUG_FUNCPTR (gst_onnx_inference_query);
   basetransform_class->transform_ip =
       GST_DEBUG_FUNCPTR (gst_onnx_inference_transform_ip);
   basetransform_class->transform_caps =
       GST_DEBUG_FUNCPTR (gst_onnx_inference_transform_caps);
   basetransform_class->set_caps =
       GST_DEBUG_FUNCPTR (gst_onnx_inference_set_caps);
+  basetransform_class->propose_allocation =
+      GST_DEBUG_FUNCPTR (gst_onnx_inference_propose_allocation);
   basetransform_class->start = GST_DEBUG_FUNCPTR (gst_onnx_inference_start);
   basetransform_class->stop = GST_DEBUG_FUNCPTR (gst_onnx_inference_stop);
 
@@ -373,8 +605,23 @@ gst_onnx_inference_class_init (GstOnnxInferenceClass * klass)
       (GstPluginAPIFlags) 0);
   gst_type_mark_as_plugin_api (GST_TYPE_ONNX_EXECUTION_PROVIDER,
       (GstPluginAPIFlags) 0);
+}
 
-  api = OrtGetApiBase ()->GetApi (ORT_API_VERSION);
+static void
+release_ort_value (OrtValue * data)
+{
+  if (data && api)
+    api->ReleaseValue (data);
+}
+
+static void
+clear_output_pool (GstOnnxOutputPool * pool)
+{
+  pool->tensor_size = 0;
+  if (pool->pool) {
+    gst_buffer_pool_set_active (pool->pool, FALSE);
+    gst_clear_object (&pool->pool);
+  }
 }
 
 static void
@@ -386,14 +633,21 @@ gst_onnx_inference_init (GstOnnxInference * self)
   self->output_tensors_caps = gst_caps_new_empty_simple ("video/x-raw");
 
   self->execution_provider = GST_ONNX_EXECUTION_PROVIDER_CPU;
-
-  self->scales = NULL;
-  self->offsets = NULL;
+  self->device = NULL;
+  self->model_cache_dir = NULL;
+  self->vitisai_config_file = NULL;
 
   self->height_dim = -1;
   self->width_dim = -1;
   self->channels_dim = -1;
   self->batch_dim = -1;
+  self->output_tensors =
+      g_ptr_array_new_full (0, (GDestroyNotify) release_ort_value);
+  self->output_pools = g_array_new (FALSE, TRUE, sizeof (GstOnnxOutputPool));
+  g_array_set_clear_func (self->output_pools,
+      (GDestroyNotify) clear_output_pool);
+
+  g_rec_mutex_init (&self->context_lock);
 
   /* Passthrough would propagate tensors caps upstream */
   gst_base_transform_set_prefer_passthrough (GST_BASE_TRANSFORM (self), FALSE);
@@ -405,11 +659,18 @@ gst_onnx_inference_finalize (GObject * object)
   GstOnnxInference *self = GST_ONNX_INFERENCE (object);
 
   g_free (self->model_file);
-  g_free (self->scales);
-  g_free (self->offsets);
+  g_free (self->device);
+  g_free (self->model_cache_dir);
+  g_free (self->vitisai_config_file);
+  g_free (self->group_id);
+
   gst_caps_unref (self->input_tensors_caps);
   gst_caps_unref (self->output_tensors_caps);
-  G_OBJECT_CLASS (gst_onnx_inference_parent_class)->finalize (object);
+  g_rec_mutex_clear (&self->context_lock);
+  g_ptr_array_unref (self->output_tensors);
+  g_array_unref (self->output_pools);
+
+  G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
 static void
@@ -440,6 +701,18 @@ gst_onnx_inference_set_property (GObject * object, guint prop_id,
       self->execution_provider =
           (GstOnnxExecutionProvider) g_value_get_enum (value);
       break;
+    case PROP_DEVICE:
+      g_free (self->device);
+      self->device = g_value_dup_string (value);
+      break;
+    case PROP_MODEL_CACHE_DIR:
+      g_free (self->model_cache_dir);
+      self->model_cache_dir = g_value_dup_string (value);
+      break;
+    case PROP_VITISAI_CONFIG_FILE:
+      g_free (self->vitisai_config_file);
+      self->vitisai_config_file = g_value_dup_string (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -462,10 +735,84 @@ gst_onnx_inference_get_property (GObject * object, guint prop_id,
     case PROP_EXECUTION_PROVIDER:
       g_value_set_enum (value, self->execution_provider);
       break;
+    case PROP_DEVICE:
+      g_value_set_string (value, self->device);
+      break;
+    case PROP_MODEL_CACHE_DIR:
+      g_value_set_string (value, self->model_cache_dir);
+      break;
+    case PROP_VITISAI_CONFIG_FILE:
+      g_value_set_string (value, self->vitisai_config_file);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+}
+
+static void
+gst_onnx_inference_set_context (GstElement * element, GstContext * context)
+{
+#if HAVE_GST_HIP || HAVE_DIRECTML
+  GstOnnxInference *self = GST_ONNX_INFERENCE (element);
+
+  g_rec_mutex_lock (&self->context_lock);
+#if HAVE_DIRECTML
+  gst_d3d12_handle_set_context (element, context, self->selected_device_id,
+      &self->device12);
+#endif
+#if HAVE_GST_HIP
+#ifdef G_OS_WIN32
+  gst_hip_handle_set_context_for_adapter_luid (element, context,
+      GST_HIP_VENDOR_AMD, self->adapter_luid, &self->device_hip);
+#else
+  if (self->pci_bus_id) {
+    gst_hip_handle_set_context_for_pci_bus_id (element, context,
+        GST_HIP_VENDOR_AMD, self->pci_bus_id, &self->device_hip);
+  } else {
+    gst_hip_handle_set_context (element, context,
+        GST_HIP_VENDOR_AMD, self->selected_device_id, &self->device_hip);
+  }
+#endif
+#endif
+  g_rec_mutex_unlock (&self->context_lock);
+#endif
+
+  GST_ELEMENT_CLASS (parent_class)->set_context (element, context);
+}
+
+static gboolean
+gst_onnx_inference_query (GstBaseTransform * trans, GstPadDirection direction,
+    GstQuery * query)
+{
+#if HAVE_GST_HIP || HAVE_DIRECTML
+  GstOnnxInference *self = GST_ONNX_INFERENCE (trans);
+
+  if (GST_QUERY_TYPE (query) == GST_QUERY_CONTEXT) {
+    gboolean ret;
+    g_rec_mutex_lock (&self->context_lock);
+#if HAVE_DIRECTML
+    ret = gst_d3d12_handle_context_query (GST_ELEMENT (self),
+        query, self->device12);
+    if (ret) {
+      g_rec_mutex_unlock (&self->context_lock);
+      return TRUE;
+    }
+#endif
+#if HAVE_GST_HIP
+    ret = gst_hip_handle_context_query (GST_ELEMENT (self),
+        query, self->device_hip);
+#else
+    ret = FALSE;
+#endif
+    g_rec_mutex_unlock (&self->context_lock);
+    if (ret)
+      return TRUE;
+  }
+#endif
+
+  return GST_BASE_TRANSFORM_CLASS (parent_class)->query (trans, direction,
+      query);
 }
 
 static gsize
@@ -485,9 +832,301 @@ get_tensor_type_size (GstTensorDataType data_type)
     case GST_TENSOR_DATA_TYPE_FLOAT32:
       return sizeof (float);
     default:
-      g_error ("Data type %d not handled", data_type);
       return 0;
   };
+}
+
+static gboolean
+gst_onnx_inference_load_library (GstOnnxInference * self)
+{
+  GstOrtGetApiBaseFunc get_api_base;
+  gboolean ret = FALSE;
+
+  G_LOCK (onnx_api);
+
+  if (api) {
+    ret = TRUE;
+    goto done;
+  }
+#ifdef G_OS_WIN32
+  /* Pick the user-specified onnxruntime */
+  onnxruntime_module = gst_onnx_find_onnxrt ();
+
+  /* Fallback: search in the usual paths */
+  if (!onnxruntime_module)
+    onnxruntime_module = LoadLibraryA ("onnxruntime.dll");
+
+  if (!onnxruntime_module) {
+    GST_ELEMENT_ERROR (self, LIBRARY, FAILED, (NULL),
+        ("Could not load onnxruntime.dll (error 0x%lx)", GetLastError ()));
+    goto done;
+  }
+
+  get_api_base = (GstOrtGetApiBaseFunc) GetProcAddress (onnxruntime_module,
+      "OrtGetApiBase");
+#else
+  /* Pick the user-specified onnxruntime */
+  onnxruntime_module = gst_onnx_find_onnxrt ();
+
+  /* Fallback: search in the usual paths */
+  if (!onnxruntime_module)
+#ifdef __APPLE__
+    onnxruntime_module = dlopen ("libonnxruntime.1.dylib", GST_DLOPEN_OPTS);
+#else
+    onnxruntime_module = dlopen ("libonnxruntime.so.1", GST_DLOPEN_OPTS);
+#endif
+
+  if (!onnxruntime_module) {
+    GST_ELEMENT_ERROR (self, LIBRARY, FAILED, (NULL),
+        ("Could not load libonnxruntime: %s", dlerror ()));
+    goto done;
+  }
+
+  get_api_base = (GstOrtGetApiBaseFunc) dlsym (onnxruntime_module,
+      "OrtGetApiBase");
+#endif
+
+  if (!get_api_base) {
+    GST_ELEMENT_ERROR (self, LIBRARY, INIT, (NULL),
+        ("Could not resolve OrtGetApiBase"));
+    goto done;
+  }
+
+  api_base = get_api_base ();
+  if (!api_base) {
+    GST_ELEMENT_ERROR (self, LIBRARY, INIT, (NULL),
+        ("OrtGetApiBase returned NULL"));
+    goto done;
+  }
+  // GetApi says we must only pass ORT_API_VERSION to it, but actually any
+  // version older than ORT_API_VERSION also works. We rely on that behavior
+  // to be able to build using the headers of one libonnxruntime version, and
+  // allow users to load a different (newer) one at runtime.
+  uint32_t api_version;
+  {
+    char *end = NULL;
+    const char *minor_version = strstr (api_base->GetVersionString (), ".") + 1;
+    errno = 0;
+    api_version = (uint32_t) g_ascii_strtoull (minor_version, &end, 10);
+    if (end == minor_version || errno || api_version == 0 ||
+        api_version == G_MAXUINT32)
+      api_version = ORT_API_VERSION;
+  }
+
+  api = api_base->GetApi (api_version);
+  if (!api) {
+    GST_ELEMENT_ERROR (self, LIBRARY, INIT, (NULL),
+        ("Loaded libonnxruntime does not support API version %d", api_version));
+    goto done;
+  }
+
+  loaded_api_version = api_version;
+
+  GST_INFO_OBJECT (self, "ONNX-RT successfully loaded");
+  ret = TRUE;
+
+done:
+  G_UNLOCK (onnx_api);
+  return ret;
+}
+
+static gboolean
+gst_onnx_inference_can_use_hip (GstOnnxInference * self)
+{
+#ifdef HAVE_GST_HIP
+  if (!have_hip_rtc ||
+      (self->execution_provider != GST_ONNX_EXECUTION_PROVIDER_MIGRAPHX &&
+          self->execution_provider != GST_ONNX_EXECUTION_PROVIDER_HIP)) {
+    return FALSE;
+  }
+
+  if (!self->session)
+    return TRUE;
+
+  if (!self->device_importer)
+    return FALSE;
+
+  return TRUE;
+#else
+  return FALSE;
+#endif
+}
+
+/* Only remove non-suppported caps features */
+static GstCaps *
+gst_onnx_inference_filter_memory_caps (GstOnnxInference * self, GstCaps * caps)
+{
+  GstCaps *ret = gst_caps_new_empty ();
+  gboolean have_hip = gst_onnx_inference_can_use_hip (self);
+  guint i;
+
+  for (i = 0; i < gst_caps_get_size (caps); i++) {
+    GstCapsFeatures *features = gst_caps_get_features (caps, i);
+    gboolean is_hip = gst_caps_features_contains (features,
+        GST_CAPS_FEATURE_MEMORY_HIP_MEMORY);
+
+    if (is_hip && !have_hip)
+      continue;
+
+    if (gst_caps_features_contains (features,
+            GST_CAPS_FEATURE_MEMORY_D3D12_MEMORY) &&
+        (self->execution_provider != GST_ONNX_EXECUTION_PROVIDER_DIRECTML ||
+            (self->session && !self->device_importer)))
+      continue;
+
+    gst_caps_append_structure_full (ret,
+        gst_structure_copy (gst_caps_get_structure (caps, i)),
+        gst_caps_features_copy (features));
+  }
+
+  return ret;
+}
+
+/* Add supported memory caps features */
+static GstCaps *
+gst_onnx_inference_add_memory_caps (GstOnnxInference * self, GstCaps * caps)
+{
+  GstCaps *ret = gst_caps_copy (caps);
+
+#if HAVE_DIRECTML
+  if (self->execution_provider == GST_ONNX_EXECUTION_PROVIDER_DIRECTML &&
+      (!self->session || self->device_importer)) {
+    GstCaps *d3d12_caps = gst_caps_copy (caps);
+    gst_caps_set_features_simple (d3d12_caps,
+        gst_caps_features_new_single_static_str
+        (GST_CAPS_FEATURE_MEMORY_D3D12_MEMORY));
+    gst_caps_append (ret, d3d12_caps);
+  }
+#endif
+
+#ifdef HAVE_GST_HIP
+  if (gst_onnx_inference_can_use_hip (self)) {
+    GstCaps *hip_caps = gst_caps_copy (caps);
+
+    gst_caps_set_features_simple (hip_caps,
+        gst_caps_features_new_single_static_str
+        (GST_CAPS_FEATURE_MEMORY_HIP_MEMORY));
+    gst_caps_append (ret, hip_caps);
+  }
+#endif
+
+  return ret;
+}
+
+/* Add the tensor group named group_id from model_groups into dest_groups.
+ * Returns FALSE without modifying dest_groups if model_groups doesn't have
+ * that group, or if dest_groups already has a group with that same id (e.g.
+ * two elements downstream produce the same model's group). */
+static gboolean
+merge_tensor_group (GstStructure * dest_groups,
+    const GstStructure * model_groups, const gchar * group_id)
+{
+  const GValue *group_value;
+
+  if (gst_structure_has_field (dest_groups, group_id))
+    return FALSE;
+
+  group_value = gst_structure_get_value (model_groups, group_id);
+  if (!group_value)
+    return FALSE;
+
+  gst_structure_set_value (dest_groups, group_id, group_value);
+
+  return TRUE;
+}
+
+static gboolean
+caps_has_tensor_group (const GstCaps * caps, const gchar * group_id)
+{
+  guint i;
+
+  if (!group_id)
+    return FALSE;
+
+  for (i = 0; i < gst_caps_get_size (caps); i++) {
+    const GstStructure *s = gst_caps_get_structure (caps, i);
+    const GValue *tensors_value = gst_structure_get_value (s, "tensors");
+    const GstStructure *tensorgroups = tensors_value ?
+        gst_value_get_structure (tensors_value) : NULL;
+
+    if (tensorgroups && gst_structure_has_field (tensorgroups, group_id))
+      return TRUE;
+  }
+
+  return FALSE;
+}
+
+static GstCaps *
+transform_sink_caps (GstOnnxInference * self, GstCaps * caps,
+    GstCaps * restrictions)
+{
+  GstStructure *model_struct =
+      gst_caps_get_structure (self->output_tensors_caps, 0);
+  const GValue *model_tensors_value =
+      gst_structure_get_value (model_struct, "tensors");
+  const GstStructure *model_tensorgroups = model_tensors_value ?
+      gst_value_get_structure (model_tensors_value) : NULL;
+  GstCaps *memory_caps;
+  GstCaps *other_caps;
+  guint i;
+
+  memory_caps = gst_onnx_inference_add_memory_caps (self, restrictions);
+  other_caps = gst_caps_new_empty ();
+
+  for (i = 0; i < gst_caps_get_size (caps); i++) {
+    const GstStructure *input_s = gst_caps_get_structure (caps, i);
+    const GstCapsFeatures *features = gst_caps_get_features (caps, i);
+    const GValue *tensors_value = gst_structure_get_value (input_s, "tensors");
+    const GstStructure *incoming_tensorgroups = tensors_value ?
+        gst_value_get_structure (tensors_value) : NULL;
+    GstStructure *merged_tensorgroups = incoming_tensorgroups ?
+        gst_structure_copy (incoming_tensorgroups) :
+        gst_structure_new_empty ("tensorgroups");
+    GstStructure *candidate_s = gst_structure_copy (input_s);
+    GstCaps *candidate = gst_caps_new_empty ();
+    GstCaps *intersect;
+
+    gst_structure_remove_field (candidate_s, "tensors");
+    gst_caps_append_structure_full (candidate, candidate_s,
+        gst_caps_features_copy (features));
+    intersect = gst_caps_intersect_full (candidate, memory_caps,
+        GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (candidate);
+
+    if (gst_caps_is_empty (intersect)) {
+      gst_caps_unref (intersect);
+      gst_structure_free (merged_tensorgroups);
+      continue;
+    }
+
+    if (self->group_id &&
+        (!model_tensorgroups ||
+            !merge_tensor_group (merged_tensorgroups,
+                model_tensorgroups, self->group_id))) {
+      GST_WARNING_OBJECT (self, "Tensor group '%s' is already present "
+          "upstream, refusing to negotiate", self->group_id);
+      gst_caps_unref (intersect);
+      gst_structure_free (merged_tensorgroups);
+      continue;
+    }
+
+    if (gst_structure_n_fields (merged_tensorgroups) > 0) {
+      guint j;
+
+      intersect = gst_caps_make_writable (intersect);
+      for (j = 0; j < gst_caps_get_size (intersect); j++) {
+        gst_structure_set (gst_caps_get_structure (intersect, j),
+            "tensors", GST_TYPE_STRUCTURE, merged_tensorgroups, NULL);
+      }
+    }
+
+    gst_structure_free (merged_tensorgroups);
+    gst_caps_append (other_caps, intersect);
+  }
+
+  gst_caps_unref (memory_caps);
+
+  return other_caps;
 }
 
 static GstCaps *
@@ -497,14 +1136,17 @@ gst_onnx_inference_transform_caps (GstBaseTransform *
   GstOnnxInference *self = GST_ONNX_INFERENCE (trans);
   GstCaps *other_caps;
   GstCaps *restrictions;
+  GstCaps *memory_caps;
   bool has_session;
 
   GST_OBJECT_LOCK (self);
   has_session = self->session != NULL;
+  restrictions = gst_caps_ref (self->input_tensors_caps);
   GST_OBJECT_UNLOCK (self);
 
   if (!has_session) {
-    other_caps = gst_caps_ref (caps);
+    other_caps = gst_onnx_inference_filter_memory_caps (self, caps);
+    gst_caps_unref (restrictions);
     goto done;
   }
 
@@ -513,35 +1155,41 @@ gst_onnx_inference_transform_caps (GstBaseTransform *
   GST_DEBUG_OBJECT (self, "Applying model input tensors caps restrictions: %"
       GST_PTR_FORMAT, self->input_tensors_caps);
 
-  restrictions = gst_caps_ref (self->input_tensors_caps);
-
   if (direction == GST_PAD_SINK) {
-    /* Create tensors_caps from output_tensor_caps and intersect with
-     * restrictions */
-    GstCaps *tensors_caps = gst_caps_copy (self->output_tensors_caps);
-    GstCaps *intersect = gst_caps_intersect_full (restrictions, tensors_caps,
-        GST_CAPS_INTERSECT_FIRST);
-    gst_caps_replace (&restrictions, intersect);
-    gst_caps_unref (tensors_caps);
-    gst_caps_unref (intersect);
-    other_caps = gst_caps_intersect_full (caps, restrictions,
-        GST_CAPS_INTERSECT_FIRST);
-
+    other_caps = transform_sink_caps (self, caps, restrictions);
   } else if (direction == GST_PAD_SRC) {
-    /* Remove tensors from caps to prevent upstream propagation. */
+    /* Going from src-side (downstream, possibly carrying our own tensor
+     * group plus groups added by other onnxinference elements) to
+     * sink-side caps: remove only our own group so it doesn't propagate
+     * further upstream, keeping any other groups intact. */
     GstCaps *tmp_caps = gst_caps_copy (caps);
+    guint i;
 
-    if (!gst_caps_is_empty (tmp_caps)) {
-      GstStructure *tstruct = gst_caps_get_structure (tmp_caps, 0);
-      gst_structure_remove_field (tstruct, "tensors");
+    for (i = 0; i < gst_caps_get_size (tmp_caps); i++) {
+      GstStructure *s = gst_caps_get_structure (tmp_caps, i);
+      const GValue *tensors_value = gst_structure_get_value (s, "tensors");
+      const GstStructure *tensorgroups = tensors_value ?
+          gst_value_get_structure (tensors_value) : NULL;
+
+      if (tensorgroups && self->group_id &&
+          gst_structure_has_field (tensorgroups, self->group_id)) {
+        GstStructure *new_tensorgroups = gst_structure_copy (tensorgroups);
+
+        gst_structure_remove_field (new_tensorgroups, self->group_id);
+        if (gst_structure_n_fields (new_tensorgroups) == 0)
+          gst_structure_remove_field (s, "tensors");
+        else
+          gst_structure_set (s, "tensors", GST_TYPE_STRUCTURE,
+              new_tensorgroups, NULL);
+        gst_structure_free (new_tensorgroups);
+      }
     }
 
-    other_caps = gst_caps_intersect_full (tmp_caps, restrictions,
+    memory_caps = gst_onnx_inference_add_memory_caps (self, restrictions);
+    other_caps = gst_caps_intersect_full (tmp_caps, memory_caps,
         GST_CAPS_INTERSECT_FIRST);
     gst_caps_unref (tmp_caps);
-  } else {
-    other_caps = gst_caps_intersect_full (caps, restrictions,
-        GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (memory_caps);
   }
 
   gst_caps_unref (restrictions);
@@ -591,7 +1239,7 @@ onnx_data_type_to_gst (ONNXTensorElementDataType dt)
     return ONNX_TO_GST_TENSOR_DATATYPE[dt];
   }
 
-  g_error ("Unexpected datatype: %d", dt);
+  return -1;
 }
 
 static gboolean
@@ -642,8 +1290,8 @@ gst_onnx_log_function (void *param, OrtLoggingLevel severity,
       break;
   }
 
-  gst_debug_log (onnx_runtime_debug, level, code_location,
-      "gst_onnx_log_function", 0, obj, "%s", message);
+  GST_CAT_LEVEL_LOG (onnx_runtime_debug, level, obj,
+      "%s: %s", code_location, message);
 }
 
 /* FIXME: This is copied from Gsttfliteinference and we should create something
@@ -651,42 +1299,99 @@ gst_onnx_log_function (void *param, OrtLoggingLevel severity,
  */
 
 static gboolean
-_guess_tensor_data_type (GstOnnxInference * self, gsize dims_count,
-    gsize * dims, const gchar ** gst_format)
+gst_onnx_inference_resolve_format (GstOnnxInference * self,
+    GstVideoFormat base_format, GstVideoFormat * gst_format)
 {
+  const GstOnnxImporterConfig *config = &self->importer_config;
+
+  switch (base_format) {
+    case GST_VIDEO_FORMAT_GRAY8:
+      if (config->data_type == GST_TENSOR_DATA_TYPE_UINT8) {
+        *gst_format = GST_VIDEO_FORMAT_GRAY8;
+      } else if (config->data_type == GST_TENSOR_DATA_TYPE_FLOAT32) {
+        *gst_format = GST_ONNX_FORMAT_GRAY_F32;
+      } else {
+        goto unsupported;
+      }
+      break;
+    case GST_VIDEO_FORMAT_RGB:
+      if (config->data_type == GST_TENSOR_DATA_TYPE_UINT8) {
+        *gst_format = GST_VIDEO_FORMAT_RGB;
+      } else if (config->data_type == GST_TENSOR_DATA_TYPE_FLOAT32) {
+        *gst_format = GST_ONNX_FORMAT_RGB_F32;
+      } else {
+        goto unsupported;
+      }
+      break;
+    case GST_VIDEO_FORMAT_RGBP:
+      if (config->data_type == GST_TENSOR_DATA_TYPE_UINT8) {
+        *gst_format = GST_VIDEO_FORMAT_RGBP;
+      } else if (config->data_type == GST_TENSOR_DATA_TYPE_FLOAT32) {
+        *gst_format = GST_ONNX_FORMAT_RGBP_F32;
+      } else {
+        goto unsupported;
+      }
+      break;
+    case GST_ONNX_FORMAT_GRAY_F32:
+    case GST_ONNX_FORMAT_RGB_F32:
+    case GST_ONNX_FORMAT_RGBP_F32:
+      if (config->data_type != GST_TENSOR_DATA_TYPE_FLOAT32)
+        goto unsupported;
+      *gst_format = base_format;
+      break;
+    default:
+      goto unsupported;
+  }
+
+  return TRUE;
+
+unsupported:
+  GST_ERROR_OBJECT (self, "Unsupported format '%s' for tensor data type",
+      gst_video_format_to_string (base_format));
+  return FALSE;
+}
+
+static gboolean
+_guess_tensor_data_type (GstOnnxInference * self, gsize dims_count,
+    gsize * dims, GstVideoFormat * gst_format)
+{
+  GstVideoFormat format = GST_VIDEO_FORMAT_UNKNOWN;
   self->height_dim = -1;
   self->width_dim = -1;
   self->channels_dim = -1;
   self->batch_dim = -1;
+  self->planar = FALSE;
 
-  if (dims_count < 2 || dims_count > 4) {
-    GST_ERROR_OBJECT (self,
-        "Don't know how to interpret tensors with %zu dimensions", dims_count);
-    return FALSE;
-  }
+  g_assert (dims_count >= 2 && dims_count <= 4);
 
   switch (dims_count) {
     case 2:
-      *gst_format = "GRAY8";
+      format = GST_VIDEO_FORMAT_GRAY8;
       self->height_dim = 0;
       self->width_dim = 1;
+      self->planar = FALSE;
       break;
     case 3:
       if (dims[0] == 1 || dims[0] == 3) {
         self->channels_dim = 0;
         if (dims[0] == 1) {
-          *gst_format = "GRAY8";
+          format = GST_VIDEO_FORMAT_GRAY8;
+          self->planar = FALSE;
         } else {
-          *gst_format = "RGBP";
+          format = GST_VIDEO_FORMAT_RGBP;
+          self->planar = TRUE;
         }
         self->height_dim = 1;
         self->width_dim = 2;
       } else if (dims[2] == 1 || dims[2] == 3) {
         self->channels_dim = 2;
-        if (dims[2] == 1)
-          *gst_format = "GRAY";
-        else
-          *gst_format = "RGB";
+        if (dims[2] == 1) {
+          format = GST_VIDEO_FORMAT_GRAY8;
+          self->planar = FALSE;
+        } else {
+          format = GST_VIDEO_FORMAT_RGB;
+          self->planar = FALSE;
+        }
         self->height_dim = 0;
         self->width_dim = 1;
       } else {
@@ -701,29 +1406,130 @@ _guess_tensor_data_type (GstOnnxInference * self, gsize dims_count,
         self->channels_dim = 1;
         self->height_dim = 2;
         self->width_dim = 3;
+        self->planar = TRUE;
       } else if (dims[3] == 1 || dims[3] == 3) {
         self->height_dim = 1;
         self->width_dim = 2;
         self->channels_dim = 3;
+        self->planar = FALSE;
       } else {
         GST_ERROR_OBJECT (self, "Don't know how to interpret dims");
         return FALSE;
       }
 
       if (dims[self->channels_dim] == 1) {
-        *gst_format = "GRAY8";
+        format = GST_VIDEO_FORMAT_GRAY8;
+        self->planar = FALSE;
       } else if (dims[self->channels_dim] == 3) {
         if (self->planar)
-          *gst_format = "RGBP";
+          format = GST_VIDEO_FORMAT_RGBP;
         else
-          *gst_format = "RGB";
+          format = GST_VIDEO_FORMAT_RGB;
       } else {
         g_assert_not_reached ();
       }
       break;
   }
 
-  return TRUE;
+  return gst_onnx_inference_resolve_format (self, format, gst_format);
+}
+
+/* Same dim-position inference as _guess_tensor_data_type(), but driven by a
+ * video format already known from modelinfo. Also validates caps from modelinfo
+ * agains dims.
+ *
+ * @s: The "video/x-raw" structure from the tensor's declared modelinfo caps.
+ * @out_format: (out): Set to the concrete format resolved from the declared
+ *    format and the tensor's data type when @s declares one, left untouched
+ *    otherwise.
+ *
+ * Returns: FALSE only on a unknown format, incompatible caps and dims,
+ *    TRUE otherwise
+ */
+static gboolean
+derive_details_from_tensor_dims_and_video_caps (GstOnnxInference * self,
+    gsize dims_count, gsize * dims, const GstStructure * s,
+    GstVideoFormat * out_format)
+{
+  const gchar *format = gst_structure_get_string (s, "format");
+  GstVideoFormat vfmt;
+  const GstVideoFormatInfo *info;
+  guint channels;
+
+  if (!format)
+    return TRUE;
+
+  vfmt = gst_video_format_from_string (format);
+  if (vfmt == GST_VIDEO_FORMAT_UNKNOWN) {
+    GST_ERROR_OBJECT (self, "Unknown video format '%s' declared by modelinfo",
+        format);
+    return FALSE;
+  }
+
+  info = gst_video_format_get_info (vfmt);
+  channels = GST_VIDEO_FORMAT_INFO_N_COMPONENTS (info);
+
+  self->height_dim = -1;
+  self->width_dim = -1;
+  self->channels_dim = -1;
+  self->batch_dim = -1;
+  self->planar = GST_VIDEO_FORMAT_INFO_N_PLANES (info) > 1;
+
+  if (dims_count < 2 || dims_count > 4) {
+    GST_ERROR_OBJECT (self,
+        "Don't know how to interpret tensors with %zu dimensions", dims_count);
+    return FALSE;
+  }
+
+  switch (dims_count) {
+    case 2:
+      self->height_dim = 0;
+      self->width_dim = 1;
+      break;
+    case 3:
+      if (self->planar) {
+        self->channels_dim = 0;
+        self->height_dim = 1;
+        self->width_dim = 2;
+      } else {
+        self->channels_dim = 2;
+        self->height_dim = 0;
+        self->width_dim = 1;
+      }
+      if (dims[self->channels_dim] != channels) {
+        GST_ERROR_OBJECT (self, "Dims don't have %u channels in the "
+            "dimension expected for format '%s'", channels, format);
+        return FALSE;
+      }
+      break;
+    case 4:
+      /* Assuming dims[0] is a batch */
+      self->batch_dim = 0;
+      if (self->planar) {
+        self->channels_dim = 1;
+        self->height_dim = 2;
+        self->width_dim = 3;
+      } else {
+        self->height_dim = 1;
+        self->width_dim = 2;
+        self->channels_dim = 3;
+      }
+      if (dims[self->channels_dim] != channels) {
+        GST_ERROR_OBJECT (self, "Dims don't have %u channels in the "
+            "dimension expected for format '%s'", channels, format);
+        return FALSE;
+      }
+      break;
+  }
+
+  if (!gst_analytics_modelinfo_validate_video_caps_resolution (s,
+          (gint) dims[self->width_dim], (gint) dims[self->height_dim])) {
+    GST_ERROR_OBJECT (self, "Modelinfo caps declared width/height "
+        "inconsistent with the tensor's dims");
+    return FALSE;
+  }
+
+  return gst_onnx_inference_resolve_format (self, vfmt, out_format);
 }
 
 static gchar *
@@ -751,6 +1557,261 @@ done:
   return g_string_free (dims_gstr, FALSE);
 }
 
+static const gchar *
+gst_onnx_inference_get_model_cache_dir (GstOnnxInference * self)
+{
+  /* env var fallback is only for use with the devenv */
+  const char *cache_dir = self->model_cache_dir ? self->model_cache_dir
+      : g_getenv ("GST_ORT_MODEL_CACHE_DIR");
+
+  if (cache_dir && *cache_dir && g_mkdir_with_parents (cache_dir, 0755) < 0)
+    GST_WARNING_OBJECT (self, "Failed to create model cache dir '%s', model "
+        "compilation may fail or be uncached", cache_dir);
+
+  return cache_dir;
+}
+
+#if ORT_API_VERSION >= 22
+static gboolean
+gst_onnx_inference_append_ep (GstOnnxInference * self, OrtSessionOptions * opts,
+    const gchar * ep_name)
+{
+  const OrtEpDevice *const *ep_devices = NULL;
+  const OrtEpDevice **target_devices = NULL;
+  size_t num_ep_devices = 0;
+  size_t num_target_devices = 0;
+  const char *provider_options_keys[] = { "cache_dir" };
+  const char *provider_options_values[1];
+  size_t num_provider_options = 0;
+  size_t i;
+  OrtStatus *status;
+
+  if (loaded_api_version < 22) {
+    GST_ERROR_OBJECT (self,
+        "SessionOptionsAppendExecutionProvider_V2 requires ONNX Runtime >= 1.22");
+    return FALSE;
+  }
+
+  status = api->GetEpDevices (self->env, &ep_devices, &num_ep_devices);
+  if (status) {
+    GST_ERROR_OBJECT (self, "Failed to get EP devices: %s",
+        api->GetErrorMessage (status));
+    api->ReleaseStatus (status);
+    return FALSE;
+  }
+
+  target_devices = g_new (const OrtEpDevice *, num_ep_devices);
+  for (i = 0; i < num_ep_devices; i++) {
+    const char *dev_name = api->EpDevice_EpName (ep_devices[i]);
+    if (g_strcmp0 (dev_name, ep_name) == 0) {
+      // Apply card_idx filter if specified, otherwise pass all devices to
+      // the EP and let it select whatever makes sense.
+      if (self->device) {
+        const OrtHardwareDevice *hwdev = api->EpDevice_Device (ep_devices[i]);
+        const OrtKeyValuePairs *metadata = api->HardwareDevice_Metadata (hwdev);
+        const char *card_idx_str = NULL;
+        gint64 requested;
+        gint64 actual;
+
+        if (metadata) {
+          const char *const *keys = NULL;
+          const char *const *values = NULL;
+          size_t num_entries = 0;
+          size_t j;
+
+          api->GetKeyValuePairs (metadata, &keys, &values, &num_entries);
+          GST_LOG_OBJECT (self, "Metadata entries for EP %s: %" G_GSIZE_FORMAT,
+              ep_name, num_entries);
+
+          for (j = 0; j < num_entries; j++)
+            GST_LOG_OBJECT (self, "  %s = %s", keys[j], values[j]);
+
+          if (g_strcmp0 (ep_name, "hipgpu") == 0) {
+            card_idx_str = api->GetKeyValue (metadata, "card_idx");
+          } else if (g_strcmp0 (ep_name, MIGRAPHX_DYNAMIC_EP_NAME) == 0) {
+            /* MIGraphX EP on Windows reports DXGI LUID and adapter number.
+             * Use adapter number here */
+            card_idx_str = api->GetKeyValue (metadata, "DxgiAdapterNumber");
+          }
+        }
+
+        if (!card_idx_str)
+          continue;
+
+        requested = g_ascii_strtoll (self->device, NULL, 10);
+        actual = g_ascii_strtoll (card_idx_str, NULL, 10);
+        GST_DEBUG_OBJECT (self,
+            "card_idx=%" G_GINT64_FORMAT " for device %" G_GSIZE_FORMAT,
+            actual, i);
+        if (requested != actual)
+          continue;
+      }
+      target_devices[num_target_devices++] = ep_devices[i];
+    }
+  }
+
+  if (num_target_devices == 0) {
+    if (self->device) {
+      GST_ERROR_OBJECT (self,
+          "No %s devices found matching card_idx %s", ep_name, self->device);
+    } else {
+      GST_ERROR_OBJECT (self, "No %s devices found", ep_name);
+    }
+    g_free (target_devices);
+    return FALSE;
+  }
+  /*
+   * Finally, append EP to session options.
+   * Plugin EPs use their own option schema. Both the HIP and MIGraphX plugin
+   * EPs call this option cache_dir at present. This may change in the future.
+   * MIGraphX:
+   *  - repo: https://github.com/onnxruntime/onnxruntime-ep-amdgpu
+   *  - header: src/migraphx/mgx_options.h
+   * HIP:
+   *  - repo: https://github.com/ROCm/hip-ep/
+   *  - header: morphizen/morphizen-core/include/morphizen/provider_option_keys.hpp
+   */
+  if (g_strcmp0 (ep_name, HIP_DYNAMIC_EP_NAME) == 0 ||
+      g_strcmp0 (ep_name, MIGRAPHX_DYNAMIC_EP_NAME) == 0) {
+    const gchar *cache_dir = gst_onnx_inference_get_model_cache_dir (self);
+
+    if (cache_dir && *cache_dir) {
+      provider_options_values[0] = cache_dir;
+      num_provider_options = 1;
+    }
+  }
+
+  status =
+      api->SessionOptionsAppendExecutionProvider_V2 (opts,
+      self->env, target_devices, num_target_devices,
+      num_provider_options ? provider_options_keys : NULL,
+      num_provider_options ? provider_options_values : NULL,
+      num_provider_options);
+  g_free (target_devices);
+
+  if (status) {
+    GST_ERROR_OBJECT (self, "Failed to append %s EP: %s",
+        ep_name, api->GetErrorMessage (status));
+    api->ReleaseStatus (status);
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+static gboolean
+gst_onnx_inference_register_ep (GstOnnxInference * self, const gchar * ep_name,
+    const gchar * lib_path)
+{
+  OrtStatus *status = NULL;
+
+  if (loaded_api_version < 22) {
+    GST_ERROR_OBJECT (self,
+        "RegisterExecutionProviderLibrary requires ONNX Runtime >= 1.22");
+    return FALSE;
+  }
+#ifdef G_OS_WIN32
+  ORTCHAR_T *lib_path_w = NULL;
+  lib_path_w = (ORTCHAR_T *) g_utf8_to_utf16 (lib_path, -1, NULL, NULL, NULL);
+  status = api->RegisterExecutionProviderLibrary (self->env,
+      ep_name, lib_path_w);
+  g_free (lib_path_w);
+#else
+  status = api->RegisterExecutionProviderLibrary (self->env, ep_name, lib_path);
+#endif
+
+  if (status) {
+    /* Registration can fail if the EP is already registered.
+     * Defer validation to gst_onnx_inference_append_ep() instead. */
+    GST_DEBUG_OBJECT (self, "Failed to register EP %s (%s): %s",
+        ep_name, lib_path, api->GetErrorMessage (status));
+    api->ReleaseStatus (status);
+  }
+
+  return TRUE;
+}
+#endif
+
+typedef OrtStatus *(ORT_API_CALL * GstOrtAppendVsiNpuFunc) (OrtSessionOptions *
+    options);
+
+static GstOrtAppendVsiNpuFunc
+gst_onnx_inference_get_vsi_npu_append_func (void)
+{
+#ifdef G_OS_WIN32
+  return (GstOrtAppendVsiNpuFunc) GetProcAddress (onnxruntime_module,
+      "OrtSessionOptionsAppendExecutionProvider_VSINPU");
+#else
+  return (GstOrtAppendVsiNpuFunc) dlsym (onnxruntime_module,
+      "OrtSessionOptionsAppendExecutionProvider_VSINPU");
+#endif
+}
+
+#if HAVE_GST_HIP && ORT_API_VERSION >= 23
+static gchar *
+get_selected_device_from_session (GstOnnxInference * self, OrtSession * session)
+{
+  OrtStatus *status = NULL;
+  const OrtEpDevice *ep_device = NULL;
+  gchar *luid_or_pci_bus_id = NULL;
+#ifdef G_OS_WIN32
+  const gchar *device_id_key = "LUID";
+#else
+  const gchar *device_id_key = "pci_bus_id";
+#endif
+
+  if (loaded_api_version < 23) {
+    GST_WARNING_OBJECT (self,
+        "SessionGetEpDeviceForInputs requires ONNX Runtime >= 1.23");
+    return NULL;
+  }
+
+  status = api->SessionGetEpDeviceForInputs (self->session, &ep_device, 1);
+  if (status) {
+    GST_WARNING_OBJECT (self, "Couldn't get EP device for input: %s",
+        api->GetErrorMessage (status));
+    goto error;
+  }
+
+  if (!ep_device) {
+    GST_WARNING_OBJECT (self, "Returned device is NULL");
+    goto error;
+  }
+
+  {
+    const OrtHardwareDevice *hwdev = api->EpDevice_Device (ep_device);
+    const OrtKeyValuePairs *metadata = api->HardwareDevice_Metadata (hwdev);
+    const gchar *device_id_value = NULL;
+
+    {
+      const char *const *keys = NULL;
+      const char *const *values = NULL;
+      size_t num_entries = 0;
+      size_t j;
+
+      api->GetKeyValuePairs (metadata, &keys, &values, &num_entries);
+
+      GST_LOG_OBJECT (self, "EP device metadata entries: %" G_GSIZE_FORMAT,
+          num_entries);
+
+      for (j = 0; j < num_entries; j++)
+        GST_LOG_OBJECT (self, "  %s = %s", keys[j], values[j]);
+    }
+
+    device_id_value = api->GetKeyValue (metadata, device_id_key);
+    luid_or_pci_bus_id = g_strdup (device_id_value);
+  }
+
+  return luid_or_pci_bus_id;
+
+error:
+  if (status)
+    api->ReleaseStatus (status);
+
+  return NULL;
+}
+#endif
+
 static gboolean
 gst_onnx_inference_start (GstBaseTransform * trans)
 {
@@ -762,17 +1823,24 @@ gst_onnx_inference_start (GstBaseTransform * trans)
   size_t input_count = 0;
   const OrtTensorTypeAndShapeInfo *input_tensor_info = NULL;
   GraphOptimizationLevel onnx_optim;
-  size_t num_input_dims;
-  int64_t *input_dims;
-  gsize *gst_input_dims;
   ONNXTensorElementDataType element_type;
   size_t i;
-  const gchar *gst_format;
+  GstVideoFormat gst_format = GST_VIDEO_FORMAT_UNKNOWN;
   GstAnalyticsModelInfo *modelinfo = NULL;
   const gchar *onnx_input_tensor_name = NULL;
   gchar *tensor_name = NULL;
   gdouble *input_mins;
   gdouble *input_maxs;
+  GstOnnxImporterConfig *config = &self->importer_config;
+  gdouble *scales = NULL;
+  gdouble *offsets = NULL;
+  gsize gst_input_dims[GST_ONNX_IMPORTER_MAX_DIMS];
+  GstCaps *mi_caps = NULL;
+
+  if (!gst_onnx_inference_load_library (self)) {
+    GST_ERROR_OBJECT (self, "ONNX Runtime failed to load");
+    return FALSE;
+  }
 
   GST_OBJECT_LOCK (self);
   if (self->session) {
@@ -781,22 +1849,27 @@ gst_onnx_inference_start (GstBaseTransform * trans)
   }
 
   if (self->model_file == NULL) {
+    GST_OBJECT_UNLOCK (self);
     GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
         ("model-file property not set"));
-    goto done;
+    goto error_no_lock;
+  }
+
+  if (self->model_cache_dir && *self->model_cache_dir &&
+      self->execution_provider != GST_ONNX_EXECUTION_PROVIDER_MIGRAPHX &&
+      self->execution_provider != GST_ONNX_EXECUTION_PROVIDER_HIP &&
+      self->execution_provider != GST_ONNX_EXECUTION_PROVIDER_VITIS_AI) {
+    GST_WARNING_OBJECT (self,
+        "model-cache-dir is not supported by the selected execution provider");
   }
 
   modelinfo = gst_analytics_modelinfo_load (self->model_file);
   if (!modelinfo) {
-    GST_ERROR_OBJECT (self, "Failed to load modelinfo for %s. "
-        "This could be due to: file not found, unsupported version, "
-        "or invalid file format.", self->model_file);
+    GST_ERROR_OBJECT (self, "Failed to load modelinfo for model '%s'. "
+        "A '.modelinfo' file is required alongside the model; generate one "
+        "with the modelinfo-generator.py tool. Run with GST_DEBUG=modelinfo:5 "
+        "for the exact reason.", self->model_file);
     goto error;
-  }
-
-  if (self->session) {
-    ret = TRUE;
-    goto done;
   }
   // Create environment
   OrtLoggingLevel ort_logging;
@@ -857,10 +1930,11 @@ gst_onnx_inference_start (GstBaseTransform * trans)
 
   status = api->SetSessionGraphOptimizationLevel (session_options, onnx_optim);
   if (status) {
+    GST_OBJECT_UNLOCK (self);
     GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
         ("Failed to set optimization level: %s",
             api->GetErrorMessage (status)));
-    goto error;
+    goto error_no_lock;
   }
   // Set execution provider
   switch (self->execution_provider) {
@@ -874,6 +1948,17 @@ gst_onnx_inference_start (GstBaseTransform * trans)
         goto error;
       }
 
+      if (self->device) {
+        const char *keys[] = { "device_id" };
+        const char *values[] = { self->device };
+        status = api->UpdateCUDAProviderOptions (cuda_options, keys, values, 1);
+        if (status) {
+          GST_ERROR_OBJECT (self, "Failed to set CUDA device_id: %s",
+              api->GetErrorMessage (status));
+          api->ReleaseCUDAProviderOptions (cuda_options);
+          goto error;
+        }
+      }
       status =
           api->SessionOptionsAppendExecutionProvider_CUDA_V2 (session_options,
           cuda_options);
@@ -886,17 +1971,196 @@ gst_onnx_inference_start (GstBaseTransform * trans)
       break;
     }
     case GST_ONNX_EXECUTION_PROVIDER_VSI:
-#ifdef HAVE_VSI_NPU
-      status =
-          OrtSessionOptionsAppendExecutionProvider_VSINPU (session_options);
-      if (status) {
-        GST_ERROR_OBJECT (self, "Failed to set VSINPU AI execution provider:"
-            " %s", api->GetErrorMessage (status));
+    {
+      GstOrtAppendVsiNpuFunc append_vsi_npu =
+          gst_onnx_inference_get_vsi_npu_append_func ();
+
+      if (!append_vsi_npu) {
+        GST_ERROR_OBJECT (self, "VSI NPU execution provider is unavailable");
         goto error;
       }
-      api->DisableCpuMemArena (session_options);
+      status = append_vsi_npu (session_options);
+      if (status) {
+        GST_ERROR_OBJECT (self, "Failed to append VSI NPU provider: %s",
+            api->GetErrorMessage (status));
+        goto error;
+      }
+      status = api->DisableCpuMemArena (session_options);
+      if (status) {
+        GST_WARNING_OBJECT (self, "Failed to disable the CPU memory arena: %s",
+            api->GetErrorMessage (status));
+        api->ReleaseStatus (status);
+      }
+      break;
+    }
+    case GST_ONNX_EXECUTION_PROVIDER_VITIS_AI:
+    {
+#if ORT_API_VERSION >= 18
+      if (loaded_api_version < 18) {
+        GST_ERROR_OBJECT (self,
+            "Vitis AI execution provider requires ONNX Runtime >= 1.18");
+        goto error;
+      }
+
+      const gchar *cache_dir = gst_onnx_inference_get_model_cache_dir (self);
+      const char *keys[2];
+      const char *values[2];
+      size_t num_options = 0;
+
+      if (self->vitisai_config_file && *self->vitisai_config_file) {
+        keys[num_options] = "config_file";
+        values[num_options++] = self->vitisai_config_file;
+      }
+
+      if (cache_dir && *cache_dir) {
+        keys[num_options] = "cache_dir";
+        values[num_options++] = cache_dir;
+      }
+
+      status =
+          api->SessionOptionsAppendExecutionProvider_VitisAI (session_options,
+          num_options ? keys : NULL, num_options ? values : NULL, num_options);
+      if (status) {
+        GST_ERROR_OBJECT (self, "Failed to append Vitis AI provider: %s",
+            api->GetErrorMessage (status));
+        goto error;
+      }
+      break;
 #else
-      GST_ERROR_OBJECT (self, "Compiled without VSI support");
+      GST_ERROR_OBJECT (self, "Vitis AI execution provider is unavailable, "
+          "need ONNX Runtime >=1.18");
+      goto error;
+#endif
+    }
+    case GST_ONNX_EXECUTION_PROVIDER_MIGRAPHX:
+#if !HAVE_WINML
+    {
+      const gchar *cache_dir = gst_onnx_inference_get_model_cache_dir (self);
+      self->selected_device_id = 0;
+      if (self->device)
+        self->selected_device_id = g_ascii_strtoll (self->device, NULL, 10);
+
+      if (cache_dir && *cache_dir && loaded_api_version >= 23) {
+        /*
+         * onnxruntime online docs are usually out of date, so you have to
+         * check the headers. For example, migraphx_model_cache_dir is
+         * documented here and was backported to onnxruntime 1.23:
+         * core/providers/migraphx/migraphx_execution_provider_info.h
+         */
+        const char *keys[2] = { "migraphx_model_cache_dir", "device_id" };
+        const char *values[2] = { cache_dir, self->device };
+        size_t num_options = self->device ? 2 : 1;
+
+        status = api->SessionOptionsAppendExecutionProvider (session_options,
+            "MIGraphX", keys, values, num_options);
+      } else {
+        OrtMIGraphXProviderOptions migraphx_options;
+
+        if (cache_dir && *cache_dir) {
+          GST_WARNING_OBJECT (self,
+              "model-cache-dir requires ONNX Runtime >= 1.23 for the "
+              "MIGraphX execution provider; runtime version is %s",
+              api_base->GetVersionString ());
+        }
+
+        memset (&migraphx_options, 0, sizeof (migraphx_options));
+        migraphx_options.device_id = self->selected_device_id;
+
+        status =
+            api->SessionOptionsAppendExecutionProvider_MIGraphX
+            (session_options, &migraphx_options);
+      }
+      if (status) {
+        GST_ERROR_OBJECT (self, "Failed to create MIGraphX provider: %s",
+            api->GetErrorMessage (status));
+        goto error;
+      }
+    }
+#else
+    {
+      gchar *lib_path =
+          gst_onnx_winml_ep_catalog_find (MIGRAPHX_DYNAMIC_EP_NAME);
+      if (!lib_path) {
+        GST_ERROR_OBJECT (self, "Couldn't prepare MIGraphX EP via WindowsML");
+        goto error;
+      }
+
+      if (!gst_onnx_inference_register_ep (self,
+              MIGRAPHX_DYNAMIC_EP_NAME, lib_path)) {
+        g_free (lib_path);
+        goto error;
+      }
+      g_free (lib_path);
+
+      if (!gst_onnx_inference_append_ep (self,
+              session_options, MIGRAPHX_DYNAMIC_EP_NAME)) {
+        goto error;
+      }
+    }
+#endif
+      break;
+    case GST_ONNX_EXECUTION_PROVIDER_HIP:
+#if ORT_API_VERSION >= 22
+    {
+      const gchar *ep_lib_path = g_getenv ("MORPHIZEN_EP_LIB");
+
+      if (!ep_lib_path || !*ep_lib_path) {
+        GST_ERROR_OBJECT (self,
+            "MORPHIZEN_EP_LIB environment variable not set");
+        goto error;
+      }
+
+      if (!gst_onnx_inference_register_ep (self, HIP_DYNAMIC_EP_NAME,
+              ep_lib_path)) {
+        goto error;
+      }
+
+      if (!gst_onnx_inference_append_ep (self, session_options, "hipgpu"))
+        goto error;
+    }
+#else
+      GST_ERROR_OBJECT (self,
+          "HIP execution provider requires ONNX Runtime >= 1.22");
+      goto error;
+#endif
+      break;
+    case GST_ONNX_EXECUTION_PROVIDER_DIRECTML:
+#if HAVE_DIRECTML
+    {
+      guint device_id = 0;
+
+      if (self->device)
+        device_id = (guint) g_ascii_strtoll (self->device, NULL, 10);
+
+      GST_OBJECT_UNLOCK (self);
+      g_rec_mutex_lock (&self->context_lock);
+      self->selected_device_id = device_id;
+      if (self->device12) {
+        guint current_adapter;
+        g_object_get (self->device12, "adapter-index", &current_adapter, NULL);
+        if (current_adapter != device_id)
+          gst_clear_object (&self->device12);
+      }
+      gst_d3d12_ensure_element_data (GST_ELEMENT (self), device_id,
+          &self->device12);
+      g_rec_mutex_unlock (&self->context_lock);
+      GST_OBJECT_LOCK (self);
+      if (!self->device12) {
+        GST_ERROR_OBJECT (self,
+            "Couldn't create D3D12 device with adapter index %d", device_id);
+        goto error;
+      }
+
+      self->device_importer = gst_onnx_importer_dml_new (api,
+          self->device12, session_options);
+      if (!self->device_importer) {
+        GST_ERROR_OBJECT (self,
+            "Couldn't create DML importer with adapter index %d", device_id);
+        goto error;
+      }
+    }
+#else
+      GST_ERROR_OBJECT (self, "Compiled without DirectML support");
       goto error;
 #endif
       break;
@@ -905,12 +2169,84 @@ gst_onnx_inference_start (GstBaseTransform * trans)
   }
 
   // Create session
-  status = api->CreateSession (self->env, self->model_file, session_options,
-      &self->session);
+  {
+    ORTCHAR_T *model_file;
+#ifdef G_OS_WIN32
+    model_file = (ORTCHAR_T *) g_utf8_to_utf16 (self->model_file, -1, NULL,
+        NULL, NULL);
+#else
+    model_file = self->model_file;
+#endif
+    status = api->CreateSession (self->env, model_file, session_options,
+        &self->session);
+#ifdef G_OS_WIN32
+    g_free (model_file);
+#endif
+  }
   if (status) {
     GST_ERROR_OBJECT (self, "Failed to create session: %s",
         api->GetErrorMessage (status));
     self->session = NULL;
+    goto error;
+  }
+#if HAVE_GST_HIP
+  if (self->execution_provider == GST_ONNX_EXECUTION_PROVIDER_MIGRAPHX ||
+      self->execution_provider == GST_ONNX_EXECUTION_PROVIDER_HIP) {
+    GST_OBJECT_UNLOCK (self);
+    g_rec_mutex_lock (&self->context_lock);
+    self->adapter_luid = 0;
+    g_clear_pointer (&self->pci_bus_id, g_free);
+    gst_clear_object (&self->device_hip);
+
+#if HAVE_WINML
+    {
+      gchar *luid_str = get_selected_device_from_session (self, self->session);
+
+      if (luid_str) {
+        GST_DEBUG_OBJECT (self, "Input EP device LUID: %s", luid_str);
+
+        self->adapter_luid = g_ascii_strtoll (luid_str, NULL, 10);
+        g_free (luid_str);
+
+        gst_hip_ensure_element_data_for_adapter_luid (GST_ELEMENT (self),
+            GST_HIP_VENDOR_AMD, self->adapter_luid, &self->device_hip);
+      }
+    }
+#else
+#if ORT_API_VERSION >= 23
+    if (self->execution_provider == GST_ONNX_EXECUTION_PROVIDER_HIP) {
+      gchar *pci_bus_id =
+          get_selected_device_from_session (self, self->session);
+
+      if (pci_bus_id) {
+        GST_DEBUG_OBJECT (self, "Input EP device PCI bus ID: %s", pci_bus_id);
+        self->pci_bus_id = pci_bus_id;
+        gst_hip_ensure_element_data_for_pci_bus_id (GST_ELEMENT (self),
+            GST_HIP_VENDOR_AMD, self->pci_bus_id, &self->device_hip);
+        g_clear_pointer (&self->pci_bus_id, g_free);
+      }
+    } else
+#endif /* ORT_API_VERSION >= 23 */
+    if (self->execution_provider == GST_ONNX_EXECUTION_PROVIDER_MIGRAPHX) {
+      gst_hip_ensure_element_data (GST_ELEMENT (self),
+          GST_HIP_VENDOR_AMD, self->selected_device_id, &self->device_hip);
+    }
+#endif /* HAVE_WINML */
+    g_rec_mutex_unlock (&self->context_lock);
+    GST_OBJECT_LOCK (self);
+
+    if (self->device_hip) {
+      GST_DEBUG_OBJECT (self, "Creating HIP importer");
+      self->device_importer = gst_onnx_importer_hip_new (api, self->device_hip);
+      if (!self->device_importer)
+        GST_WARNING_OBJECT (self, "Couldn't create HIP importer");
+    }
+  }
+#endif /* HAVE_GST_HIP */
+
+  self->cpu_importer = gst_onnx_importer_cpu_new (api);
+  if (!self->cpu_importer) {
+    GST_ERROR_OBJECT (self, "Couldn't create importer");
     goto error;
   }
 
@@ -952,58 +2288,68 @@ gst_onnx_inference_start (GstBaseTransform * trans)
     goto error;
   }
 
-  status = api->GetDimensionsCount (input_tensor_info, &num_input_dims);
+  status = api->GetDimensionsCount (input_tensor_info, &config->dims_count);
   if (status) {
     GST_ERROR_OBJECT (self, "Failed to get dimensions count: %s",
         api->GetErrorMessage (status));
     goto error;
   }
 
-  input_dims = (int64_t *) g_alloca (num_input_dims * sizeof (int64_t));
-  gst_input_dims = (gsize *) g_alloca (num_input_dims * sizeof (gsize));
-  status = api->GetDimensions (input_tensor_info, input_dims, num_input_dims);
+  if (config->dims_count < 2 || config->dims_count > 4) {
+    GST_ERROR_OBJECT (self,
+        "Don't know how to interpret tensors with %zu dimensions",
+        config->dims_count);
+    goto error;
+  }
+
+  status = api->GetDimensions (input_tensor_info,
+      self->input_dims_model, config->dims_count);
   if (status) {
     GST_ERROR_OBJECT (self, "Failed to get dimensions: %s",
         api->GetErrorMessage (status));
     goto error;
   }
 
-  for (i = 0; i < num_input_dims; i++) {
-    if (input_dims[i] < 0)
+  for (i = 0; i < config->dims_count; i++) {
+    if (self->input_dims_model[i] < 0)
       gst_input_dims[i] = G_MAXSIZE;
     else
-      gst_input_dims[i] = input_dims[i];
+      gst_input_dims[i] = self->input_dims_model[i];
   }
 
-  gchar *dims = build_dims_str (num_input_dims, gst_input_dims);
+  gchar *dims = build_dims_str (config->dims_count, gst_input_dims);
   GST_DEBUG_OBJECT (self, "Input dimensions: %s", dims);
   g_free (dims);
 
-  if (!_guess_tensor_data_type (self, num_input_dims, gst_input_dims,
-          &gst_format))
+  status = api->GetTensorElementType (input_tensor_info, &element_type);
+  if (status) {
+    GST_ERROR_OBJECT (self, "Failed to get element type: %s",
+        api->GetErrorMessage (status));
     goto error;
+  }
 
-  self->height = gst_input_dims[self->height_dim];
-  self->width = gst_input_dims[self->width_dim];
-  if (self->channels_dim >= 0) {
-    self->channels = gst_input_dims[self->channels_dim];
-    self->planar = (self->channels_dim != num_input_dims - 1);
-  } else {
-    self->channels = 1;
+  config->data_type = onnx_data_type_to_gst (element_type);
+  if (config->data_type == -1) {
+    GST_ERROR_OBJECT (self, "Unsupported input tensor data type %d",
+        element_type);
+    goto error;
+  }
+
+  /* Only u8 / f32 inputs are supported right now */
+  switch (config->data_type) {
+    case GST_TENSOR_DATA_TYPE_UINT8:
+    case GST_TENSOR_DATA_TYPE_FLOAT32:
+      break;
+    default:
+      GST_ERROR_OBJECT (self, "Unsupported input tensor data type %d",
+          element_type);
+      goto error;
   }
 
 
-  GST_DEBUG_OBJECT (self, "height dim[%d]=%d, width dim[%d]=%d,"
-      " channels dim[%d]=%d, batch_dim[%d]=%zu planar=%d",
-      self->height_dim, self->height, self->width_dim, self->width,
-      self->channels_dim, self->channels, self->batch_dim,
-      self->batch_dim >= 0 ? gst_input_dims[self->batch_dim] : 0, self->planar);
-
-  self->fixedInputImageSize = self->width > 0 && self->height > 0;
-
   status = api->SessionGetOutputCount (self->session, &self->output_count);
   if (status) {
-    GST_ERROR_OBJECT (self, "Could to retrieve output count: %s",
+    GST_ERROR_OBJECT (self, "Failed to retrieve output count: %s",
         api->GetErrorMessage (status));
     goto error;
   }
@@ -1014,17 +2360,14 @@ gst_onnx_inference_start (GstBaseTransform * trans)
     goto error;
   }
 
-  status = api->GetTensorElementType (input_tensor_info, &element_type);
-  if (status) {
-    GST_ERROR_OBJECT (self, "Failed to get element type: %s",
-        api->GetErrorMessage (status));
+  if (self->output_count > GST_ONNX_MAX_OUTPUT_COUNT) {
+    GST_ERROR_OBJECT (self, "Too large output count %" G_GSIZE_FORMAT,
+        self->output_count);
     goto error;
   }
 
   api->ReleaseTypeInfo (input_type_info);
   input_type_info = NULL;
-
-  self->input_data_type = onnx_data_type_to_gst (element_type);
 
   /* Get input tensor name from ONNX file */
   status = api->SessionGetInputName (self->session, 0, self->allocator,
@@ -1037,14 +2380,14 @@ gst_onnx_inference_start (GstBaseTransform * trans)
 
   tensor_name = gst_analytics_modelinfo_find_tensor_name (modelinfo,
       MODELINFO_DIRECTION_INPUT, 0, onnx_input_tensor_name,
-      self->input_data_type, num_input_dims, gst_input_dims);
+      config->data_type, config->dims_count, gst_input_dims);
 
   if (!tensor_name) {
-    gchar *dims_str = build_dims_str (num_input_dims, gst_input_dims);
+    gchar *dims_str = build_dims_str (config->dims_count, gst_input_dims);
     GST_ERROR_OBJECT (self,
         "Model info file doesn't contain info for input_tensor[0]:%s matching the"
         " type %s and dims %s", onnx_input_tensor_name,
-        gst_tensor_data_type_get_name (self->input_data_type), dims_str);
+        gst_tensor_data_type_get_name (config->data_type), dims_str);
     g_free (dims_str);
     if (onnx_input_tensor_name)
       self->allocator->Free (self->allocator, (char *) onnx_input_tensor_name);
@@ -1055,63 +2398,193 @@ gst_onnx_inference_start (GstBaseTransform * trans)
   GST_INFO_OBJECT (self,
       "Input tensor[0]:%s validated - modelinfo matches ONNX model (type: %s)",
       onnx_input_tensor_name,
-      gst_tensor_data_type_get_name (self->input_data_type));
+      gst_tensor_data_type_get_name (config->data_type));
+
+  /* Modelinfo v1.1+ provide the input caps explicitly, only fall back to
+   * guessing the tensor layout from its shape when modelinfo doesn't
+   * declare a format */
+  mi_caps = gst_analytics_modelinfo_get_input_caps (modelinfo, tensor_name);
+
+  /* FIXME: Currently inference element does part of the pre-processing, like
+   * scale/offset normalization and buffer layout normalization, for this
+   * reason we need to consider this while calculating the sinkpad caps. Once
+   * this pre-processing has been removed from the inference element, we
+   * should remove the static pad template of the sinkpad and directly use
+   * the caps retrieved from modelinfo for the sinkpad. */
+  if (mi_caps) {
+    GstCaps *tmpl_caps =
+        gst_caps_from_string (GST_VIDEO_CAPS_MAKE (GST_ONNX_VIDEO_FORMATS));
+    GstCaps *supported_caps = gst_caps_intersect (mi_caps, tmpl_caps);
+
+    gst_caps_unref (tmpl_caps);
+
+    if (!gst_analytics_modelinfo_validate_caps_datatype
+        (gst_caps_get_structure (mi_caps, 0), config->data_type)) {
+      GST_ERROR_OBJECT (self, "Modelinfo declares caps %" GST_PTR_FORMAT
+          " for input tensor '%s', which disagrees with its declared type %s",
+          mi_caps, tensor_name,
+          gst_tensor_data_type_get_name (config->data_type));
+      gst_caps_unref (supported_caps);
+      gst_caps_unref (mi_caps);
+      g_free (tensor_name);
+      if (onnx_input_tensor_name)
+        self->allocator->Free (self->allocator,
+            (char *) onnx_input_tensor_name);
+      goto error;
+    }
+
+    if (gst_caps_is_empty (supported_caps)) {
+      GST_ERROR_OBJECT (self, "Modelinfo declares caps %" GST_PTR_FORMAT
+          " for input tensor '%s', which onnxinference does not support",
+          mi_caps, tensor_name);
+      gst_caps_unref (supported_caps);
+      gst_caps_unref (mi_caps);
+      g_free (tensor_name);
+      if (onnx_input_tensor_name)
+        self->allocator->Free (self->allocator,
+            (char *) onnx_input_tensor_name);
+      goto error;
+    }
+    gst_caps_unref (supported_caps);
+
+    /* Resolves gst_format from the tensor's declared caps, erroring for a
+     * dims/format combination onnxinference can't handle. */
+    if (!derive_details_from_tensor_dims_and_video_caps (self,
+            config->dims_count, gst_input_dims,
+            gst_caps_get_structure (mi_caps, 0), &gst_format)) {
+      gst_caps_unref (mi_caps);
+      g_free (tensor_name);
+      if (onnx_input_tensor_name)
+        self->allocator->Free (self->allocator,
+            (char *) onnx_input_tensor_name);
+      goto error;
+    }
+  }
+
+  if (gst_format) {
+    GST_INFO_OBJECT (self, "Input tensor '%s' format '%s' taken from "
+        "modelinfo", tensor_name, gst_video_format_to_string (gst_format));
+  } else if (!_guess_tensor_data_type (self, config->dims_count,
+          gst_input_dims, &gst_format)) {
+    g_clear_pointer (&mi_caps, gst_caps_unref);
+    g_free (tensor_name);
+    if (onnx_input_tensor_name)
+      self->allocator->Free (self->allocator, (char *) onnx_input_tensor_name);
+    goto error;
+  } else {
+    GST_INFO_OBJECT (self, "Input tensor '%s' format '%s' guessed from "
+        "tensor dims", tensor_name, gst_video_format_to_string (gst_format));
+  }
+
+  self->model_in_height =
+      self->input_dims_model[self->height_dim] > 0 ?
+      self->input_dims_model[self->height_dim] : -1;
+
+  self->model_in_width =
+      self->input_dims_model[self->width_dim] > 0 ?
+      self->input_dims_model[self->width_dim] : -1;
+
+  if (self->channels_dim >= 0) {
+    self->channels = gst_input_dims[self->channels_dim];
+  } else {
+    self->channels = 1;
+  }
+
+  GST_DEBUG_OBJECT (self, "height dim[%d]=%d, width dim[%d]=%d,"
+      " channels dim[%d]=%d, batch_dim[%d]=%zu planar=%d",
+      self->height_dim, self->model_in_height, self->width_dim,
+      self->model_in_width, self->channels_dim, self->channels, self->batch_dim,
+      self->batch_dim >= 0 ? gst_input_dims[self->batch_dim] : 0, self->planar);
 
   /* Get per-channel scales and offsets from modelinfo */
-  /* For video input, we assume uint8 pixel values in range [0, 255] */
+  /* For video input, we assume uint8 pixel values in range [0, 255]
+   * or f32 in range [0, 1] */
   input_mins = g_alloca (sizeof (gdouble) * self->channels);
   input_maxs = g_alloca (sizeof (gdouble) * self->channels);
-  for (i = 0; i < self->channels; i++) {
-    input_mins[i] = 0.0;
-    input_maxs[i] = 255.0;
+
+  {
+    gdouble default_input_max = 255.0;
+    switch (config->data_type) {
+      case GST_TENSOR_DATA_TYPE_UINT8:
+        default_input_max = 255.0;
+        break;
+      case GST_TENSOR_DATA_TYPE_FLOAT32:
+        default_input_max = 1.0;
+        break;
+      default:
+        g_assert_not_reached ();
+        goto error;
+    }
+
+    for (i = 0; i < self->channels; i++) {
+      input_mins[i] = 0.0;
+      input_maxs[i] = default_input_max;
+    }
   }
 
   if (!gst_analytics_modelinfo_get_input_scales_offsets (modelinfo,
           tensor_name, self->channels, input_mins, input_maxs,
-          NULL, &self->scales, &self->offsets)) {
+          NULL, &scales, &offsets)) {
     GST_ERROR_OBJECT (self, "Failed to get scales/offsets for tensor %s",
         tensor_name);
+    g_clear_pointer (&mi_caps, gst_caps_unref);
     g_free (tensor_name);
     if (onnx_input_tensor_name)
       self->allocator->Free (self->allocator, (char *) onnx_input_tensor_name);
     goto error;
   }
 
+  for (i = 0; i < self->channels; i++) {
+    config->scales[i] = scales[i];
+    config->offsets[i] = offsets[i];
+  }
+  g_free (scales);
+  g_free (offsets);
+
   GST_INFO_OBJECT (self, "Input tensor normalization: %u channel(s)",
       self->channels);
+
   for (i = 0; i < self->channels; i++) {
     GST_DEBUG_OBJECT (self, "  Channel[%zu]: scale=%f, offset=%f", i,
-        self->scales[i], self->offsets[i]);
+        config->scales[i], config->offsets[i]);
   }
-
-  gst_caps_set_simple (self->input_tensors_caps, "pixel-aspect-ratio",
-      GST_TYPE_FRACTION, 1, 1, NULL);
 
   g_free (tensor_name);
-  if (onnx_input_tensor_name)
-    self->allocator->Free (self->allocator, (char *) onnx_input_tensor_name);
 
-  /* Setting input tensor caps */
-  self->input_tensors_caps = gst_caps_make_writable (self->input_tensors_caps);
+  self->input_name = (gchar *) onnx_input_tensor_name;
 
-  /* Check if all channels are passthrough (scale=1.0, offset=0.0) */
-  gboolean is_passthrough = TRUE;
-  if (self->scales && self->offsets) {
-    for (i = 0; i < self->channels; i++) {
-      if (self->scales[i] != 1.0 || self->offsets[i] != 0.0) {
-        is_passthrough = FALSE;
-        break;
-      }
-    }
+  /* Setting input tensor caps: when modelinfo declares caps, keep them as
+   * the base so any field beyond format
+   * is preserved, dims/heuristics only complete fields modelinfo left unset,
+   * they never override what modelinfo already pins down. */
+  gst_caps_unref (self->input_tensors_caps);
+  if (mi_caps) {
+    self->input_tensors_caps = gst_caps_make_writable (mi_caps);
+    mi_caps = NULL;
+  } else {
+    self->input_tensors_caps = gst_caps_new_empty_simple ("video/x-raw");
   }
 
-  if (self->input_data_type == GST_TENSOR_DATA_TYPE_UINT8 && gst_format &&
-      is_passthrough)
-    gst_caps_set_simple (self->input_tensors_caps, "format", G_TYPE_STRING,
-        gst_format, NULL);
-  if (self->fixedInputImageSize)
-    gst_caps_set_simple (self->input_tensors_caps, "width", G_TYPE_INT,
-        self->width, "height", G_TYPE_INT, self->height, NULL);
+  GstStructure *in_caps_s =
+      gst_caps_get_structure (self->input_tensors_caps, 0);
+
+  gst_caps_set_simple (self->input_tensors_caps, "format", G_TYPE_STRING,
+      gst_video_format_to_string (gst_format), NULL);
+
+  if (!gst_structure_has_field (in_caps_s, "pixel-aspect-ratio"))
+    gst_caps_set_simple (self->input_tensors_caps, "pixel-aspect-ratio",
+        GST_TYPE_FRACTION, 1, 1, NULL);
+
+  if (self->model_in_width > 0 && !gst_structure_has_field (in_caps_s, "width")) {
+    gst_caps_set_simple (self->input_tensors_caps,
+        "width", G_TYPE_INT, self->model_in_width, NULL);
+  }
+
+  if (self->model_in_height > 0 &&
+      !gst_structure_has_field (in_caps_s, "height")) {
+    gst_caps_set_simple (self->input_tensors_caps,
+        "height", G_TYPE_INT, self->model_in_height, NULL);
+  }
 
   // Get output names
   self->output_names = g_new0 (char *, self->output_count);
@@ -1135,6 +2608,7 @@ gst_onnx_inference_start (GstBaseTransform * trans)
 
   self->output_ids = g_new0 (GQuark, self->output_count);
   self->output_dims_orders = g_new0 (GstTensorDimOrder, self->output_count);
+  g_array_set_size (self->output_pools, self->output_count);
 
   for (i = 0; i < self->output_count; i++) {
     OrtTypeInfo *output_type_info = NULL;
@@ -1146,7 +2620,7 @@ gst_onnx_inference_start (GstBaseTransform * trans)
     gchar *tensor_name = NULL;
     gchar *tensor_id = NULL;
     gsize *output_dims = NULL;
-
+    gboolean static_output = TRUE;
 
     status =
         api->SessionGetOutputTypeInfo (self->session, i, &output_type_info);
@@ -1182,23 +2656,88 @@ gst_onnx_inference_start (GstBaseTransform * trans)
     }
 
     gst_data_type = onnx_data_type_to_gst (type);
-
-    /* Get dimensions from ONNX */
-    int64_t *shape = (int64_t *) g_alloca (card * sizeof (int64_t));
-    output_dims = (gsize *) g_malloc0 (card * sizeof (gsize));
-    status = api->GetDimensions (output_tensor_info, shape, card);
-    if (status) {
-      GST_ERROR_OBJECT (self, "Failed to get output tensor (%s) dimensions",
-          self->output_names[i]);
-      api->ReleaseStatus (status);
-      status = NULL;
-      g_free (output_dims);
+    if (gst_data_type == -1) {
+      GST_ERROR_OBJECT (self, "Unsupported output tensor data type %d", type);
       api->ReleaseTypeInfo (output_type_info);
       goto error;
     }
 
+    /* Get dimensions from ONNX */
+    int64_t *shape = (int64_t *) g_alloca (card * sizeof (int64_t));
+    status = api->GetDimensions (output_tensor_info, shape, card);
+    if (status) {
+      GST_ERROR_OBJECT (self, "Failed to get output tensor (%s) dimensions",
+          self->output_names[i]);
+      api->ReleaseTypeInfo (output_type_info);
+      goto error;
+    }
+
+    output_dims = (gsize *) g_malloc0 (card * sizeof (gsize));
     for (j = 0; j < card; j++) {
-      output_dims[j] = shape[j] > 0 ? shape[j] : G_MAXSIZE;
+      if (shape[j] > 0) {
+        output_dims[j] = shape[j];
+      } else {
+        output_dims[j] = G_MAXSIZE;
+        static_output = FALSE;
+      }
+    }
+
+    /* Output tensor size is static. Create pool to reuse buffers */
+    if (static_output) {
+      size_t num_elements = 0;
+      status = api->GetTensorShapeElementCount (output_tensor_info,
+          &num_elements);
+      if (status) {
+        GST_WARNING_OBJECT (self,
+            "Couldn't get element count for output tensor[%zu]:%s: %s",
+            i, self->output_names[i], api->GetErrorMessage (status));
+        api->ReleaseStatus (status);
+        status = NULL;
+      } else {
+        GST_DEBUG_OBJECT (self,
+            "Output tensor[%zu]:%s has %" G_GSIZE_FORMAT " elements",
+            i, self->output_names[i], num_elements);
+        gsize alloc_size = 0;
+        gsize element_size = get_tensor_type_size (gst_data_type);
+
+        if (element_size > 0 &&
+            g_size_checked_mul (&alloc_size, num_elements, element_size) &&
+            alloc_size <= G_MAXUINT) {
+          GstOnnxOutputPool *out_pool = &g_array_index (self->output_pools,
+              GstOnnxOutputPool, (gint) i);
+          GstStructure *config;
+          GstBufferPool *pool;
+
+          pool = gst_buffer_pool_new ();
+          config = gst_buffer_pool_get_config (pool);
+          gst_buffer_pool_config_set_params (config, NULL, alloc_size, 0, 0);
+          if (!gst_buffer_pool_set_config (pool, config)) {
+            GST_WARNING_OBJECT (self, "Couldn't set pool config");
+            gst_clear_object (&pool);
+          } else if (!gst_buffer_pool_set_active (pool, TRUE)) {
+            GST_WARNING_OBJECT (self, "Couldn't set pool active");
+            gst_clear_object (&pool);
+          }
+
+          if (pool) {
+            GST_DEBUG_OBJECT (self,
+                "Created output pool[%zu] with size %" G_GSIZE_FORMAT,
+                i, alloc_size);
+            out_pool->pool = pool;
+            out_pool->tensor_size = alloc_size;
+          }
+        } else {
+          GST_ERROR_OBJECT (self,
+              "Invalid output tensor[%zu] allocation size, "
+              "elements: %" G_GSIZE_FORMAT ", element-size: %" G_GSIZE_FORMAT
+              ", allocation-size: %" G_GSIZE_FORMAT,
+              i, num_elements, element_size, alloc_size);
+          g_free (output_dims);
+          g_value_unset (&v_tensors_set);
+          api->ReleaseTypeInfo (output_type_info);
+          goto error;
+        }
+      }
     }
 
     /* Look up tensor name in modelinfo */
@@ -1312,6 +2851,10 @@ gst_onnx_inference_start (GstBaseTransform * trans)
     api->ReleaseTypeInfo (output_type_info);
   }
 
+  /* Setting output tensors caps */
+  self->output_tensors_caps =
+      gst_caps_make_writable (self->output_tensors_caps);
+
   if (!tensors_s)
     tensors_s = gst_structure_new_empty ("tensorgroups");
   GstStructure *output_caps_struct;
@@ -1323,18 +2866,7 @@ gst_onnx_inference_start (GstBaseTransform * trans)
   gst_structure_free (tensors_s);
   g_value_unset (&v_tensors_set);
 
-  if (group_id)
-    g_free (group_id);
-
-  // Create memory info for CPU
-  status =
-      api->CreateCpuMemoryInfo (OrtArenaAllocator, OrtMemTypeDefault,
-      &self->memory_info);
-  if (status) {
-    GST_WARNING_OBJECT (self, "Failed to create memory info: %s",
-        api->GetErrorMessage (status));
-    goto error;
-  }
+  self->group_id = g_steal_pointer (&group_id);
 
   ret = TRUE;
 done:
@@ -1345,6 +2877,8 @@ done:
   return ret;
 
 error:
+  GST_OBJECT_UNLOCK (self);
+error_no_lock:
   if (status)
     api->ReleaseStatus (status);
   if (input_type_info)
@@ -1354,7 +2888,6 @@ error:
 
   if (modelinfo)
     gst_analytics_modelinfo_free (modelinfo);
-  GST_OBJECT_UNLOCK (self);
 
   gst_onnx_inference_stop (trans);
   return ret;
@@ -1368,10 +2901,11 @@ gst_onnx_inference_stop (GstBaseTransform * trans)
   size_t i;
 
   GST_OBJECT_LOCK (self);
-  if (!self->session)
-    goto done;
-  // Clean up output names
 
+  gst_clear_object (&self->cpu_importer);
+  self->active_importer = NULL;
+
+  // Clean up output names
   if (self->output_names) {
     for (i = 0; i < self->output_count; i++) {
       if (self->output_names[i])
@@ -1387,18 +2921,52 @@ gst_onnx_inference_stop (GstBaseTransform * trans)
   self->output_dims_orders = NULL;
   self->output_count = 0;
 
-  if (self->memory_info)
-    api->ReleaseMemoryInfo (self->memory_info);
-  self->memory_info = NULL;
 
-  api->ReleaseSession (self->session);
+  g_free (self->group_id);
+  self->group_id = NULL;
+
+  if (self->session)
+    api->ReleaseSession (self->session);
   self->session = NULL;
+  gst_clear_object (&self->device_importer);
 
-  if (self->env)
+  /* Free cached input tensor metadata */
+  if (self->input_name) {
+    self->allocator->Free (self->allocator, self->input_name);
+    self->input_name = NULL;
+  }
+  memset (&self->importer_config, 0, sizeof (self->importer_config));
+
+  self->allocator = NULL;
+
+  if (self->env) {
+    /* Do not unregister plugin EPs here. OrtEnv is a refcounted singleton
+     * and they may still be in use by other sessions. Explicit unregister
+     * is also unnecessary since EPs are automatically unregistered when
+     * the OrtEnv is destroyed */
     api->ReleaseEnv (self->env);
+  }
   self->env = NULL;
 
-done:
+  gst_caps_unref (self->input_tensors_caps);
+  self->input_tensors_caps = gst_caps_new_empty_simple ("video/x-raw");
+  gst_caps_unref (self->output_tensors_caps);
+  self->output_tensors_caps = gst_caps_new_empty_simple ("video/x-raw");
+
+  self->model_in_width = 0;
+  self->model_in_height = 0;
+
+#if HAVE_DIRECTML
+  gst_clear_object (&self->device12);
+#endif
+
+#if HAVE_GST_HIP
+  gst_clear_object (&self->device_hip);
+#endif
+
+  g_clear_pointer (&self->pci_bus_id, g_free);
+  g_array_set_size (self->output_pools, 0);
+
   GST_OBJECT_UNLOCK (self);
 
   return TRUE;
@@ -1409,295 +2977,139 @@ gst_onnx_inference_set_caps (GstBaseTransform * trans, GstCaps * incaps,
     GstCaps * outcaps)
 {
   GstOnnxInference *self = GST_ONNX_INFERENCE (trans);
+  GstOnnxImporterConfig *config = &self->importer_config;
+
+  if (!self->cpu_importer) {
+    GST_ERROR_OBJECT (self, "Importer is not prepared");
+    return FALSE;
+  }
+
+  if (caps_has_tensor_group (incaps, self->group_id)) {
+    GST_ERROR_OBJECT (self, "Tensor group '%s' is already present upstream",
+        self->group_id);
+    return FALSE;
+  }
 
   if (!gst_video_info_from_caps (&self->video_info, incaps)) {
     GST_ERROR_OBJECT (self, "Failed to parse caps");
     return FALSE;
   }
 
-  if (self->fixedInputImageSize &&
-      (self->video_info.width != self->width ||
-          self->video_info.height != self->height)) {
-    GST_ERROR_OBJECT (self, "Dimensions from caps %ux%u doesn't match model"
-        " dimensions %dx%d", self->video_info.width, self->video_info.height,
-        self->width, self->height);
+  gsize element_size = get_tensor_type_size (config->data_type);
+  gsize input_tensor_size;
+
+  g_assert (element_size != 0);
+
+  /* Use GLib's checked multiplication to prevent overflow */
+  if (!g_size_checked_mul (&input_tensor_size, self->video_info.width,
+          self->video_info.height) ||
+      !g_size_checked_mul (&input_tensor_size, input_tensor_size,
+          self->channels)
+      || !g_size_checked_mul (&input_tensor_size, input_tensor_size,
+          element_size)) {
+    GST_ERROR_OBJECT (self,
+        "Integer overflow in input tensor size: %dx%d pixels, %u channels, %zu bytes per element",
+        self->video_info.width, self->video_info.height, self->channels,
+        element_size);
     return FALSE;
   }
 
-  if (self->dest == NULL || self->width * self->height !=
-      self->video_info.width * self->video_info.height) {
-    gsize element_size = get_tensor_type_size (self->input_data_type);
-    gsize alloc_size;
+  /* Resolve dynamic input dimensions and validate fixed ones */
+  memcpy (config->dims, self->input_dims_model, sizeof (config->dims));
 
-    /* Use GLib's checked multiplication to prevent overflow */
-    if (!g_size_checked_mul (&alloc_size, self->video_info.width,
-            self->video_info.height) ||
-        !g_size_checked_mul (&alloc_size, alloc_size, self->channels) ||
-        !g_size_checked_mul (&alloc_size, alloc_size, element_size)) {
-      GST_ERROR_OBJECT (self,
-          "Integer overflow in buffer allocation: %dx%d pixels, %u channels, %zu bytes per element",
-          self->video_info.width, self->video_info.height, self->channels,
-          element_size);
+  if (self->batch_dim >= 0)
+    config->dims[self->batch_dim] = 1;
+
+  if (config->dims[self->height_dim] > 0) {
+    if (config->dims[self->height_dim] != self->video_info.height) {
+      GST_ERROR_OBJECT (self, "Caps have height %d, but model expects %"
+          G_GINT64_FORMAT, self->video_info.height,
+          config->dims[self->height_dim]);
       return FALSE;
     }
-
-    g_free (self->dest);
-    self->dest = g_malloc (alloc_size);
+  } else {
+    config->dims[self->height_dim] = self->video_info.height;
   }
-  self->width = self->video_info.width;
-  self->height = self->video_info.height;
+
+  if (config->dims[self->width_dim] > 0) {
+    if (config->dims[self->width_dim] != self->video_info.width) {
+      GST_ERROR_OBJECT (self, "Caps have width %d, but model expects %"
+          G_GINT64_FORMAT, self->video_info.width,
+          config->dims[self->width_dim]);
+      return FALSE;
+    }
+  } else {
+    config->dims[self->width_dim] = self->video_info.width;
+  }
+
+  config->tensor_size = input_tensor_size;
+  self->active_importer = self->cpu_importer;
+
+  if (self->device_importer) {
+    if (!gst_onnx_importer_setup (self->device_importer,
+            &self->video_info, config)) {
+      GST_WARNING_OBJECT (self, "Couldn't setup device importer");
+    } else {
+      self->active_importer = self->device_importer;
+    }
+  }
+
+  if (!gst_onnx_importer_setup (self->cpu_importer, &self->video_info, config)) {
+    GST_ERROR_OBJECT (self, "Couldn't setup importer");
+    return FALSE;
+  }
 
   return TRUE;
 }
 
-#define _convert_image_scale_offset(Type)                               \
-G_STMT_START {                                                                \
-  size_t destIndex = 0;                                                       \
-  Type tmp;                                                                   \
-                                                                              \
-  if (!planar) {                                                              \
-    for (int32_t j = 0; j < dstHeight; ++j) {                                 \
-      for (int32_t i = 0; i < dstWidth; ++i) {                                \
-        for (int32_t k = 0; k < dstChannels; ++k) {                           \
-          tmp = *srcPtr[k];                                                   \
-          dst[destIndex++] = (Type)(tmp * scales[k] + offsets[k]);            \
-          srcPtr[k] += pixel_stride;                                    \
-        }                                                                     \
-      }                                                                       \
-      /* correct for stride */                                                \
-      for (uint32_t k = 0; k < 3; ++k)                                        \
-        srcPtr[k] += stride - pixel_stride * dstWidth;                  \
-    }                                                                         \
-  } else {                                                                    \
-    size_t frameSize = dstWidth * dstHeight;                                  \
-    Type *destPtr[3] = { dst, dst + frameSize, dst + 2 * frameSize };         \
-    for (int32_t j = 0; j < dstHeight; ++j) {                                 \
-      for (int32_t i = 0; i < dstWidth; ++i) {                                \
-        for (int32_t k = 0; k < dstChannels; ++k) {                           \
-          tmp = *srcPtr[k];                                                   \
-          destPtr[k][destIndex] = (Type)(tmp * scales[k] + offsets[k]);       \
-          srcPtr[k] += pixel_stride;                                    \
-        }                                                                     \
-        destIndex++;                                                          \
-      }                                                                       \
-      /* correct for stride */                                                \
-      for (uint32_t k = 0; k < 3; ++k)                                        \
-        srcPtr[k] += stride - pixel_stride * dstWidth;                  \
-    }                                                                         \
-  }                                                                           \
-}                                                                             \
-G_STMT_END;
-
-static void
-convert_image_scale_offset_u8 (guint8 * dst, gint dstWidth, gint dstHeight,
-    gint dstChannels, gboolean planar, guint8 ** srcPtr,
-    guint8 pixel_stride, guint32 stride, const gdouble * scales,
-    const gdouble * offsets)
+static gboolean
+gst_onnx_inference_propose_allocation (GstBaseTransform * trans,
+    GstQuery * decide_query, GstQuery * query)
 {
-  _convert_image_scale_offset (guint8);
-}
+  if (!GST_BASE_TRANSFORM_CLASS (parent_class)->propose_allocation (trans,
+          decide_query, query))
+    return FALSE;
 
-static void
-convert_image_scale_offset_f32 (gfloat * dst, gint dstWidth, gint dstHeight,
-    gint dstChannels, gboolean planar, guint8 ** srcPtr,
-    guint8 pixel_stride, guint32 stride, const gdouble * scales,
-    const gdouble * offsets)
-{
-  _convert_image_scale_offset (gfloat);
+  gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
+
+  return TRUE;
 }
 
 static GstFlowReturn
 gst_onnx_inference_transform_ip (GstBaseTransform * trans, GstBuffer * buf)
 {
   GstOnnxInference *self = GST_ONNX_INFERENCE (trans);
-  GstMapInfo info;
   OrtStatus *status = NULL;
-  OrtTypeInfo *input_type_info = NULL;
   OrtValue *input_tensor = NULL;
   OrtValue **output_tensors = NULL;
-  const OrtTensorTypeAndShapeInfo *input_tensor_info;
-  size_t num_dims;
-  int64_t *input_dims;
-  uint8_t *srcPtr[3];
-  size_t inputTensorSize;
-  char *input_names[1];
   GstTensorMeta *tmeta = NULL;
   OrtTensorTypeAndShapeInfo *output_tensor_info = NULL;
-
-  if (!gst_buffer_map (buf, &info, GST_MAP_READ)) {
-    GST_ELEMENT_ERROR (trans, STREAM, FAILED, (NULL),
-        ("Could not map input buffer"));
-    return GST_FLOW_ERROR;
-  }
-
-  status =
-      api->SessionGetInputName (self->session, 0, self->allocator, input_names);
-  if (status) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-        ("Failed to get input name"));
-    goto error;
-  }
-
-  status = api->SessionGetInputTypeInfo (self->session, 0, &input_type_info);
-  if (status) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-        ("Failed to get input type info: %s", api->GetErrorMessage (status)));
-    goto error;
-  }
-
-  status = api->CastTypeInfoToTensorInfo (input_type_info, &input_tensor_info);
-  if (status) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-        ("Failed to cast type info: %s", api->GetErrorMessage (status)));
-    goto error;
-  }
-
-  status = api->GetDimensionsCount (input_tensor_info, &num_dims);
-  if (status) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-        ("Failed to get dimensions count: %s", api->GetErrorMessage (status)));
-    goto error;
-  }
-
-  input_dims = (int64_t *) g_alloca (num_dims * sizeof (int64_t));
-  status = api->GetDimensions (input_tensor_info, input_dims, num_dims);
-  if (status) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-        ("Failed to get dimensions: %s", api->GetErrorMessage (status)));
-    goto error;
-  }
-
-  api->ReleaseTypeInfo (input_type_info);
-  input_type_info = NULL;
-
-  if (self->batch_dim >= 0)
-    input_dims[self->batch_dim] = 1;
-
-  if (input_dims[self->height_dim] >= 0) {
-    if (input_dims[self->height_dim] != self->height) {
-      GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-          ("Buffer has height %d, but model expects %zu",
-              self->height, input_dims[self->height_dim]));
-      goto error;
-    }
-  } else {
-    input_dims[self->height_dim] = self->height;
-  }
-  if (input_dims[self->width_dim] >= 0) {
-    if (input_dims[self->width_dim] != self->width) {
-      GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-          ("Buffer has width %d, but model expects %zu",
-              self->width, input_dims[self->width_dim]));
-      goto error;
-    }
-  } else {
-    input_dims[self->width_dim] = self->width;
-  }
+  GstOnnxImporterConfig *config = &self->importer_config;
+  GstOnnxImporter *target_importer = self->active_importer;
 
   GST_LOG_OBJECT (self, "Input dimensions: %" G_GINT64_FORMAT
       ":%" G_GINT64_FORMAT ":%" G_GINT64_FORMAT ":%" G_GINT64_FORMAT,
-      input_dims[0], input_dims[1], input_dims[2], input_dims[3]);
+      config->dims_count > 0 ? config->dims[0] : -1,
+      config->dims_count > 1 ? config->dims[1] : -1,
+      config->dims_count > 2 ? config->dims[2] : -1,
+      config->dims_count > 3 ? config->dims[3] : -1);
 
-  // copy video frame
-  switch (self->video_info.finfo->format) {
-    case GST_VIDEO_FORMAT_RGBA:
-      srcPtr[0] = info.data;
-      srcPtr[1] = info.data + 1;
-      srcPtr[2] = info.data + 2;
-      break;
-    case GST_VIDEO_FORMAT_BGRA:
-      srcPtr[0] = info.data + 2;
-      srcPtr[1] = info.data + 1;
-      srcPtr[2] = info.data + 0;
-      break;
-    case GST_VIDEO_FORMAT_ARGB:
-      srcPtr[0] = info.data + 1;
-      srcPtr[1] = info.data + 2;
-      srcPtr[2] = info.data + 3;
-      break;
-    case GST_VIDEO_FORMAT_ABGR:
-      srcPtr[0] = info.data + 3;
-      srcPtr[1] = info.data + 2;
-      srcPtr[2] = info.data + 1;
-      break;
-    case GST_VIDEO_FORMAT_RGB:
-      srcPtr[0] = info.data;
-      srcPtr[1] = info.data + 1;
-      srcPtr[2] = info.data + 2;
-      break;
-    case GST_VIDEO_FORMAT_BGR:
-      srcPtr[0] = info.data + 2;
-      srcPtr[1] = info.data + 1;
-      srcPtr[2] = info.data + 0;
-      break;
-    default:
-      g_assert_not_reached ();
-      break;
+  input_tensor = gst_onnx_importer_prepare (target_importer, buf);
+  if (!input_tensor && target_importer != self->cpu_importer) {
+    target_importer = self->cpu_importer;
+    input_tensor = gst_onnx_importer_prepare (target_importer, buf);
   }
 
-  inputTensorSize = self->width * self->height * self->channels *
-      get_tensor_type_size (self->input_data_type);
-
-  /* Check if all channels are passthrough (scale=1.0, offset=0.0) */
-  gboolean is_passthrough_transform = TRUE;
-  if (self->scales && self->offsets) {
-    for (gsize c = 0; c < self->channels; c++) {
-      if (self->scales[c] != 1.0 || self->offsets[c] != 0.0) {
-        is_passthrough_transform = FALSE;
-        break;
-      }
-    }
+  if (!input_tensor) {
+    GST_ERROR_OBJECT (self, "Couldn't create input tensor");
+    return GST_FLOW_ERROR;
   }
 
-  switch (self->input_data_type) {
-    case GST_TENSOR_DATA_TYPE_UINT8:{
-      uint8_t *src_data;
+  g_ptr_array_set_size (self->output_tensors, self->output_count);
+  output_tensors = (OrtValue **) self->output_tensors->pdata;
 
-      if (is_passthrough_transform) {
-        src_data = info.data;
-      } else {
-        convert_image_scale_offset_u8 (self->dest, self->width, self->height,
-            self->channels, self->planar, srcPtr,
-            GST_VIDEO_INFO_COMP_PSTRIDE (&self->video_info, 0),
-            GST_VIDEO_INFO_PLANE_STRIDE (&self->video_info, 0),
-            self->scales, self->offsets);
-        src_data = self->dest;
-      }
-
-      status = api->CreateTensorWithDataAsOrtValue (self->memory_info, src_data,
-          inputTensorSize, input_dims, num_dims,
-          ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, &input_tensor);
-      break;
-    }
-    case GST_TENSOR_DATA_TYPE_FLOAT32:{
-      convert_image_scale_offset_f32 ((float *) self->dest, self->width,
-          self->height,
-          self->channels, self->planar, srcPtr,
-          GST_VIDEO_INFO_COMP_PSTRIDE (&self->video_info, 0),
-          GST_VIDEO_INFO_PLANE_STRIDE (&self->video_info, 0),
-          self->scales, self->offsets);
-
-      status = api->CreateTensorWithDataAsOrtValue (self->memory_info,
-          (float *) self->dest,
-          inputTensorSize, input_dims, num_dims,
-          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_tensor);
-      break;
-    }
-    default:
-      GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-          ("Unsupported input datatype"));
-      goto error;
-  }
-
-  if (status) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-        ("Failed to create input tensor: %s", api->GetErrorMessage (status)));
-    goto error;
-  }
-
-  output_tensors = g_new0 (OrtValue *, self->output_count);
-
-  status = api->Run (self->session, NULL, (const char *const *) input_names,
+  status =
+      api->Run (self->session, NULL, (const char *const *) &self->input_name,
       (const OrtValue * const *) &input_tensor, 1,
       (const char *const *) self->output_names, self->output_count,
       output_tensors);
@@ -1708,15 +3120,7 @@ gst_onnx_inference_transform_ip (GstBaseTransform * trans, GstBuffer * buf)
     goto error;
   }
 
-  self->allocator->Free (self->allocator, input_names[0]);
   api->ReleaseValue (input_tensor);
-
-  if (!output_tensors || self->output_count == 0) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
-        ("ONNX inference failed to produce outputs"));
-    goto error;
-  }
-
 
   tmeta = gst_buffer_add_tensor_meta (buf);
   tmeta->num_tensors = self->output_count;
@@ -1728,6 +3132,9 @@ gst_onnx_inference_transform_ip (GstBaseTransform * trans, GstBuffer * buf)
     size_t num_dims;
     size_t num_elements;
     void *tensor_data;
+    size_t buffer_size;
+    GstOnnxOutputPool *out_pool = &g_array_index (self->output_pools,
+        GstOnnxOutputPool, i);
 
     status =
         api->GetTensorTypeAndShape (output_tensors[i], &output_tensor_info);
@@ -1790,50 +3197,47 @@ gst_onnx_inference_transform_ip (GstBaseTransform * trans, GstBuffer * buf)
     }
 
     if (tensor_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-      size_t buffer_size = num_elements * sizeof (float);
-      tensor->data = gst_buffer_new_allocate (NULL, buffer_size, NULL);
-      gst_buffer_fill (tensor->data, 0, tensor_data, buffer_size);
+      buffer_size = num_elements * sizeof (float);
       tensor->data_type = GST_TENSOR_DATA_TYPE_FLOAT32;
     } else if (tensor_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-      size_t buffer_size = num_elements * sizeof (int);
-      tensor->data = gst_buffer_new_allocate (NULL, buffer_size, NULL);
-      gst_buffer_fill (tensor->data, 0, tensor_data, buffer_size);
+      buffer_size = num_elements * sizeof (int);
       tensor->data_type = GST_TENSOR_DATA_TYPE_INT32;
     } else {
       GST_ELEMENT_ERROR (self, STREAM, FAILED, (NULL),
           ("Output tensor is not FLOAT32 or INT32, not supported"));
       goto error;
     }
+
+    if (out_pool->tensor_size == buffer_size && out_pool->pool) {
+      if (gst_buffer_pool_acquire_buffer (out_pool->pool, &tensor->data, NULL)
+          != GST_FLOW_OK) {
+        GST_WARNING_OBJECT (self, "Couldn't acquire buffer from pool");
+        tensor->data = NULL;
+      } else {
+        GST_LOG_OBJECT (self, "Acquired buffer for output[%zu] from pool", i);
+      }
+    }
+
+    if (!tensor->data)
+      tensor->data = gst_buffer_new_allocate (NULL, buffer_size, NULL);
+
+    gst_buffer_fill (tensor->data, 0, tensor_data, buffer_size);
   }
 
   // Clean up output tensors
-  for (size_t i = 0; i < self->output_count; i++) {
-    if (output_tensors[i])
-      api->ReleaseValue (output_tensors[i]);
-  }
-  g_free (output_tensors);
+  g_ptr_array_set_size (self->output_tensors, 0);
 
   GST_TRACE_OBJECT (trans, "Num tensors:%zu", self->output_count);
-  gst_buffer_unmap (buf, &info);
+  gst_onnx_importer_unprepare (target_importer);
 
   return GST_FLOW_OK;
 
 error:
   if (status)
     api->ReleaseStatus (status);
-  if (input_names[0])
-    self->allocator->Free (self->allocator, input_names[0]);
-  if (input_type_info)
-    api->ReleaseTypeInfo (input_type_info);
   if (input_tensor)
     api->ReleaseValue (input_tensor);
-  if (output_tensors) {
-    for (size_t i = 0; i < self->output_count; i++) {
-      if (output_tensors[i])
-        api->ReleaseValue (output_tensors[i]);
-    }
-    g_free (output_tensors);
-  }
+  g_ptr_array_set_size (self->output_tensors, 0);
 
   if (output_tensor_info)
     api->ReleaseTensorTypeAndShapeInfo (output_tensor_info);
@@ -1841,8 +3245,7 @@ error:
   if (tmeta)
     gst_buffer_remove_meta (buf, (GstMeta *) tmeta);
 
-
-  gst_buffer_unmap (buf, &info);
+  gst_onnx_importer_unprepare (target_importer);
 
   return GST_FLOW_ERROR;
 }

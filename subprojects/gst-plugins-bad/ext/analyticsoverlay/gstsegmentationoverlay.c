@@ -95,6 +95,8 @@ enum
 
 #define VIDEO_FORMATS GST_VIDEO_OVERLAY_COMPOSITION_BLEND_FORMATS
 #define SEGMENTATION_OVERLAY_CAPS GST_VIDEO_CAPS_MAKE (VIDEO_FORMATS)
+#define SEGMENTATION_OVERLAY_ALL_CAPS SEGMENTATION_OVERLAY_CAPS "; " \
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("ANY", VIDEO_FORMATS)
 
 static GstStaticCaps sw_template_caps =
 GST_STATIC_CAPS (SEGMENTATION_OVERLAY_CAPS);
@@ -102,13 +104,13 @@ GST_STATIC_CAPS (SEGMENTATION_OVERLAY_CAPS);
 static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (SEGMENTATION_OVERLAY_CAPS)
+    GST_STATIC_CAPS (SEGMENTATION_OVERLAY_ALL_CAPS)
     );
 
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (SEGMENTATION_OVERLAY_CAPS)
+    GST_STATIC_CAPS (SEGMENTATION_OVERLAY_ALL_CAPS)
     );
 
 G_DEFINE_TYPE (GstSegmentationOverlay,
@@ -133,6 +135,10 @@ static void gst_segmentation_overlay_before_transform (GstBaseTransform * trans,
 
 static gboolean gst_segmentation_overlay_start (GstBaseTransform * trans);
 static gboolean gst_segmentation_overlay_stop (GstBaseTransform * trans);
+static GstCaps *gst_segmentation_overlay_transform_caps (GstBaseTransform *
+    trans, GstPadDirection direction, GstCaps * caps, GstCaps * filter);
+static GstCaps *gst_segmentation_overlay_fixate_caps (GstBaseTransform * trans,
+    GstPadDirection direction, GstCaps * caps, GstCaps * othercaps);
 
 static void gst_segmentation_overlay_hue_to_rgb (guint32 * rgb, double hue);
 
@@ -195,6 +201,10 @@ gst_segmentation_overlay_class_init (GstSegmentationOverlayClass * klass)
   basetransform_class->start = gst_segmentation_overlay_start;
   basetransform_class->stop = gst_segmentation_overlay_stop;
   basetransform_class->sink_event = gst_segmentation_overlay_sink_event;
+  basetransform_class->transform_caps =
+      GST_DEBUG_FUNCPTR (gst_segmentation_overlay_transform_caps);
+  basetransform_class->fixate_caps =
+      GST_DEBUG_FUNCPTR (gst_segmentation_overlay_fixate_caps);
 
   videofilter_class = (GstVideoFilterClass *) klass;
   videofilter_class->transform_frame_ip =
@@ -508,6 +518,115 @@ gst_segmentation_overlay_sink_event (GstBaseTransform * trans, GstEvent * event)
   return ret;
 }
 
+static GstCaps *
+add_overlay_caps_feature (const GstCaps * caps)
+{
+  GstCaps *tmp = gst_caps_copy (caps);
+  guint n = gst_caps_get_size (tmp);
+  guint i;
+
+  for (i = 0; i < n; i++) {
+    GstCapsFeatures *features = gst_caps_get_features (tmp, i);
+
+    if (!gst_caps_features_contains (features,
+            GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION)) {
+      features = gst_caps_features_copy (features);
+      gst_caps_features_add_static_str (features,
+          GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION);
+      gst_caps_set_features (tmp, i, features);
+    }
+  }
+
+  return tmp;
+}
+
+static GstCaps *
+remove_overlay_caps_feature (const GstCaps * caps)
+{
+  GstCaps *tmp = gst_caps_copy (caps);
+  guint n = gst_caps_get_size (tmp);
+  guint i;
+
+  for (i = 0; i < n; i++) {
+    GstCapsFeatures *features = gst_caps_get_features (tmp, i);
+
+    if (gst_caps_features_contains (features,
+            GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION)) {
+      features = gst_caps_features_copy (features);
+      gst_caps_features_remove (features,
+          GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION);
+      gst_caps_set_features (tmp, i, features);
+    }
+  }
+
+  return tmp;
+}
+
+static GstCaps *
+gst_segmentation_overlay_transform_caps (GstBaseTransform * trans,
+    GstPadDirection direction, GstCaps * caps, GstCaps * filter)
+{
+  GstCaps *tmp = gst_caps_copy (caps);
+  GstCaps *result;
+
+  GST_DEBUG_OBJECT (trans,
+      "Transforming caps %" GST_PTR_FORMAT " in direction %s", caps,
+      (direction == GST_PAD_SINK) ? "sink" : "src");
+
+  if (direction == GST_PAD_SINK) {
+    /* We can attach overlay meta */
+    GstCaps *with_meta = add_overlay_caps_feature (caps);
+    gst_caps_append (tmp, with_meta);
+  } else {
+    GstCaps *without_meta = remove_overlay_caps_feature (caps);
+    gst_caps_append (tmp, without_meta);
+  }
+
+  if (filter) {
+    result = gst_caps_intersect_full (filter, tmp, GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (tmp);
+  } else {
+    result = tmp;
+  }
+
+  GST_DEBUG_OBJECT (trans, "returning caps: %" GST_PTR_FORMAT, result);
+
+  return result;
+}
+
+static GstCaps *
+gst_segmentation_overlay_fixate_caps (GstBaseTransform * trans,
+    GstPadDirection direction, GstCaps * caps, GstCaps * othercaps)
+{
+  GstCaps *preferred = NULL;
+  guint i;
+
+  GST_DEBUG_OBJECT (trans,
+      "Fixating caps %" GST_PTR_FORMAT " in direction %s", othercaps,
+      (direction == GST_PAD_SINK) ? "sink" : "src");
+
+  /* Prefer caps with overlay feature in both directions */
+  for (i = 0; i < gst_caps_get_size (othercaps); i++) {
+    GstCapsFeatures *features = gst_caps_get_features (othercaps, i);
+    if (gst_caps_features_contains (features,
+            GST_CAPS_FEATURE_META_GST_VIDEO_OVERLAY_COMPOSITION)) {
+      if (!preferred)
+        preferred = gst_caps_new_empty ();
+
+      gst_caps_append_structure_full (preferred,
+          gst_structure_copy (gst_caps_get_structure (othercaps, i)),
+          gst_caps_features_copy (features));
+    }
+  }
+
+  if (preferred) {
+    gst_caps_unref (othercaps);
+    return gst_caps_fixate (preferred);
+  }
+
+  return gst_caps_fixate (othercaps);
+}
+
 static void
 gst_segmentation_overlay_before_transform (GstBaseTransform * trans,
     GstBuffer * buffer)
@@ -540,6 +659,8 @@ gst_segmentation_overlay_stop (GstBaseTransform * trans)
 {
   GstSegmentationOverlay *overlay = GST_SEGMENTATION_OVERLAY (trans);
   gst_clear_buffer (&overlay->canvas);
+  g_clear_pointer (&overlay->composition, gst_video_overlay_composition_unref);
+  overlay->upstream_composition = NULL;
   g_free (overlay->color_table);
   overlay->color_table = NULL;
   g_free (overlay->mask_filter);
@@ -638,8 +759,13 @@ gst_segmentation_overlay_transform_frame_ip (GstVideoFilter * filter,
           GST_VIDEO_OVERLAY_COMPOSITION_FORMAT_RGB, canvas_w, canvas_h);
       /* Allocate buffer to store canvas */
       canvas = gst_buffer_new_and_alloc (canvas_info.size);
-      cvmeta = gst_buffer_add_video_meta (canvas, GST_VIDEO_FRAME_FLAG_NONE,
-          GST_VIDEO_OVERLAY_COMPOSITION_FORMAT_RGB, canvas_w, canvas_h);
+      cvmeta = gst_buffer_add_video_meta_full (canvas,
+          GST_VIDEO_FRAME_FLAG_NONE,
+          GST_VIDEO_INFO_FORMAT (&canvas_info),
+          GST_VIDEO_INFO_WIDTH (&canvas_info),
+          GST_VIDEO_INFO_HEIGHT (&canvas_info),
+          GST_VIDEO_INFO_N_PLANES (&canvas_info),
+          canvas_info.offset, canvas_info.stride);
 
       /* Keep an handle on canvas to free it if required */
       gst_buffer_replace (&overlay->canvas, canvas);
@@ -735,11 +861,11 @@ gst_segmentation_overlay_update_mask_filter (GstSegmentationOverlay * overlay,
 
 static void
 gst_segmentation_overlay_resampling (GstSegmentationOverlay * overlay,
-    gint32 * canvas_data, guint8 * mask_data, GstVideoMeta * cvmeta,
+    guint8 * canvas_data, guint8 * mask_data, GstVideoMeta * cvmeta,
     GstVideoMeta * mvmeta)
 {
   gsize mask_col_idx, mask_line_idx, last_mask_line_idx = -1;
-  gint32 *cline = canvas_data, *pcline = NULL;
+  gint32 *cline = (gint32 *) canvas_data, *pcline = NULL;
   guint8 *mline = mask_data;
   gsize color_count = overlay->color_table_size + 1;
   guint32 *color_table = overlay->color_table;
@@ -749,8 +875,10 @@ gst_segmentation_overlay_resampling (GstSegmentationOverlay * overlay,
 #define MASK_FILTER(val) (mask_filter == NULL || mask_filter [mline [val]])
 
   for (gint cl = 0; cl < cvmeta->height; cl++) {
+    cline = (gint32 *) (canvas_data + cl * cvmeta->stride[0]);
     mask_line_idx = (cl * mvmeta->height) / cvmeta->height;
     if (last_mask_line_idx != mask_line_idx) {
+      mline = mask_data + (mask_line_idx * mvmeta->stride[0]);
       mask_col_idx = 0;
       for (gint cc = 0; cc < cvmeta->width; cc++) {
         mask_col_idx = (cc * mvmeta->width) / cvmeta->width;
@@ -760,16 +888,14 @@ gst_segmentation_overlay_resampling (GstSegmentationOverlay * overlay,
           cline[cc] = overlay->bg_color;
         }
       }
+      last_mask_line_idx = mask_line_idx;
+      pcline = cline;
     } else {
       /* If current line would be generate from the same line from the mask
        * as the previous line in canvas we can simply copy the previous
        * line into the current line */
       memcpy (cline, pcline, sizeof (guint32) * cvmeta->width);
     }
-    last_mask_line_idx = mask_line_idx;
-    pcline = cline;
-    cline += cvmeta->width;
-    mline = (mask_line_idx * mvmeta->width) + mask_data;
   }
 }
 
@@ -789,7 +915,7 @@ gst_segmentation_overlay_fill_canvas (GstSegmentationOverlay * overlay,
 
     gst_buffer_map (mask, &mmap, GST_MAP_READ);
     gst_segmentation_overlay_resampling (overlay,
-        (gint32 *) cmap->data, mmap.data, cvmeta, mvmeta);
+        cmap->data, mmap.data, cvmeta, mvmeta);
     gst_buffer_unmap (mask, &mmap);
   }
   gst_buffer_unref (mask);

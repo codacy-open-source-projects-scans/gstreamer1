@@ -347,6 +347,8 @@ gst_video_rate_class_init (GstVideoRateClass * klass)
       "Drops/duplicates/adjusts timestamps on video frames to make a perfect stream",
       "Wim Taymans <wim@fluendo.com>");
 
+  gst_element_class_mark_as_untrusted_aware (element_class);
+
   gst_element_class_add_static_pad_template (element_class,
       &gst_video_rate_sink_template);
   gst_element_class_add_static_pad_template (element_class,
@@ -1061,6 +1063,20 @@ gst_video_rate_duplicate_to_close_segment (GstVideoRate * videorate)
   }
 
   GST_DEBUG_OBJECT (videorate, "Pushing buffers to close segment");
+
+  /* With a variable output framerate and no duration on the held buffer,
+   * there is no way to infer how long it should last, nor to advance
+   * next_ts by duplicating it. Push it once and stop. */
+  if (!videorate->to_rate_numerator &&
+      !GST_BUFFER_DURATION_IS_VALID (videorate->prevbuf)) {
+    GST_DEBUG_OBJECT (videorate, "Closing segment with a single buffer with "
+        "invalid duration, cannot fill the segment by duplicating");
+    if (gst_video_rate_flush_prev (videorate, FALSE, GST_CLOCK_TIME_NONE,
+            TRUE) == GST_FLOW_OK)
+      count = 1;
+
+    return count;
+  }
 
   res = GST_FLOW_OK;
   /* fill up to the end of current segment */
@@ -2378,6 +2394,8 @@ gst_video_rate_get_property (GObject * object,
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (videorate, plugin);
 }
 

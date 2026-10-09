@@ -141,7 +141,7 @@ trigger:
   variables:
     FDO_USER: 'containeruser'
     CCACHE_DIR: '/cache/gstreamer/gstreamer/ccache_fedora_containeruser/'
-    FDO_DISTRIBUTION_VERSION: '40'
+    FDO_DISTRIBUTION_VERSION: '43'
     FDO_REPO_SUFFIX: "$FEDORA_AMD64_SUFFIX"
     FDO_DISTRIBUTION_TAG: "$FEDORA_TAG-$GST_UPSTREAM_BRANCH"
     FDO_DISTRIBUTION_EXEC: 'bash ci/docker/fedora/prepare.sh'
@@ -239,6 +239,11 @@ windows amd64 docker:
         "--build-arg", "CI_COMMIT_REF_NAME=$CI_COMMIT_REF_NAME" `
       )
     - ci/docker/windows/container.ps1 $CI_REGISTRY $CI_REGISTRY_USER $CI_REGISTRY_PASSWORD $WINDOWS_IMAGE $WINDOWS_UPSTREAM_IMAGE $DOCKERFILE
+  rules:
+   - if: '$CI_PROJECT_NAME != "gstreamer-security"'
+   # Never run for gstreamer-security repo
+   - if: '$CI_PROJECT_NAME == "gstreamer-security"'
+     when: never
 
 .macos image:
   image: "registry.freedesktop.org/gstreamer/gstreamer/macos-arm64/26-tahoe:2025-09-30.0"
@@ -256,6 +261,10 @@ windows amd64 docker:
     FDO_DISTRIBUTION_PACKAGES: 'libabigail'
     FDO_DISTRIBUTION_EXEC: 'bash ci/docker/abi-check/prepare.sh'
     ABI_CHECK_CACHE: '/abi-check-cache'
+    MESON_ARGS: >-
+      ${SIMPLE_BUILD}
+      -Dtests=disabled
+      -Dexamples=disabled
 
 abi-check docker:
   # kvm has very minimal CPU available and may overrun the job
@@ -289,6 +298,7 @@ pre-commit checks:
   script:
     - export PATH="/usr/local/cargo/bin:$PATH"
     - echo $CI_MERGE_REQUEST_DIFF_BASE_SHA
+    - ./ci/scripts/ban-wrap-git.sh
     - gitlint --commits $CI_MERGE_REQUEST_DIFF_BASE_SHA..HEAD
     - pre-commit run --show-diff-on-failure --from-ref $CI_MERGE_REQUEST_DIFF_BASE_SHA --to-ref HEAD
   rules:
@@ -304,12 +314,24 @@ pre-commit checks:
     # shared across everything really
     CCACHE_MAXSIZE: '10G'
 
+.base_toplevel_and_ci_changes: &toplevel_and_ci_changes
+  - .gitlab-ci.yml
+  - .gitlab-image-tags.yml
+  - gst-env.py
+  - meson.build
+  - ci/gitlab/*.py
+  - ci/scripts/**/*
+  - "scripts/*"
+  - subprojects/*.wrap
+
 .base_modules_changes: &modules_changes
   - .gitlab-ci.yml
   - .gitlab-image-tags.yml
+  - gst-env.py
+  - meson.build
   - ci/gitlab/*.py
   - ci/scripts/**/*
-  - meson.build
+  - "scripts/*"
   - subprojects/*.wrap
   - subprojects/gst-devtools/**/*
   - subprojects/gst-editing-services/**/*
@@ -348,8 +370,8 @@ pre-commit checks:
     GI_SCANNER_DISABLE_CACHE: "1"
   script:
     - $CI_PROJECT_DIR/ci/scripts/build.sh build/
-    - meson devenv -C build gst-inspect-1.0 --version
-    - meson devenv -C build gst-inspect-1.0
+    - ./gst-env.py gst-inspect-1.0 --version
+    - ./gst-env.py gst-inspect-1.0
   after_script:
     - mv build/meson-logs/ meson-logs
   artifacts:
@@ -372,9 +394,9 @@ pre-commit checks:
     MESON_ARGS: "${SIMPLE_BUILD}"
   script:
     - $CI_PROJECT_DIR/ci/scripts/build.sh build/
-    - meson devenv -C build gst-inspect-1.0 --version
-    - meson devenv -C build gst-inspect-1.0
-    - G_DEBUG=fatal_criticals meson devenv -C build gst-inspect-1.0 --print-all --gst-disable-registry-fork > /dev/null
+    - ./gst-env.py gst-inspect-1.0 --version
+    - ./gst-env.py gst-inspect-1.0
+    - G_DEBUG=fatal_criticals ./gst-env.py gst-inspect-1.0 --print-all --gst-disable-registry-fork > /dev/null
     - meson install --destdir $CI_PROJECT_DIR/destdir -C build
     - rm -rf $CI_PROJECT_DIR/destdir
 
@@ -520,6 +542,9 @@ build debian x86_64 debug:
       -Dvpx:tools=disabled
 
   rules:
+    # Don't run Windows jobs for gstreamer-security repo
+    - if: '$CI_PROJECT_NAME == "gstreamer-security"'
+      when: never
     - !reference [.upstream-branch-rules, rules]
     - changes:
         paths:
@@ -562,8 +587,8 @@ build vs2022 amd64:
     - echo "$env:MESON_ARGS $env:GTK_ARGS" | Out-File -File args.txt -Encoding ASCII
     - .\ci\run_retry.ps1 meson setup --vsenv build '@args.txt'
     - .\ci\run_retry.ps1 meson compile -C build --jobs $env:FDO_CI_CONCURRENT
-    - meson devenv -C build gst-inspect-1.0.exe --version
-    - meson devenv -C build gst-inspect-1.0.exe
+    - .\gst-env.py gst-inspect-1.0.exe --version
+    - .\gst-env.py gst-inspect-1.0.exe
     - mkdir destdir
     - meson install -C build --destdir installdir
     - Remove-Item -Recurse -Force build\installdir
@@ -580,8 +605,8 @@ build vs2022 amd64 full-static:
     - !reference [".build windows", "script"]
     - cmd.exe /C "meson setup --vsenv build --default-library=static $env:MESON_ARGS"
     - .\ci\run_retry.ps1 meson compile -C build --jobs $env:FDO_CI_CONCURRENT
-    - meson devenv -C build gst-inspect-1.0.exe --version
-    - meson devenv -C build gst-inspect-1.0.exe
+    - .\gst-env.py gst-inspect-1.0.exe --version
+    - .\gst-env.py gst-inspect-1.0.exe
   variables:
     MESON_ARGS: >-
       -Dintrospection=disabled
@@ -618,6 +643,9 @@ build vs2022 x86:
 build vs2022 arm64:
   extends: '.build windows cross'
   rules:
+    # Don't run Windows jobs for gstreamer-security repo
+    - if: '$CI_PROJECT_NAME == "gstreamer-security"'
+      when: never
     - when: 'manual'
       allow_failure: true
   variables:
@@ -660,6 +688,9 @@ build macos:
     MESON_TEST_ARGS: "gst-plugins-bad:*avf* gst-plugins-bad:*vtdec* gst-plugins-bad:*_vk*"
     SUBPROJECTS_CACHE_DIR: "/Users/gst-ci/subprojects"
   rules:
+    # Don't run macOS jobs for gstreamer-security repo
+    - if: '$CI_PROJECT_NAME == "gstreamer-security"'
+      when: never
     - !reference [.upstream-branch-rules, rules]
     - changes:
         paths:
@@ -962,9 +993,9 @@ valgrind core:
   rules:
     - changes:
         paths:
-          - "*"
-          - "scripts/*"
-          - "ci/**/*"
+          *toplevel_and_ci_changes
+    - changes:
+        paths:
           - "subprojects/gst-devtools/**/*"
           - "subprojects/gstreamer/**/*"
 
@@ -975,9 +1006,9 @@ valgrind base:
   rules:
     - changes:
         paths:
-          - "*"
-          - "scripts/*"
-          - "ci/**/*"
+          *toplevel_and_ci_changes
+    - changes:
+        paths:
           - "subprojects/gst-devtools/**/*"
           - "subprojects/gstreamer/**/*"
           - "subprojects/gst-plugins-base/**/*"
@@ -991,9 +1022,9 @@ valgrind good:
   rules:
     - changes:
         paths:
-          - "*"
-          - "scripts/*"
-          - "ci/**/*"
+          *toplevel_and_ci_changes
+    - changes:
+        paths:
           - "subprojects/gst-devtools/**/*"
           - "subprojects/gstreamer/**/*"
           - "subprojects/gst-plugins-base/**/*"
@@ -1006,9 +1037,9 @@ valgrind ugly:
   rules:
     - changes:
         paths:
-          - "*"
-          - "scripts/*"
-          - "ci/**/*"
+          *toplevel_and_ci_changes
+    - changes:
+        paths:
           - "subprojects/gst-devtools/**/*"
           - "subprojects/gstreamer/**/*"
           - "subprojects/gst-plugins-base/**/*"
@@ -1022,9 +1053,9 @@ valgrind bad:
   rules:
     - changes:
         paths:
-          - "*"
-          - "scripts/*"
-          - "ci/**/*"
+          *toplevel_and_ci_changes
+    - changes:
+        paths:
           - "subprojects/gst-devtools/**/*"
           - "subprojects/gstreamer/**/*"
           - "subprojects/gst-plugins-base/**/*"
@@ -1035,12 +1066,19 @@ valgrind ges:
   extends: '.valgrind fedora x86_64'
   variables:
     TEST_SUITE: "check.gst-editing-services\\..*"
+    # FIXME: Py_Initialize() aborts under valgrind on the Fedora 43 CI
+    # image (python 3.14.4) inside _Py_CheckRecursiveCall, when GES
+    # loads the python plugin via load_python_formatters(). Looks like
+    # a false positive of Python 3.14's C-stack overflow detection.
+    # Build without the python plugin so it is not loaded. Try
+    # removing this override when bumping FEDORA_TAG.
+    MESON_ARGS: "${SIMPLE_BUILD} -Dpython=disabled"
   rules:
     - changes:
         paths:
-          - "*"
-          - "scripts/*"
-          - "ci/**/*"
+          *toplevel_and_ci_changes
+    - changes:
+        paths:
           - "subprojects/gst-devtools/**/*"
           - "subprojects/gstreamer/**/*"
           - "subprojects/gst-plugins-base/**/*"
@@ -1056,9 +1094,9 @@ valgrind rtsp-server:
   rules:
     - changes:
         paths:
-          - "*"
-          - "scripts/*"
-          - "ci/**/*"
+          *toplevel_and_ci_changes
+    - changes:
+        paths:
           - "subprojects/gst-devtools/**/*"
           - "subprojects/gstreamer/**/*"
           - "subprojects/gst-plugins-base/**/*"
@@ -1186,6 +1224,9 @@ cerbero trigger:
     - if: '$MESON_COMMIT'
     # Never run post merge
     - if: '$CI_PROJECT_NAMESPACE == "gstreamer" && $CI_COMMIT_BRANCH == $GST_UPSTREAM_BRANCH'
+      when: never
+    # Never run for gstreamer-security repo
+    - if: '$CI_PROJECT_NAME == "gstreamer-security"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     # For merge reqest, we want to test user branch

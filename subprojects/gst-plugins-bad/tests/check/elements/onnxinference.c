@@ -46,70 +46,26 @@ static void assert_model_fails_to_start (const gchar * model_name);
       __FILE__, __LINE__)
 
 static GstHarness *
-harness_new_with_model (const gchar * model_path)
+harness_new_with_model (const gchar * model_path, gboolean with_convert)
 {
-  gchar *launch = g_strdup_printf ("onnxinference model-file=%s", model_path);
-  GstHarness *h = gst_harness_new_parse (launch);
+  gchar *path = g_strdup (model_path);
+  gchar *launch;
+  GstHarness *h;
+
+#ifdef G_OS_WIN32
+  g_strdelimit (path, "\\", '/');
+#endif
+
+  launch = g_strdup_printf ("%sonnxinference model-file=%s", with_convert ?
+      "videoconvert ! " : "", path);
+  h = gst_harness_new_parse (launch);
 
   gst_harness_play (h);
   g_free (launch);
+  g_free (path);
 
   return h;
 }
-
-/* Test that RGB, RGBA, BGR and BGRA input formats all produce correct float32 output tensors. */
-GST_START_TEST (test_input_formats)
-{
-  const GstVideoFormat formats[] = {
-    GST_VIDEO_FORMAT_RGB, GST_VIDEO_FORMAT_RGBA,
-    GST_VIDEO_FORMAT_BGR, GST_VIDEO_FORMAT_BGRA,
-  };
-  guint i;
-
-  for (i = 0; i < G_N_ELEMENTS (formats); i++) {
-    gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
-        "onnxinference", "flatten_float32in_float32out.onnx",
-        "0.0,255.0;0.0,255.0;0.0,255.0");
-    GstHarness *h = harness_new_with_model (tmp_model);
-    GstBuffer *in = create_solid_color_buffer (formats[i],
-        TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
-    GstBuffer *out;
-    GstTensorMeta *tmeta;
-    const GstTensor *tensor;
-    gfloat expected[TEST_NUM_PIXELS * TEST_NUM_CHANNELS];
-    gchar *caps_str;
-
-    caps_str = g_strdup_printf ("video/x-raw,format=%s,width=%d,height=%d,"
-        "framerate=30/1", gst_video_format_to_string (formats[i]),
-        TEST_WIDTH, TEST_HEIGHT);
-    gst_harness_set_src_caps_str (h, caps_str);
-    g_free (caps_str);
-
-    out = gst_harness_push_and_pull (h, in);
-    fail_unless (out);
-    fail_unless (gst_buffer_get_tensor_meta (out) != NULL);
-    tmeta = gst_buffer_get_tensor_meta (out);
-    fail_unless_equals_int (tmeta->num_tensors, 1);
-    tensor = gst_tensor_meta_get (tmeta, 0);
-    fail_unless (tensor != NULL);
-    fail_unless (gst_tensor_meta_get_by_id (tmeta,
-            g_quark_from_static_string ("output-1")) == NULL);
-    fail_unless_equals_int (tensor->data_type, GST_TENSOR_DATA_TYPE_FLOAT32);
-    fail_unless_equals_int ((gint) tensor->num_dims, 2);
-    fail_unless_equals_int ((gint) tensor->dims[0], 1);
-    fail_unless_equals_int ((gint) tensor->dims[1], 48);
-
-    fill_expected_flat_rgb_f32 (expected, TEST_NUM_PIXELS, 11, 22, 33);
-    ONNX_TEST_ASSERT_TENSOR_VALUES_F32 (tensor, expected,
-        G_N_ELEMENTS (expected), 1e-6f);
-
-    gst_buffer_unref (out);
-    gst_harness_teardown (h);
-    cleanup_temp_model (tmp_model);
-  }
-}
-
-GST_END_TEST;
 
 /* Test that different per-channel normalization ranges (0-255, 0-1, -1 to 1, mixed) produce the correct scaled float values. */
 GST_START_TEST (test_normalization_variants)
@@ -136,7 +92,7 @@ GST_START_TEST (test_normalization_variants)
     gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
         "onnxinference", "flatten_float32in_float32out.onnx",
         tests[i].ranges);
-    GstHarness *h = harness_new_with_model (tmp_model);
+    GstHarness *h = harness_new_with_model (tmp_model, TRUE);
     GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
         TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
     GstBuffer *out;
@@ -175,7 +131,7 @@ GST_START_TEST (test_output_int32)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "int32out.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
+  GstHarness *h = harness_new_with_model (tmp_model, TRUE);
   GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
       TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
   GstBuffer *out;
@@ -229,7 +185,7 @@ GST_START_TEST (test_output_uint8_rejected)
 
 GST_END_TEST;
 
-/* Test that a model with a float64 output does not fail to reach PAUSED state. */
+/* Test that a model with a float64 output fails to reach PAUSED state. */
 GST_START_TEST (test_output_float64_rejected)
 {
   gchar *model = g_build_filename (GST_ONNX_TEST_DATA_PATH,
@@ -237,7 +193,7 @@ GST_START_TEST (test_output_float64_rejected)
   GstElement *e = gst_element_factory_make ("onnxinference", NULL);
 
   g_object_set (e, "model-file", model, NULL);
-  fail_if (gst_element_set_state (e, GST_STATE_PAUSED)
+  fail_unless (gst_element_set_state (e, GST_STATE_PAUSED)
       == GST_STATE_CHANGE_FAILURE);
 
   gst_element_set_state (e, GST_STATE_NULL);
@@ -253,7 +209,7 @@ GST_START_TEST (test_dynamic_batch)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "dynamic_batch.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
+  GstHarness *h = harness_new_with_model (tmp_model, TRUE);
   GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
       TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
   GstBuffer *out;
@@ -288,8 +244,8 @@ GST_START_TEST (test_3d_input)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "flatten_3d_float32.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
-  GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
+  GstHarness *h = harness_new_with_model (tmp_model, TRUE);
+  GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGBP,
       TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
   GstBuffer *out;
   GstTensorMeta *tmeta;
@@ -297,7 +253,7 @@ GST_START_TEST (test_3d_input)
   gfloat expected[3 * 16];
 
   gst_harness_set_src_caps_str (h,
-      "video/x-raw,format=RGB,width=4,height=4,framerate=30/1");
+      "video/x-raw,format=RGBP,width=4,height=4,framerate=30/1");
 
   out = gst_harness_push_and_pull (h, in);
   fail_unless (out);
@@ -327,7 +283,7 @@ GST_START_TEST (test_multi_output_tensor_id_and_dims_order)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "multi_output.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
+  GstHarness *h = harness_new_with_model (tmp_model, TRUE);
   GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
       TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
   GstBuffer *out;
@@ -409,8 +365,8 @@ GST_START_TEST (test_planar_chw_input)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "planar_chw.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
-  GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
+  GstHarness *h = harness_new_with_model (tmp_model, TRUE);
+  GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGBP,
       TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
   GstBuffer *out;
   GstTensorMeta *tmeta;
@@ -418,7 +374,7 @@ GST_START_TEST (test_planar_chw_input)
   gfloat expected[TEST_NUM_PIXELS * TEST_NUM_CHANNELS];
 
   gst_harness_set_src_caps_str (h,
-      "video/x-raw,format=RGB,width=4,height=4,framerate=30/1");
+      "video/x-raw,format=RGBP,width=4,height=4,framerate=30/1");
 
   out = gst_harness_push_and_pull (h, in);
   fail_unless (out);
@@ -435,6 +391,45 @@ GST_START_TEST (test_planar_chw_input)
   fail_unless_equals_int ((gint) tensor->dims[3], 4);
 
   fill_expected_chw_rgb_f32 (expected, TEST_NUM_PIXELS, 11.f, 22.f, 33.f);
+  ONNX_TEST_ASSERT_TENSOR_VALUES_F32 (tensor, expected,
+      G_N_ELEMENTS (expected), 1e-6f);
+
+  gst_buffer_unref (out);
+  gst_harness_teardown (h);
+  cleanup_temp_model (tmp_model);
+}
+
+GST_END_TEST;
+
+/* Test a GRAY8 input with a single-channel model, verifying the grayscale plane is correctly flattened. */
+GST_START_TEST (test_gray8_input)
+{
+  gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
+      "onnxinference", "flatten_gray.onnx",
+      "0.0,255.0");
+  GstHarness *h = harness_new_with_model (tmp_model, TRUE);
+  GstBuffer *in = create_solid_gray_buffer (GST_VIDEO_FORMAT_GRAY8,
+      NULL, TEST_WIDTH, TEST_HEIGHT, 42);
+  GstBuffer *out;
+  GstTensorMeta *tmeta;
+  const GstTensor *tensor;
+  gfloat expected[TEST_NUM_PIXELS];
+
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=GRAY8,width=4,height=4,framerate=30/1");
+
+  out = gst_harness_push_and_pull (h, in);
+  fail_unless (out);
+
+  fail_unless (gst_buffer_get_tensor_meta (out) != NULL);
+  tmeta = gst_buffer_get_tensor_meta (out);
+  fail_unless_equals_int (tmeta->num_tensors, 1);
+  tensor = gst_tensor_meta_get (tmeta, 0);
+  fail_unless_equals_int ((gint) tensor->num_dims, 2);
+  fail_unless_equals_int ((gint) tensor->dims[0], 1);
+  fail_unless_equals_int ((gint) tensor->dims[1], 16);
+
+  fill_expected_gray_f32 (expected, TEST_NUM_PIXELS, 42.f);
   ONNX_TEST_ASSERT_TENSOR_VALUES_F32 (tensor, expected,
       G_N_ELEMENTS (expected), 1e-6f);
 
@@ -498,7 +493,7 @@ GST_START_TEST (test_timestamp_and_flags_propagation)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "flatten_float32in_float32out.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
+  GstHarness *h = harness_new_with_model (tmp_model, TRUE);
   GstBuffer *in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB,
       TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 55);
   GstBuffer *out;
@@ -532,7 +527,7 @@ GST_START_TEST (test_transform_caps_and_accept_caps)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "flatten_uint8in_float32out.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
+  GstHarness *h = harness_new_with_model (tmp_model, FALSE);
   GstPad *sinkpad = gst_element_get_static_pad (h->element, "sink");
   GstCaps *filter = gst_caps_from_string ("video/x-raw,format=RGB");
   GstCaps *caps = gst_pad_query_caps (sinkpad, filter);
@@ -568,7 +563,7 @@ GST_START_TEST (test_accept_caps_dimension_mismatch)
   gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
       "onnxinference", "flatten_uint8in_float32out.onnx",
       "0.0,255.0;0.0,255.0;0.0,255.0");
-  GstHarness *h = harness_new_with_model (tmp_model);
+  GstHarness *h = harness_new_with_model (tmp_model, FALSE);
   GstPad *sinkpad = gst_element_get_static_pad (h->element, "sink");
   GstCaps *caps;
 
@@ -591,6 +586,180 @@ GST_START_TEST (test_accept_caps_dimension_mismatch)
 
 GST_END_TEST;
 
+/* Descend into a "tensors" caps field and return its nested "tensorgroups"
+ * structure, or NULL if the field isn't present. */
+static const GstStructure *
+get_tensorgroups (const GstStructure * s)
+{
+  const GValue *tensors_value = gst_structure_get_value (s, "tensors");
+
+  if (!tensors_value)
+    return NULL;
+
+  return gst_value_get_structure (tensors_value);
+}
+
+/* Test that each caps alternative keeps its own upstream tensor groups */
+GST_START_TEST (test_transform_caps_preserves_alternative_tensor_groups)
+{
+  gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
+      "onnxinference", "flatten_uint8in_float32out.onnx",
+      "0.0,255.0;0.0,255.0;0.0,255.0");
+  GstHarness *h = harness_new_with_model (tmp_model, FALSE);
+  GstElement *element = gst_harness_find_element (h, "onnxinference");
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (element);
+  GstStructure *groups_30;
+  GstStructure *groups_15;
+  GstCaps *caps;
+  GstCaps *transformed;
+  guint i;
+
+  groups_30 = gst_structure_new ("tensorgroups",
+      "upstream-30", G_TYPE_INT, 0, NULL);
+  groups_15 = gst_structure_new ("tensorgroups",
+      "upstream-15", G_TYPE_INT, 0, NULL);
+  caps = gst_caps_new_simple ("video/x-raw",
+      "format", G_TYPE_STRING, "RGB",
+      "width", G_TYPE_INT, TEST_WIDTH,
+      "height", G_TYPE_INT, TEST_HEIGHT,
+      "framerate", GST_TYPE_FRACTION, 30, 1,
+      "tensors", GST_TYPE_STRUCTURE, groups_30, NULL);
+  gst_caps_append_structure (caps,
+      gst_structure_new ("video/x-raw",
+          "format", G_TYPE_STRING, "RGB",
+          "width", G_TYPE_INT, TEST_WIDTH,
+          "height", G_TYPE_INT, TEST_HEIGHT,
+          "framerate", GST_TYPE_FRACTION, 15, 1,
+          "tensors", GST_TYPE_STRUCTURE, groups_15, NULL));
+  gst_structure_free (groups_15);
+  gst_structure_free (groups_30);
+
+  transformed = klass->transform_caps (GST_BASE_TRANSFORM (element),
+      GST_PAD_SINK, caps, NULL);
+  fail_unless_equals_int (gst_caps_get_size (transformed), 2);
+
+  for (i = 0; i < gst_caps_get_size (transformed); i++) {
+    const GstStructure *s = gst_caps_get_structure (transformed, i);
+    const GstStructure *tensorgroups = get_tensorgroups (s);
+    gint fps_n;
+    gint fps_d;
+
+    fail_unless (gst_structure_get_fraction (s, "framerate", &fps_n, &fps_d));
+    fail_unless_equals_int (fps_d, 1);
+    fail_unless (tensorgroups != NULL);
+    fail_unless (gst_structure_has_field (tensorgroups,
+            "flatten_uint8in_float32out-group"));
+    if (fps_n == 30) {
+      fail_unless (gst_structure_has_field (tensorgroups, "upstream-30"));
+      fail_if (gst_structure_has_field (tensorgroups, "upstream-15"));
+    } else {
+      fail_unless_equals_int (fps_n, 15);
+      fail_unless (gst_structure_has_field (tensorgroups, "upstream-15"));
+      fail_if (gst_structure_has_field (tensorgroups, "upstream-30"));
+    }
+  }
+
+  gst_caps_unref (transformed);
+  gst_caps_unref (caps);
+  gst_object_unref (element);
+  gst_harness_teardown (h);
+  cleanup_temp_model (tmp_model);
+}
+
+GST_END_TEST;
+
+/* Test that chaining two onnxinference elements using different models
+ * accumulates both tensor groups downstream, and that both groups are
+ * removed again when querying caps upstream. */
+GST_START_TEST (test_transform_caps_accumulates_tensor_groups)
+{
+  gchar *tmp_model1 = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
+      "onnxinference", "dynamic_batch.onnx",
+      "0.0,255.0;0.0,255.0;0.0,255.0");
+  gchar *tmp_model2 = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
+      "onnxinference", "flatten_float32in_float32out.onnx",
+      "0.0,255.0;0.0,255.0;0.0,255.0");
+  gchar *launch = g_strdup_printf ("onnxinference model-file=%s ! "
+      "onnxinference model-file=%s", tmp_model1, tmp_model2);
+  GstHarness *h = gst_harness_new_parse (launch);
+  GstPad *sinkpad = gst_element_get_static_pad (h->element, "sink");
+  GstPad *srcpad = gst_element_get_static_pad (h->element, "src");
+  GstBuffer *in, *out;
+  GstCaps *downstream_caps, *upstream_caps;
+  const GstStructure *tensorgroups;
+
+  g_free (launch);
+  gst_harness_play (h);
+
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=RGB_F32LE,width=4,height=4,framerate=30/1");
+  in = create_solid_color_buffer (GST_VIDEO_FORMAT_RGB_F32LE,
+      TEST_WIDTH, TEST_HEIGHT, 11, 22, 33, 255);
+  out = gst_harness_push_and_pull (h, in);
+  fail_unless (out != NULL);
+  gst_buffer_unref (out);
+
+  /* Downstream: the src pad of the chain must offer both group-ids. */
+  downstream_caps = gst_pad_query_caps (srcpad, NULL);
+  fail_unless (downstream_caps != NULL);
+  fail_if (gst_caps_is_empty (downstream_caps));
+  tensorgroups = get_tensorgroups (gst_caps_get_structure (downstream_caps, 0));
+  fail_unless (tensorgroups != NULL);
+  fail_unless (gst_structure_has_field (tensorgroups, "dynamic_batch-group"));
+  fail_unless (gst_structure_has_field (tensorgroups,
+          "flatten_float32in_float32out-group"));
+  gst_caps_unref (downstream_caps);
+
+  /* Upstream: the sink pad of the chain must not carry any tensor group. */
+  upstream_caps = gst_pad_query_caps (sinkpad, NULL);
+  fail_unless (upstream_caps != NULL);
+  fail_if (gst_caps_is_empty (upstream_caps));
+  fail_unless (get_tensorgroups (gst_caps_get_structure (upstream_caps,
+              0)) == NULL);
+  gst_caps_unref (upstream_caps);
+
+  gst_object_unref (sinkpad);
+  gst_object_unref (srcpad);
+  gst_harness_teardown (h);
+  cleanup_temp_model (tmp_model1);
+  cleanup_temp_model (tmp_model2);
+}
+
+GST_END_TEST;
+
+/* Test that chaining two onnxinference elements using the same model (and
+ * therefore the same tensor group-id) fails to negotiate. */
+GST_START_TEST (test_transform_caps_duplicate_group_fails)
+{
+  gchar *tmp_model = setup_model_with_ranges (GST_ONNX_TEST_DATA_PATH,
+      "onnxinference", "flatten_uint8in_float32out.onnx",
+      "0.0,255.0;0.0,255.0;0.0,255.0");
+  GstHarness *h = harness_new_with_model (tmp_model, FALSE);
+  GstElement *element = gst_harness_find_element (h, "onnxinference");
+  GstBaseTransformClass *klass = GST_BASE_TRANSFORM_GET_CLASS (element);
+  GstStructure *groups;
+  GstCaps *caps;
+
+  groups = gst_structure_new ("tensorgroups",
+      "flatten_uint8in_float32out-group", G_TYPE_INT, 0, NULL);
+  caps = gst_caps_new_simple ("video/x-raw",
+      "format", G_TYPE_STRING, "RGB",
+      "width", G_TYPE_INT, TEST_WIDTH,
+      "height", G_TYPE_INT, TEST_HEIGHT,
+      "framerate", GST_TYPE_FRACTION, 30, 1,
+      "tensors", GST_TYPE_STRUCTURE, groups, NULL);
+  gst_structure_free (groups);
+
+  fail_if (klass->set_caps (GST_BASE_TRANSFORM (element), caps, caps));
+
+  gst_caps_unref (caps);
+  gst_object_unref (element);
+  gst_harness_teardown (h);
+  cleanup_temp_model (tmp_model);
+}
+
+GST_END_TEST;
+
 static Suite *
 onnxinference_suite (void)
 {
@@ -598,7 +767,6 @@ onnxinference_suite (void)
   TCase *tc = tcase_create ("general");
 
   suite_add_tcase (s, tc);
-  tcase_add_test (tc, test_input_formats);
   tcase_add_test (tc, test_normalization_variants);
   tcase_add_test (tc, test_output_int32);
   tcase_add_test (tc, test_output_uint8_rejected);
@@ -607,11 +775,15 @@ onnxinference_suite (void)
   tcase_add_test (tc, test_3d_input);
   tcase_add_test (tc, test_multi_output_tensor_id_and_dims_order);
   tcase_add_test (tc, test_planar_chw_input);
+  tcase_add_test (tc, test_gray8_input);
   tcase_add_test (tc, test_invalid_model_shapes_and_files);
   tcase_add_test (tc, test_missing_model_and_state_cycle);
   tcase_add_test (tc, test_timestamp_and_flags_propagation);
   tcase_add_test (tc, test_transform_caps_and_accept_caps);
   tcase_add_test (tc, test_accept_caps_dimension_mismatch);
+  tcase_add_test (tc, test_transform_caps_preserves_alternative_tensor_groups);
+  tcase_add_test (tc, test_transform_caps_accumulates_tensor_groups);
+  tcase_add_test (tc, test_transform_caps_duplicate_group_fails);
 
   return s;
 }

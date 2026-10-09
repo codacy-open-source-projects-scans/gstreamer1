@@ -1184,6 +1184,15 @@ _run_pipeline (GESLauncher * self)
       return FALSE;
     }
 
+    /* The testfile options (--outputuri, --format) are only parsed by
+     * ges_validate_activate() above, so switch the pipeline to render mode
+     * now, before the timeline tracks are added below and linked - otherwise
+     * they would be linked to the preview playsink. */
+    if (!_set_rendering_details (self)) {
+      g_error ("Failed to setup rendering details\n");
+      return FALSE;
+    }
+
     if (opts->sanitized_timeline) {
       GESProject *project = ges_project_new (opts->sanitized_timeline);
 
@@ -1199,11 +1208,6 @@ _run_pipeline (GESLauncher * self)
 
     if (!_timeline_set_user_options (self, self->priv->timeline, NULL)) {
       ges_printerr ("Could not properly set tracks\n");
-      return FALSE;
-    }
-
-    if (!_set_rendering_details (self)) {
-      g_error ("Failed to setup rendering details\n");
       return FALSE;
     }
   }
@@ -1240,6 +1244,12 @@ _create_pipeline (GESLauncher * self, const gchar * serialized_timeline)
 
   if (opts->outputuri)
     ges_pipeline_set_mode (self->priv->pipeline, 0);
+
+  /* Apply testfile `ges` meta (e.g. compositor-factory rank bump) before
+   * any track is instantiated - creating a GESVideoTrack triggers the
+   * smart mixer, which resolves GESVideoElementSelector once and caches
+   * the result for the rest of the process lifetime. */
+  ges_validate_apply_testfile_meta (opts->testfile);
 
   if (!_create_timeline (self, serialized_timeline, uri, opts->scenario
           || opts->testfile)) {

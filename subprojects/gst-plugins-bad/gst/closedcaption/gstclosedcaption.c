@@ -36,10 +36,12 @@
 #include "gsth265ccextractor.h"
 #include "gsth264seiinserter.h"
 #include "gsth265seiinserter.h"
+#include "gsth266seiinserter.h"
 
 static gboolean
 closedcaption_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
   gboolean ret = FALSE;
 
   GST_DEBUG_CATEGORY_INIT (ccutils_debug_cat, "ccutils", 0,
@@ -57,6 +59,9 @@ closedcaption_init (GstPlugin * plugin)
   ret |= GST_ELEMENT_REGISTER (h264seiinserter, plugin);
   ret |= GST_ELEMENT_REGISTER (h265ccinserter, plugin);
   ret |= GST_ELEMENT_REGISTER (h265seiinserter, plugin);
+  ret |= GST_ELEMENT_REGISTER (h266seiinserter, plugin);
+  ret |= GST_ELEMENT_REGISTER (h264timestamper, plugin);
+  ret |= GST_ELEMENT_REGISTER (h265timestamper, plugin);
 
   return ret;
 }

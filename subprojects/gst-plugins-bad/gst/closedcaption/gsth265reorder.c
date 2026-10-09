@@ -279,6 +279,10 @@ static const GstH265LevelLimits level_limits[] = {
   {  "6",     GST_H265_LEVEL_L6,    35651584 },
   {  "6.1",   GST_H265_LEVEL_L6_1,  35651584 },
   {  "6.2",   GST_H265_LEVEL_L6_2,  35651584 },
+  {  "6.3",   GST_H265_LEVEL_L6_3,  80216064 },
+  {  "7",     GST_H265_LEVEL_L7,    142606336 },
+  {  "7.1",   GST_H265_LEVEL_L7_1,  142606336 },
+  {  "7.2",   GST_H265_LEVEL_L7_2,  142606336 },
 };
 /* *INDENT-ON* */
 
@@ -605,6 +609,18 @@ gst_h265_reorder_parse_nalu (GstH265Reorder * self, GstH265NalUnit * nalu)
   GST_LOG_OBJECT (self, "Parsed nal type: %d, offset %d, size %d",
       nalu->type, nalu->offset, nalu->size);
 
+  if (nalu->layer_id != 0) {
+    /* 7.4.2.1
+     * decoders conforming to a profile specified in Annex A and not
+     * supporting the independent non-base layer decoding (INBLD) capability
+     * specified in Annex F shall ignore (i.e., remove from the bitstream
+     * and discard) all NAL units with values of nuh_layer_id not equal to 0
+     */
+    GST_LOG_OBJECT (self, "Skip nalu type %d with layer id %d",
+        nalu->type, nalu->layer_id);
+    return GST_H265_PARSER_OK;
+  }
+
   memset (&decoder_nalu, 0, sizeof (GstH265ReorderNalUnit));
   decoder_nalu.nalu_type = nalu->type;
 
@@ -734,6 +750,18 @@ gst_h265_reorder_parse_codec_data (GstH265Reorder * self, const guint8 * data,
 
     for (j = 0; j < array->nalu->len; j++) {
       GstH265NalUnit *nalu = &g_array_index (array->nalu, GstH265NalUnit, j);
+
+      if (nalu->layer_id != 0) {
+        /* 7.4.2.1
+         * decoders conforming to a profile specified in Annex A and not
+         * supporting the independent non-base layer decoding (INBLD) capability
+         * specified in Annex F shall ignore (i.e., remove from the bitstream
+         * and discard) all NAL units with values of nuh_layer_id not equal to 0
+         */
+        GST_DEBUG_OBJECT (self, "Skip nalu type %d with layer id %d",
+            nalu->type, nalu->layer_id);
+        continue;
+      }
 
       switch (nalu->type) {
         case GST_H265_NAL_VPS:
@@ -1721,26 +1749,109 @@ GstBuffer *
 gst_h265_reorder_insert_sei (GstH265Reorder * reorder, GstBuffer * au,
     GArray * sei)
 {
+  gboolean has_dsc_message = FALSE;
+  guint i;
   GstMemory *mem;
   GstBuffer *new_buf;
 
-  if (reorder->is_hevc)
-    mem = gst_h265_create_sei_memory_hevc (0, 1, reorder->nal_length_size, sei);
-  else
-    mem = gst_h265_create_sei_memory (0, 1, 4, sei);
-
-  if (!mem) {
-    GST_ERROR_OBJECT (reorder, "Couldn't create SEI memory");
+  if (!sei || sei->len == 0) {
+    GST_WARNING_OBJECT (reorder, "Empty SEI array");
     return NULL;
   }
 
-  if (reorder->is_hevc) {
-    new_buf = gst_h265_parser_insert_sei_hevc (reorder->parser,
-        reorder->nal_length_size, au, mem);
-  } else {
-    new_buf = gst_h265_parser_insert_sei (reorder->parser, au, mem);
+  for (i = 0; i < sei->len; i++) {
+    GstH265SEIMessage *sei_msg = &g_array_index (sei, GstH265SEIMessage, i);
+
+    if (sei_msg->payloadType ==
+        GST_H265_SEI_DIGITALLY_SIGNED_CONTENT_INITIALIZATION
+        || sei_msg->payloadType ==
+        GST_H265_SEI_DIGITALLY_SIGNED_CONTENT_SELECTION
+        || sei_msg->payloadType ==
+        GST_H265_SEI_DIGITALLY_SIGNED_CONTENT_VERIFICATION) {
+      has_dsc_message = TRUE;
+      break;
+    }
   }
 
-  gst_memory_unref (mem);
+  if (!has_dsc_message) {
+    if (reorder->is_hevc)
+      mem = gst_h265_create_sei_memory_hevc (0, 1, reorder->nal_length_size,
+          sei);
+    else
+      mem = gst_h265_create_sei_memory (0, 1, 4, sei);
+
+    if (!mem) {
+      GST_ERROR_OBJECT (reorder, "Couldn't create SEI memory");
+      return NULL;
+    }
+
+    if (reorder->is_hevc) {
+      new_buf = gst_h265_parser_insert_sei_hevc (reorder->parser,
+          reorder->nal_length_size, au, mem);
+    } else {
+      new_buf = gst_h265_parser_insert_sei (reorder->parser, au, mem);
+    }
+
+    gst_memory_unref (mem);
+    return new_buf;
+  }
+
+  /*
+   * For DSC-enabled insertion, process one SEI message at a time — each
+   * message goes into its own separate NAL unit (e.g. DSCI, DSCS, DSCV as
+   * three NALs). This is required for interoperability with the H.265 HM
+   * reference decoder:
+   *
+   * HM's TDecTop.cpp parses prefix SEI NAL units by buffering each NAL
+   * (m_prefixSEINALUs), then iterating with parseSEImessage() which only
+   * extracts the *first* SEI message in the NAL payload. Multiple SEI
+   * messages packed into a single NAL unit would be silently discarded
+   * after the first one.
+   */
+  new_buf = gst_buffer_ref (au);
+
+  for (i = 0; i < sei->len; i++) {
+    GstBuffer *tmp_buf;
+    GArray *single_sei;
+    GstH265SEIMessage *sei_msg;
+
+    single_sei = g_array_new (FALSE, FALSE, sizeof (GstH265SEIMessage));
+    sei_msg = &g_array_index (sei, GstH265SEIMessage, i);
+    g_array_append_val (single_sei, *sei_msg);
+
+    if (reorder->is_hevc)
+      mem = gst_h265_create_sei_memory_hevc (0, 1, reorder->nal_length_size,
+          single_sei);
+    else
+      mem = gst_h265_create_sei_memory (0, 1, 4, single_sei);
+
+    g_array_free (single_sei, TRUE);
+
+    if (!mem) {
+      GST_ERROR_OBJECT (reorder, "Couldn't create SEI memory for message %u",
+          i);
+      gst_buffer_unref (new_buf);
+      return NULL;
+    }
+
+    if (reorder->is_hevc) {
+      tmp_buf = gst_h265_parser_insert_sei_hevc (reorder->parser,
+          reorder->nal_length_size, new_buf, mem);
+    } else {
+      tmp_buf = gst_h265_parser_insert_sei (reorder->parser, new_buf, mem);
+    }
+
+    gst_memory_unref (mem);
+
+    if (!tmp_buf) {
+      GST_ERROR_OBJECT (reorder, "Failed to insert SEI message %u", i);
+      gst_buffer_unref (new_buf);
+      return NULL;
+    }
+
+    gst_buffer_unref (new_buf);
+    new_buf = tmp_buf;
+  }
+
   return new_buf;
 }

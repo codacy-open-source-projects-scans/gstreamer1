@@ -15,6 +15,10 @@
  * The full license is in the file LICENSE, distributed with this software. *
  ****************************************************************************/
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "gstcpuid.h"
 
 // define G_ALWAYS_INLINE to force MSVC to get rid of the interstitial
@@ -35,13 +39,32 @@
 #define GST_CPUID_CHECK_X86 1
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON) || defined(_M_ARM)
 #define GST_CPUID_CHECK_ARM 1
+#elif defined(__riscv)
+#define GST_CPUID_CHECK_RISCV 1
 #endif
 
-#if defined(__linux__) && defined(__ARM_ARCH)
+#if defined(__linux__) && (defined(__ARM_ARCH) || defined(__riscv))
 #include <asm/hwcap.h>
+#endif
+#if defined(__linux__) || defined(HAVE_ELF_AUX_INFO)
 #include <sys/auxv.h>
+#endif
+
+#if defined(GST_CPUID_CHECK_ARM)
+#if defined(__aarch64__)
+#ifndef HWCAP_ASIMD
+#define HWCAP_ASIMD (1 << 1)
+#endif
+#else
 #ifndef HWCAP_NEON              // Some Android NDKs lack it.
 #define HWCAP_NEON (1 << 12)
+#endif
+#endif
+#endif
+
+#if defined(__linux__) && defined(__riscv)
+#ifndef COMPAT_HWCAP_ISA_V
+#define COMPAT_HWCAP_ISA_V (1 << ('V' - 'A'))
 #endif
 #endif
 
@@ -133,6 +156,8 @@ typedef struct
 
   guint8 neon;
   guint8 neon64;
+
+  guint8 riscv_v;
 } GstCpuid;
 
 static GstCpuid cpuid;
@@ -151,16 +176,36 @@ _get_supported_sets (void)
   // See https://gitlab.freedesktop.org/gstreamer/orc/-/commit/7a60e2074d425b7ad1192ff48ac87af4246a04c4
   cpuid.neon = TRUE;
   cpuid.neon64 = TRUE;
-#elif defined(__ARM_ARCH)
-  // If Linux, rely on getauxval; otherwise search Arm macros
-  // https://developer.arm.com/documentation/dui0774/b/other-compiler-specific-features/predefined-macros
+#elif defined(GST_CPUID_CHECK_ARM)
+  // If Linux, rely on getauxval; otherwise try elf_aux_info
 #if defined(__linux__) && (!defined(__ANDROID_API__) || __ANDROID_API__ >= 18)
+#if defined(__aarch64__)
+  cpuid.neon = (getauxval (AT_HWCAP) & HWCAP_ASIMD) != 0 ? TRUE : FALSE;
+#else
   cpuid.neon = (getauxval (AT_HWCAP) & HWCAP_NEON) != 0 ? TRUE : FALSE;
-#elif defined(__ARM_NEON) || defined(__aarch64__)
+#endif
+#elif defined(HAVE_ELF_AUX_INFO)
+  unsigned long auxv = 0;
+  elf_aux_info (AT_HWCAP, &auxv, sizeof (auxv));
+#if defined(__aarch64__)
+  cpuid.neon = (auxv & HWCAP_ASIMD) != 0 ? TRUE : FALSE;
+#else
+  cpuid.neon = (auxv & HWCAP_NEON) != 0 ? TRUE : FALSE;
+#endif
+#elif defined(__ARM_NEON) || defined (__aarch64__)
+  // If enabled unconditionally by compiler, use it
+  // https://support.arm.com/documentation/102474/0100/Fundamentals-of-Armv8-Neon-technology
+  // https://developer.arm.com/documentation/dui0774/b/other-compiler-specific-features/predefined-macros
   cpuid.neon = TRUE;
 #endif
 #if defined(__aarch64__)
   cpuid.neon64 = cpuid.neon;
+#endif
+
+#elif defined(GST_CPUID_CHECK_RISCV)
+#if defined(__linux__)
+  cpuid.riscv_v =
+      (getauxval (AT_HWCAP) & COMPAT_HWCAP_ISA_V) != 0 ? TRUE : FALSE;
 #endif
 
 #elif defined(GST_CPUID_CHECK_X86)
@@ -403,4 +448,19 @@ gst_cpuid_supports_arm_neon64 (void)
 {
   _gst_cpuid_initialize_supported_sets ();
   return cpuid.neon64;
+}
+
+/**
+ * gst_cpuid_supports_riscv_v
+ *
+ * Since: 1.30
+ *
+ * Returns: %TRUE if RISC-V Vector extension is supported by the CPU, %FALSE otherwise.
+ */
+
+gboolean
+gst_cpuid_supports_riscv_v (void)
+{
+  _gst_cpuid_initialize_supported_sets ();
+  return cpuid.riscv_v;
 }

@@ -105,7 +105,7 @@ static GstStaticPadTemplate gst_ssd_tensor_dec_src_template =
 GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS ("video/x-raw")
+    GST_STATIC_CAPS ("video/x-raw(ANY)")
     );
 
 /* *INDENT-OFF* */
@@ -114,7 +114,7 @@ static GstStaticPadTemplate gst_ssd_tensor_dec_sink_template =
 GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS ("video/x-raw,"
+    GST_STATIC_CAPS ("video/x-raw(ANY),"
       "tensors=(structure)["
         "tensorgroups,"
           GROUP_ID"=(/uniquelist){"
@@ -127,19 +127,19 @@ GST_STATIC_PAD_TEMPLATE ("sink",
              "(GstCaps)["
               "tensor/strided,"
                 "tensor-id="GST_MODEL_OBJECT_DETECTOR_SCORES","
-                "dims=(int)<[0, max],0>,"
+                "dims=(int)<[0, max], [0, max]>,"
                 "dims-order=(string)row-major,"
                 "type=(string)float32;],"
             "(GstCaps)["
               "tensor/strided,"
                 "tensor-id="GST_MODEL_OBJECT_DETECTOR_BOXES","
-                "dims=(int)<[0, max],0,4>,"
+                "dims=(int)<[0, max], [0, max], 4>,"
                 "dims-order=(string)row-major,"
                 "type=(string)float32;],"
             "(GstCaps)["
               "tensor/strided,"
                 "tensor-id="GST_MODEL_OBJECT_DETECTOR_CLASSES","
-                "dims=(int)<[0, max],0>,"
+                "dims=(int)<[0, max], [0, max]>,"
                 "dims-order=(string)row-major,"
                 "type=(string)float32;]"
         "}"
@@ -591,8 +591,8 @@ extract_bounding_boxes (GstSsdTensorDec * self, gsize w, gsize h,
 
     if (self->labels && classes_map.memory &&
         get_guint32_at_index (classes_tensor, &classes_map, i, &bclass)) {
-      if (bclass < self->labels->len)
-        label = g_array_index (self->labels, GQuark, bclass);
+      if (bclass > 0 && bclass - 1 < self->labels->len)
+        label = g_array_index (self->labels, GQuark, bclass - 1);
     }
 
     x_i = x * w;

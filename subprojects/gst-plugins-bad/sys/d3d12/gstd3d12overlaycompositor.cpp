@@ -173,6 +173,7 @@ gst_d3d12_overlay_compositor_class_init (GstD3D12OverlayCompositorClass * klass)
   gst_element_class_set_static_metadata (element_class,
       "Direct3D12 Overlay Compositor", "Filter/Effect/Video/Hardware",
       "Blend overlay into stream", "Seungha Yang <seungha@centricular.com>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   gst_element_class_add_static_pad_template (element_class, &src_template);
   gst_element_class_add_static_pad_template (element_class, &sink_template);
@@ -490,45 +491,15 @@ gst_d3d12_overlay_compositor_generate_output (GstBaseTransform * trans,
   auto & ctx = priv->ctx;
   gst_d3d12_overlay_blender_upload (ctx->blender, buf);
 
-  GstD3D12CmdAlloc *gst_ca;
-  if (!gst_d3d12_cmd_alloc_pool_acquire (ctx->ca_pool, &gst_ca)) {
-    GST_ERROR_OBJECT (self, "Couldn't acquire command allocator");
-    gst_buffer_unref (buf);
-    return GST_FLOW_ERROR;
-  }
-
-  auto ca = gst_d3d12_cmd_alloc_get_handle (gst_ca);
-  auto hr = ca->Reset ();
-  if (!gst_d3d12_result (hr, ctx->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't reset command allocator");
-    gst_d3d12_cmd_alloc_unref (gst_ca);
-    gst_buffer_unref (buf);
-    return GST_FLOW_ERROR;
-  }
-
-  if (!ctx->cl) {
-    auto device = gst_d3d12_device_get_device_handle (ctx->device);
-    hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        ca, nullptr, IID_PPV_ARGS (&ctx->cl));
-    if (!gst_d3d12_result (hr, priv->ctx->device)) {
-      GST_ERROR_OBJECT (self, "Couldn't create command list");
-      gst_d3d12_cmd_alloc_unref (gst_ca);
-      gst_buffer_unref (buf);
-      return GST_FLOW_ERROR;
-    }
-  } else {
-    hr = ctx->cl->Reset (ca, nullptr);
-    if (!gst_d3d12_result (hr, ctx->device)) {
-      GST_ERROR_OBJECT (self, "Couldn't reset command list");
-      gst_d3d12_cmd_alloc_unref (gst_ca);
-      gst_buffer_unref (buf);
-      return GST_FLOW_ERROR;
-    }
-  }
-
   GstD3D12FenceData *fence_data;
   gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
-  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (gst_ca));
+  if (!gst_d3d12_device_prepare_graphics_cmd_list (ctx->device,
+          ctx->cl.GetAddressOf (), ctx->ca_pool, nullptr, fence_data)) {
+    GST_ERROR_OBJECT (self, "Couldn't prepare command list");
+    gst_d3d12_fence_data_unref (fence_data);
+    gst_buffer_unref (buf);
+    return GST_FLOW_ERROR;
+  }
 
   buf = gst_buffer_make_writable (buf);
   if (priv->blend_mode == BLEND_MODE_BLEND) {
@@ -613,7 +584,7 @@ gst_d3d12_overlay_compositor_generate_output (GstBaseTransform * trans,
     buf = out_buf;
   }
 
-  hr = ctx->cl->Close ();
+  auto hr = ctx->cl->Close ();
   if (!gst_d3d12_result (hr, ctx->device)) {
     GST_ERROR_OBJECT (self, "Couldn't close command list");
     gst_d3d12_fence_data_unref (fence_data);
@@ -640,6 +611,13 @@ gst_d3d12_overlay_compositor_generate_output (GstBaseTransform * trans,
       FENCE_NOTIFY_MINI_OBJECT (fence_data));
 
   gst_buffer_foreach_meta (buf, foreach_meta, nullptr);
+
+  if (gst_d3d12_device_is_over_budget (ctx->device) &&
+      !gst_d3d12_buffer_evict (buf)) {
+    GST_ERROR_OBJECT (self, "Couldn't evict output");
+    gst_buffer_unref (buf);
+    return GST_FLOW_ERROR;
+  }
 
   *buffer = buf;
 

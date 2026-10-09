@@ -395,6 +395,8 @@ gst_opus_dec_negotiate (GstOpusDec * dec, const GstAudioChannelPosition * pos)
     GST_DEBUG_OBJECT (dec, "Using a default of 2 channels");
     dec->n_channels = 2;
     pos = NULL;
+  } else if (dec->n_channels > 64) {
+    pos = NULL;
   }
 
   if (dec->sample_rate == 0) {
@@ -896,8 +898,9 @@ opus_dec_chain_parse_data (GstOpusDec * dec, GstBuffer * buffer)
     gst_buffer_unref (outbuf);
     outbuf = NULL;
   } else if (dec->needs_reorder) {
-    gst_audio_buffer_reorder_channels (outbuf, GST_AUDIO_FORMAT_S16,
-        dec->n_channels, dec->opus_pos, dec->info.position);
+    gst_audio_buffer_reorder_channels (outbuf,
+        GST_AUDIO_INFO_FORMAT (&dec->info), dec->n_channels, dec->opus_pos,
+        dec->info.position);
   }
 
   /* Apply gain */

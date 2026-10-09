@@ -110,6 +110,7 @@ gst_overlay_composition_class_init (GstOverlayCompositionClass * klass)
   gst_element_class_set_static_metadata (gstelement_class,
       "Overlay Composition", "Filter/Editor/Video",
       "Overlay Composition", "Sebastian Dröge <sebastian@centricular.com>");
+  gst_element_class_mark_as_untrusted_aware (gstelement_class);
 
   gst_element_class_add_pad_template (gstelement_class,
       gst_static_pad_template_get (&src_template));
@@ -758,6 +759,8 @@ map_failed:
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (overlaycomposition, plugin);
 }
 

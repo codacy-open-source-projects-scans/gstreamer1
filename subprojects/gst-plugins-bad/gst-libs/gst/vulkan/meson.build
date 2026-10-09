@@ -8,6 +8,8 @@ if vulkan_opt.disabled()
 endif
 
 vulkan_sources = files(
+  'gstvkbarrier.c',
+  'gstvkbarrierstate.c',
   'gstvkbuffermemory.c',
   'gstvkbufferpool.c',
   'gstvkcommandbuffer.c',
@@ -33,8 +35,10 @@ vulkan_sources = files(
   'gstvkphysicaldevice.c',
   'gstvkqueue.c',
   'gstvkswapper.c',
+  'gstvktimelinesemaphore.c',
   'gstvktrash.c',
   'gstvkvideofilter.c',
+  'gstvkrequestedextensions.c',
   'gstvkutils.c',
   'gstvkwindow.c',
 )
@@ -42,6 +46,7 @@ vulkan_sources = files(
 vulkan_headers = files(
   'gstvkapi.h',
   'gstvkbarrier.h',
+  'gstvkbarrierstate.h',
   'gstvkbuffermemory.h',
   'gstvkbufferpool.h',
   'gstvkcommandbuffer.h',
@@ -67,7 +72,9 @@ vulkan_headers = files(
   'gstvkphysicaldevice.h',
   'gstvkqueue.h',
   'gstvkswapper.h',
+  'gstvktimelinesemaphore.h',
   'gstvktrash.h',
+  'gstvkrequestedextensions.h',
   'gstvkutils.h',
   'gstvkvideofilter.h',
   'gstvkwindow.h',

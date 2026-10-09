@@ -387,6 +387,8 @@ gst_video_test_src_class_init (GstVideoTestSrcClass * klass)
       "Video test source", "Source/Video",
       "Creates a test video stream", "David A. Schleef <ds@schleef.org>");
 
+  gst_element_class_mark_as_untrusted_aware (gstelement_class);
+
   gst_element_class_add_static_pad_template (gstelement_class,
       &gst_video_test_src_template);
 
@@ -1030,6 +1032,7 @@ gst_video_test_src_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
   guint i;
   guint n_lines;
   gint offset;
+  gsize line_size;
 
   videotestsrc = GST_VIDEO_TEST_SRC (bsrc);
 
@@ -1068,9 +1071,14 @@ gst_video_test_src_setcaps (GstBaseSrc * bsrc, GstCaps * caps)
     offset = 0;
   }
 
+  if (GST_VIDEO_FORMAT_INFO_IS_FLOAT (info.finfo))
+    line_size = (info.width + 16) * 16;
+  else
+    line_size = (info.width + 16) * 8;
+
   videotestsrc->lines = g_malloc (sizeof (gpointer) * n_lines);
   for (i = 0; i < n_lines; i++)
-    videotestsrc->lines[i] = g_malloc ((info.width + 16) * 8);
+    videotestsrc->lines[i] = g_malloc (line_size);
   videotestsrc->n_lines = n_lines;
   videotestsrc->offset = offset;
 
@@ -1470,6 +1478,8 @@ gst_video_test_src_stop (GstBaseSrc * basesrc)
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
+
   return GST_ELEMENT_REGISTER (videotestsrc, plugin);
 }
 

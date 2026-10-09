@@ -7,6 +7,8 @@ gst_allocators_headers = files([
   'gstdrmdumb.h',
   'gstshmallocator.h',
   'gstudmabufallocator.h',
+  'gstahardwarebuffer.h',
+  'gstiosurface.h',
 ])
 install_headers(gst_allocators_headers, subdir : 'gstreamer-1.0/gst/allocators/')
 
@@ -17,6 +19,8 @@ gst_allocators_sources = files([
   'gstphysmemory.c',
   'gstshmallocator.c',
   'gstudmabufallocator.c',
+  'gstahardwarebuffer.c',
+  'gstiosurface.c',
 ])
 
 doc_sources = []

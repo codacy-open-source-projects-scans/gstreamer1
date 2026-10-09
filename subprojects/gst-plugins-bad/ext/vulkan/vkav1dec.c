@@ -18,6 +18,22 @@
  * Boston, MA 02110-1301, USA.
  */
 
+/**
+ * SECTION:element-vulkanav1dec
+ * @title: vulkanav1dec
+ * @short_description: A Vulkan based AV1 video decoder
+ *
+ * vulkanav1dec decodes AV1 bitstreams into raw video surfaces using
+ * Vulkan video extensions.
+ *
+ * ## Example launch line
+ * ```
+ * gst-launch-1.0 filesrc location=video.webm ! matroskademux ! av1parse ! vulkanav1dec ! vulkandownload ! videoconvert ! autovideosink
+ * ```
+ *
+ * Since: 1.28
+ */
+
 #include "vkav1dec.h"
 
 #include <gst/video/video.h>
@@ -140,8 +156,13 @@ gst_vulkan_av1_decoder_set_context (GstElement * element, GstContext * context)
 }
 
 static gboolean
-_query_context (GstVulkanAV1Decoder * self, GstQuery * query)
+_query_context (GstVulkanAV1Decoder * self, GstQuery * query,
+    GstPadDirection continue_direction)
 {
+  if (gst_vulkan_requested_extensions_handle_context_query (GST_ELEMENT
+          (self), query, continue_direction, self->instance))
+    return TRUE;
+
   if (gst_vulkan_handle_context_query (GST_ELEMENT (self), query, NULL,
           self->instance, self->device))
     return TRUE;
@@ -160,7 +181,9 @@ gst_vulkan_av1_decoder_src_query (GstVideoDecoder * decoder, GstQuery * query)
 
   switch (GST_QUERY_TYPE (query)) {
     case GST_QUERY_CONTEXT:
-      ret = _query_context (GST_VULKAN_AV1_DECODER (decoder), query);
+      ret =
+          _query_context (GST_VULKAN_AV1_DECODER (decoder), query,
+          GST_PAD_SINK);
       break;
     default:
       ret = GST_VIDEO_DECODER_CLASS (parent_class)->src_query (decoder, query);
@@ -177,7 +200,8 @@ gst_vulkan_av1_decoder_sink_query (GstVideoDecoder * decoder, GstQuery * query)
 
   switch (GST_QUERY_TYPE (query)) {
     case GST_QUERY_CONTEXT:
-      ret = _query_context (GST_VULKAN_AV1_DECODER (decoder), query);
+      ret =
+          _query_context (GST_VULKAN_AV1_DECODER (decoder), query, GST_PAD_SRC);
       break;
     default:
       ret = GST_VIDEO_DECODER_CLASS (parent_class)->sink_query (decoder, query);
@@ -364,8 +388,7 @@ gst_vulkan_av1_decoder_decide_allocation (GstVideoDecoder * decoder,
     pool = gst_vulkan_image_buffer_pool_new (self->device);
   }
 
-  usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-      | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
+  usage = gst_vulkan_decoder_output_usage (pool);
 
   if (!self->decoder->dedicated_dpb) {
     min = MAX (min, MIN (self->dpb_size, vk_caps.caps.maxDpbSlots));
@@ -384,7 +407,7 @@ gst_vulkan_av1_decoder_decide_allocation (GstVideoDecoder * decoder,
 
   gst_vulkan_image_buffer_pool_config_set_allocation_params (config, usage,
       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR,
-      VK_ACCESS_TRANSFER_WRITE_BIT);
+      VK_ACCESS_NONE);
   gst_vulkan_image_buffer_pool_config_set_decode_caps (config, profile_caps);
 
   gst_caps_unref (profile_caps);
@@ -1480,7 +1503,7 @@ gst_vulkan_av1_decoder_register (GstPlugin * plugin, GstVulkanDevice * device,
   type =
       g_type_register_static (GST_TYPE_AV1_DECODER, type_name, &type_info, 0);
 
-  ret = gst_element_register (plugin, feature_name, rank, type);
+  ret = gst_vulkan_register_feature (plugin, device, type, feature_name, rank);
 
   g_free (type_name);
   g_free (feature_name);

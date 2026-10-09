@@ -484,6 +484,7 @@ gst_d3d12_fisheye_dewarp_class_init (GstD3D12FisheyeDewarpClass * klass)
   gst_element_class_set_static_metadata (element_class,
       "Direct3D12 Fisheye Dewarp", "Filter/Converter/Video/Hardware",
       "Dewarping fisheye image", "Seungha Yang <seungha@centricular.com>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   trans_class->passthrough_on_same_caps = FALSE;
 
@@ -1138,7 +1139,6 @@ gst_d3d12_fisheye_dewarp_transform (GstBaseTransform * trans, GstBuffer * inbuf,
 {
   auto self = GST_D3D12_FISHEYE_DEWARP (trans);
   auto priv = self->priv;
-  GstD3D12CmdAlloc *gst_ca;
   GstD3D12FenceData *fence_data;
   auto ctx = priv->ctx;
   HRESULT hr;
@@ -1157,36 +1157,12 @@ gst_d3d12_fisheye_dewarp_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     return GST_FLOW_ERROR;
   }
 
-  auto device = gst_d3d12_device_get_device_handle (ctx->device);
-
   gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
-
-  if (!gst_d3d12_cmd_alloc_pool_acquire (ctx->ca_pool, &gst_ca)) {
-    GST_ERROR_OBJECT (self, "Couldn't acquire command allocator");
+  if (!gst_d3d12_device_prepare_graphics_cmd_list (ctx->device,
+          ctx->cl.GetAddressOf (), ctx->ca_pool, nullptr, fence_data)) {
+    GST_ERROR_OBJECT (self, "Couldn't prepare command list");
     gst_d3d12_fence_data_unref (fence_data);
-    return GST_FLOW_ERROR;
-  }
 
-  auto ca = gst_d3d12_cmd_alloc_get_handle (gst_ca);
-  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (gst_ca));
-
-  hr = ca->Reset ();
-  if (!gst_d3d12_result (hr, ctx->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't reset command allocator");
-    gst_d3d12_fence_data_unref (fence_data);
-    return GST_FLOW_ERROR;
-  }
-
-  if (!ctx->cl) {
-    hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        ca, nullptr, IID_PPV_ARGS (&priv->ctx->cl));
-  } else {
-    hr = ctx->cl->Reset (ca, nullptr);
-  }
-
-  if (!gst_d3d12_result (hr, ctx->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't reset command list");
-    gst_d3d12_fence_data_unref (fence_data);
     return GST_FLOW_ERROR;
   }
 
@@ -1275,6 +1251,12 @@ gst_d3d12_fisheye_dewarp_transform (GstBaseTransform * trans, GstBuffer * inbuf,
       FENCE_NOTIFY_MINI_OBJECT (fence_data));
 
   gst_d3d12_buffer_set_fence (outbuf, ctx->cq_fence, ctx->fence_val, FALSE);
+
+  if (gst_d3d12_device_is_over_budget (ctx->device) &&
+      !gst_d3d12_buffer_evict (outbuf)) {
+    GST_ERROR_OBJECT (self, "Couldn't evict output");
+    return GST_FLOW_ERROR;
+  }
 
   return GST_FLOW_OK;
 }

@@ -180,6 +180,7 @@ gst_spectrum_class_init (GstSpectrumClass * klass)
       "Erik Walthinsen <omega@cse.ogi.edu>, "
       "Stefan Kost <ensonic@users.sf.net>, "
       "Sebastian Dröge <sebastian.droege@collabora.co.uk>");
+  gst_element_class_mark_as_untrusted_aware (element_class);
 
   caps = gst_caps_from_string (ALLOWED_CAPS);
   gst_audio_filter_class_add_pad_templates (filter_class, caps);
@@ -955,6 +956,7 @@ gst_spectrum_transform_ip (GstBaseTransform * trans, GstBuffer * buffer)
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
+  gst_plugin_set_static_features_flag (plugin);
 
   return GST_ELEMENT_REGISTER (spectrum, plugin);
 }
