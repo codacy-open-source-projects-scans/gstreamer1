@@ -1156,18 +1156,6 @@ gst_d3d12_memory_get_token_data (GstD3D12Memory * mem, gint64 token)
   return ret;
 }
 
-void
-gst_d3d12_memory_set_fence_unchecked (GstD3D12Memory * mem, ID3D12Fence * fence,
-    guint64 fence_value, gboolean wait)
-{
-  g_return_if_fail (gst_is_d3d12_memory (GST_MEMORY_CAST (mem)));
-
-  auto priv = mem->priv;
-
-  std::lock_guard < std::mutex > lk (priv->lock);
-  gst_d3d12_memory_set_fence_unlocked (mem, fence, fence_value, wait);
-}
-
 /**
  * gst_d3d12_memory_set_fence:
  * @mem: a #GstD3D12Memory
@@ -1185,9 +1173,13 @@ void
 gst_d3d12_memory_set_fence (GstD3D12Memory * mem, ID3D12Fence * fence,
     guint64 fence_value, gboolean wait)
 {
+  g_return_if_fail (gst_is_d3d12_memory (GST_MEMORY_CAST (mem)));
   g_return_if_fail (gst_mini_object_is_writable ((GstMiniObject *) mem));
 
-  gst_d3d12_memory_set_fence_unchecked (mem, fence, fence_value, wait);
+  auto priv = mem->priv;
+
+  std::lock_guard < std::mutex > lk (priv->lock);
+  gst_d3d12_memory_set_fence_unlocked (mem, fence, fence_value, wait);
 }
 
 /**
@@ -2061,6 +2053,9 @@ gst_d3d12_pool_allocator_release_memory (GstD3D12PoolAllocator * self,
   GST_MINI_OBJECT_CAST (mem)->dispose = nullptr;
   mem->allocator = (GstAllocator *) gst_object_ref (_d3d12_memory_allocator);
 
+  mem->offset = 0;
+  mem->size = mem->maxsize;
+
   /* keep it around in our queue */
   priv->queue.push_back (mem);
   priv->outstanding--;
@@ -2256,6 +2251,9 @@ gst_d3d12_pool_allocator_acquire_memory (GstD3D12PoolAllocator * allocator,
       *memory = nullptr;
       return GST_FLOW_ERROR;
     }
+
+    GST_MINI_OBJECT_FLAG_UNSET (mem, GST_D3D12_MEMORY_TRANSFER_NEED_UPLOAD);
+    gst_d3d12_memory_sync (GST_D3D12_MEMORY_CAST (mem));
 
     /* Replace default allocator with ours */
     gst_object_unref (mem->allocator);

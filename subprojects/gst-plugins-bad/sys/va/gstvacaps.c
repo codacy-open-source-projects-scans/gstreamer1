@@ -100,6 +100,152 @@ _value_list_append_string (GValue * list, const gchar * str)
   g_value_unset (&item);
 }
 
+static void
+_generate_supported_formats (GPtrArray * supported_formats,
+    GValue * supported_value)
+{
+  guint i;
+
+  if (supported_formats->len == 1) {
+    g_value_init (supported_value, G_TYPE_STRING);
+    g_value_set_string (supported_value,
+        g_ptr_array_index (supported_formats, 0));
+  } else {
+    GValue item = G_VALUE_INIT;
+
+    gst_value_list_init (supported_value, supported_formats->len);
+
+    for (i = 0; i < supported_formats->len; i++) {
+      g_value_init (&item, G_TYPE_STRING);
+      g_value_set_string (&item, g_ptr_array_index (supported_formats, i));
+      gst_value_list_append_value (supported_value, &item);
+      g_value_unset (&item);
+    }
+  }
+}
+
+/* Returns a copy of @sinkcaps keeping only the formats, and DMA formats,
+ * for which @is_supported returns TRUE, or NULL if none is left. */
+GstCaps *
+gst_va_caps_filter_formats (GstCaps * sinkcaps,
+    GstVaFormatFilterFunc is_supported)
+{
+  GPtrArray *supported_formats;
+  const gchar *format_str;
+  GstVideoFormat gst_format;
+  const GValue *val;
+  GValue supported_value = G_VALUE_INIT;
+  GstCaps *ret;
+  guint num_structures;
+  guint i, j;
+
+  supported_formats = g_ptr_array_new ();
+  ret = gst_caps_new_empty ();
+
+  num_structures = gst_caps_get_size (sinkcaps);
+
+  for (i = 0; i < num_structures; i++) {
+    GstStructure *st;
+    GstCapsFeatures *features;
+
+    g_ptr_array_set_size (supported_formats, 0);
+
+    st = gst_caps_get_structure (sinkcaps, i);
+    st = gst_structure_copy (st);
+
+    features = gst_caps_get_features (sinkcaps, i);
+
+    if (gst_caps_features_contains (features, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+      guint32 fourcc;
+
+      val = gst_structure_get_value (st, "drm-format");
+      if (!val) {
+        gst_structure_free (st);
+        continue;
+      }
+
+      if (G_VALUE_HOLDS_STRING (val)) {
+        format_str = g_value_get_string (val);
+        fourcc = gst_video_dma_drm_fourcc_from_string (format_str, NULL);
+        gst_format = gst_va_video_format_from_drm_fourcc (fourcc);
+
+        if (is_supported (gst_format))
+          g_ptr_array_add (supported_formats, (gpointer) format_str);
+      } else if (GST_VALUE_HOLDS_LIST (val)) {
+        guint num_values = gst_value_list_get_size (val);
+
+        for (j = 0; j < num_values; j++) {
+          const GValue *v = gst_value_list_get_value (val, j);
+
+          format_str = g_value_get_string (v);
+          fourcc = gst_video_dma_drm_fourcc_from_string (format_str, NULL);
+          gst_format = gst_va_video_format_from_drm_fourcc (fourcc);
+
+          if (is_supported (gst_format))
+            g_ptr_array_add (supported_formats, (gpointer) format_str);
+        }
+      }
+
+      if (!supported_formats->len) {
+        gst_structure_free (st);
+        continue;
+      }
+
+      _generate_supported_formats (supported_formats, &supported_value);
+      gst_structure_take_value (st, "drm-format", &supported_value);
+
+      gst_caps_append_structure_full (ret, st,
+          gst_caps_features_copy (features));
+    } else {
+      val = gst_structure_get_value (st, "format");
+      if (!val) {
+        gst_structure_free (st);
+        continue;
+      }
+
+      if (G_VALUE_HOLDS_STRING (val)) {
+        format_str = g_value_get_string (val);
+        gst_format = gst_video_format_from_string (format_str);
+
+        if (is_supported (gst_format))
+          g_ptr_array_add (supported_formats, (gpointer) format_str);
+      } else if (GST_VALUE_HOLDS_LIST (val)) {
+        guint num_values = gst_value_list_get_size (val);
+
+        for (j = 0; j < num_values; j++) {
+          const GValue *v = gst_value_list_get_value (val, j);
+
+          format_str = g_value_get_string (v);
+          gst_format = gst_video_format_from_string (format_str);
+
+          if (is_supported (gst_format))
+            g_ptr_array_add (supported_formats, (gpointer) format_str);
+        }
+      }
+
+      if (!supported_formats->len) {
+        gst_structure_free (st);
+        continue;
+      }
+
+      _generate_supported_formats (supported_formats, &supported_value);
+      gst_structure_take_value (st, "format", &supported_value);
+
+      gst_caps_append_structure_full (ret, st,
+          gst_caps_features_copy (features));
+    }
+  }
+
+  g_ptr_array_unref (supported_formats);
+
+  if (gst_caps_is_empty (ret)) {
+    gst_caps_unref (ret);
+    ret = NULL;
+  }
+
+  return ret;
+}
+
 gboolean
 gst_caps_set_format_array (GstCaps * caps, GArray * formats)
 {
@@ -275,7 +421,8 @@ out:
 
 static gboolean
 _get_entrypoint_from_config (GstVaDisplay * display, VAConfigID config,
-    VAProfile * profile_out, VAEntrypoint * entrypoint_out)
+    VAProfile * profile_out, VAEntrypoint * entrypoint_out,
+    VAConfigAttrib ** attribs_out, int *num_attribs_out)
 {
   VADisplay dpy;
   VAStatus status;
@@ -289,11 +436,10 @@ _get_entrypoint_from_config (GstVaDisplay * display, VAConfigID config,
   attribs = g_new (VAConfigAttrib, vaMaxNumConfigAttributes (dpy));
   status = vaQueryConfigAttributes (dpy, config, &profile, &entrypoint, attribs,
       &num_attribs);
-  g_free (attribs);
-
   if (status != VA_STATUS_SUCCESS) {
     GST_ERROR_OBJECT (display, "vaQueryConfigAttributes: %s",
         vaErrorStr (status));
+    g_free (attribs);
     return FALSE;
   }
 
@@ -301,6 +447,12 @@ _get_entrypoint_from_config (GstVaDisplay * display, VAConfigID config,
     *profile_out = profile;
   if (entrypoint_out)
     *entrypoint_out = entrypoint;
+  if (attribs_out)
+    *attribs_out = attribs;
+  else
+    g_free (attribs);
+  if (num_attribs_out)
+    *num_attribs_out = num_attribs;
 
   return TRUE;
 }
@@ -315,16 +467,33 @@ gst_va_create_raw_caps_from_config (GstVaDisplay * display, VAConfigID config)
   VASurfaceAttrib *attribs;
   VAEntrypoint entrypoint;
   VAProfile profile;
-  guint i, attrib_count, mem_type = 0;
+  guint i, attrib_count, mem_type = 0, rt_format = 0;
   gint min_width = 1, max_width = G_MAXINT;
   gint min_height = 1, max_height = G_MAXINT;
+  VAConfigAttrib *config_attribs;
+  int config_attrib_count;
 
-  if (!_get_entrypoint_from_config (display, config, &profile, &entrypoint))
+  if (!_get_entrypoint_from_config (display, config, &profile, &entrypoint,
+          &config_attribs, &config_attrib_count))
     return NULL;
+
+  for (int i = 0; i < config_attrib_count; i++) {
+    if (config_attribs[i].type == VAConfigAttribRTFormat) {
+      rt_format = config_attribs[i].value;
+      break;
+    }
+  }
+  if (rt_format == 0) {
+    g_free (config_attribs);
+    return NULL;
+  }
 
   attribs = gst_va_get_surface_attribs (display, config, &attrib_count);
-  if (!attribs)
+  if (!attribs) {
+    g_free (config_attribs);
     return NULL;
+  }
+
   formats = g_array_new (FALSE, FALSE, sizeof (GstVideoFormat));
 
   for (i = 0; i < attrib_count; i++) {
@@ -333,7 +502,8 @@ gst_va_create_raw_caps_from_config (GstVaDisplay * display, VAConfigID config)
     switch (attribs[i].type) {
       case VASurfaceAttribPixelFormat:
         format = gst_va_video_format_from_va_fourcc (attribs[i].value.value.i);
-        if (format != GST_VIDEO_FORMAT_UNKNOWN)
+        if (format != GST_VIDEO_FORMAT_UNKNOWN
+            && gst_va_chroma_from_video_format (format) & rt_format)
           g_array_append_val (formats, format);
         break;
       case VASurfaceAttribMinWidth:
@@ -402,6 +572,7 @@ gst_va_create_raw_caps_from_config (GstVaDisplay * display, VAConfigID config)
 bail:
   g_array_unref (formats);
   g_free (attribs);
+  g_free (config_attribs);
 
   return caps;
 }

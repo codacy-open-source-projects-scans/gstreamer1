@@ -21,12 +21,12 @@
 #include "config.h"
 #endif
 
+#include <DirectML.h>
+#include <directx/d3dx12.h>
 #include "gstonnximporter-dml.h"
 #include <gst/d3d12/gstd3d12-private.h>
 #include <gst/d3dshader/gstd3dshadercache.h>
-#include <directx/d3dx12.h>
 #include <dml_provider_factory.h>
-#include <directml.h>
 #include <wrl.h>
 #include <new>
 #include <vector>
@@ -34,6 +34,11 @@
 
 /* *INDENT-OFF* */
 using namespace Microsoft::WRL;
+
+static const GUID GST_IID_DML_DEVICE = {
+  0x6dbd6437, 0x96fd, 0x423f,
+  { 0xa9, 0x8c, 0xae, 0x5e, 0x7c, 0x2a, 0x57, 0x3f }
+};
 
 G_BEGIN_DECLS
 GST_DEBUG_CATEGORY_EXTERN (onnx_inference_debug);
@@ -657,8 +662,12 @@ gst_onnx_importer_dml_prepare (GstOnnxImporter * importer, GstBuffer * buffer)
   }
 
   gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (desc_heap));
-  gst_d3d12_fence_data_push (fence_data,
-      FENCE_NOTIFY_MINI_OBJECT (gst_buffer_ref (buffer)));
+  for (guint i = 0; i < G_N_ELEMENTS (frame->map); i++) {
+    if (frame->map[i].memory) {
+      gst_d3d12_fence_data_push (fence_data,
+          FENCE_NOTIFY_MINI_OBJECT (gst_memory_ref (frame->map[i].memory)));
+    }
+  }
   priv->rs->AddRef ();
   gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_COM (priv->rs.Get ()));
   priv->texture_pso->AddRef ();
@@ -785,7 +794,8 @@ gst_onnx_importer_dml_new (const OrtApi * api, GstD3D12Device * device,
 
   {
     auto hr = DMLCreateDevice (gst_d3d12_device_get_device_handle (device),
-        DML_CREATE_DEVICE_FLAG_NONE, IID_PPV_ARGS (&priv->device_ml));
+        DML_CREATE_DEVICE_FLAG_NONE, GST_IID_DML_DEVICE,
+        (void **) priv->device_ml.GetAddressOf ());
     if (!gst_d3d12_result (hr, device)) {
       GST_ERROR_OBJECT (self, "Couldn't create DML device");
       goto error;

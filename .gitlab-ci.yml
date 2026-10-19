@@ -712,6 +712,7 @@ build macos:
           -Dgst-plugins-base:pango=enabled
           -Dgst-plugins-good:cairo=enabled
           -Dgst-plugins-good:soup=enabled
+          -Dgst-plugins-bad:vulkan=enabled
 
 abi-check:
   stage: 'build'
@@ -970,6 +971,8 @@ fluster v4l2-stateless on visl:
           - "subprojects/gst-plugins-bad/gst-libs/gst/codecparsers/*"
           - "subprojects/gst-plugins-bad/gst-libs/gst/codecs/*"
           - "subprojects/gst-plugins-bad/gst/videoparsers/*"
+          - "subprojects/gst-plugins-base/gst/videoconvertscale/*"
+          - "subprojects/gst-plugins-base/gst-libs/gst/video/*"
           - "tests/virtme/*"
           - "ci/scripts/build-linux.sh"
           - "ci/docker/fedora/*"

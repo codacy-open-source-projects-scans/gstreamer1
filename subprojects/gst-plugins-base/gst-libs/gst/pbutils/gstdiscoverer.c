@@ -600,6 +600,7 @@ is_subtitle_caps (const GstCaps * caps)
 
   name = gst_structure_get_name (s);
   if (g_str_has_prefix (name, "text/") ||
+      g_str_equal (name, "application/x-ogm-text") ||
       g_str_has_prefix (name, "subpicture/") ||
       g_str_has_prefix (name, "subtitle/") ||
       g_str_has_prefix (name, "closedcaption/") ||
@@ -611,6 +612,36 @@ is_subtitle_caps (const GstCaps * caps)
   gst_caps_unref (subs_caps);
 
   return ret;
+}
+
+/* Maps stream caps to the GstDiscoverer*Info subclass describing them. This
+ * is the single source of truth for the classification: collect_information()
+ * dispatches its field-population branches on it, and parse_stream_topology()
+ * uses it for the elementary-stream merge check. */
+static GType
+info_type_for_caps (const GstCaps * caps)
+{
+  const gchar *name;
+
+  if (!caps || gst_caps_is_any (caps) || gst_caps_is_empty (caps))
+    return GST_TYPE_DISCOVERER_STREAM_INFO;
+
+  name = gst_structure_get_name (gst_caps_get_structure (caps, 0));
+  if (!name)
+    return GST_TYPE_DISCOVERER_STREAM_INFO;
+
+  if (g_str_has_prefix (name, "audio/") ||
+      g_str_equal (name, "application/x-ogm-audio"))
+    return GST_TYPE_DISCOVERER_AUDIO_INFO;
+
+  if (g_str_has_prefix (name, "video/") || g_str_has_prefix (name, "image/") ||
+      g_str_equal (name, "application/x-ogm-video"))
+    return GST_TYPE_DISCOVERER_VIDEO_INFO;
+
+  if (is_subtitle_caps (caps))
+    return GST_TYPE_DISCOVERER_SUBTITLE_INFO;
+
+  return GST_TYPE_DISCOVERER_STREAM_INFO;
 }
 
 static GstPadProbeReturn
@@ -890,14 +921,23 @@ collect_common_information (GstDiscovererStreamInfo * info,
   }
 }
 
+/* collect_information() dispatches on the stream caps to pick which
+ * GstDiscoverer*Info subclass to populate, then writes fields of that type
+ * into the object returned here. Only reuse parent when it can hold the
+ * requested type: populating a smaller base GstDiscovererStreamInfo as a
+ * subclass would read and write past its allocation. */
 static GstDiscovererStreamInfo *
 make_info (GstDiscovererStreamInfo * parent, GType type, GstCaps * caps)
 {
   GstDiscovererStreamInfo *info;
 
-  if (parent)
+  if (parent && g_type_is_a (G_OBJECT_TYPE (parent), type))
     info = gst_discoverer_stream_info_ref (parent);
   else {
+    if (parent) {
+      /* We couldn't re-use parent because it type isn't a sub-type of it */
+      GST_WARNING ("Ignoring parent stream info type!");
+    }
     info = g_object_new (type, NULL);
     if (caps)
       info->caps = gst_caps_ref (caps);
@@ -916,7 +956,7 @@ collect_information (GstDiscoverer * dc, const GstStructure * st,
   GstCaps *caps = NULL;
   GstStructure *caps_st;
   GstTagList *tags_st;
-  const gchar *name;
+  GType type;
   gint tmp, tmp2;
   guint utmp;
 
@@ -942,9 +982,9 @@ collect_information (GstDiscoverer * dc, const GstStructure * st,
   }
 
   caps_st = gst_caps_get_structure (caps, 0);
-  name = gst_structure_get_name (caps_st);
+  type = info_type_for_caps (caps);
 
-  if (g_str_has_prefix (name, "audio/")) {
+  if (type == GST_TYPE_DISCOVERER_AUDIO_INFO) {
     GstDiscovererAudioInfo *info;
     const gchar *format_str;
     guint64 channel_mask;
@@ -1004,8 +1044,7 @@ collect_information (GstDiscoverer * dc, const GstStructure * st,
     gst_caps_unref (caps);
     return (GstDiscovererStreamInfo *) info;
 
-  } else if (g_str_has_prefix (name, "video/") ||
-      g_str_has_prefix (name, "image/")) {
+  } else if (type == GST_TYPE_DISCOVERER_VIDEO_INFO) {
     GstDiscovererVideoInfo *info;
     const gchar *caps_str;
 
@@ -1070,7 +1109,7 @@ collect_information (GstDiscoverer * dc, const GstStructure * st,
     gst_caps_unref (caps);
     return (GstDiscovererStreamInfo *) info;
 
-  } else if (is_subtitle_caps (caps)) {
+  } else if (type == GST_TYPE_DISCOVERER_SUBTITLE_INFO) {
     GstDiscovererSubtitleInfo *info;
 
     info = (GstDiscovererSubtitleInfo *) make_info (parent,
@@ -1286,8 +1325,11 @@ parse_stream_topology (GstDiscoverer * dc, const GstStructure * topology,
           gboolean child_is_elementary =
               !(gst_pb_utils_get_caps_description_flags (caps)
               & GST_PBUTILS_CAPS_DESCRIPTION_FLAG_CONTAINER);
+          gboolean parent_holds_child_info =
+              g_type_is_a (G_OBJECT_TYPE (parent), info_type_for_caps (caps));
 
-          if (parent_is_elementary && child_is_elementary) {
+          if (parent_is_elementary && child_is_elementary
+              && parent_holds_child_info) {
             /* A decode chain refines a single elementary stream, so all its
              * stages are elementary (non-container) caps of that one stream. A
              * "next" node that is elementary - like its parent - and whose caps
@@ -1302,8 +1344,35 @@ parse_stream_topology (GstDiscoverer * dc, const GstStructure * topology,
             parse_stream_topology (dc, st, parent);
             add_to_list = FALSE;
           } else {
-            GstDiscovererStreamInfo *next =
-                parse_stream_topology (dc, st, NULL);
+            GstDiscovererStreamInfo *next;
+
+            if (parent_is_elementary && child_is_elementary) {
+              /* Both nodes are elementary yet no information type the parent
+               * can hold matches the child caps: the caps are not classified
+               * into a stream family (e.g. caps unknown to pbutils at the
+               * typefind stage of a stream a parser later re-exposes with
+               * known caps, like application/x-ogm-text re-exposed as
+               * text/x-raw). Merging would type-confuse the stream info
+               * objects, so fail the discovery: the topology can not be
+               * described until the caps are properly classified. */
+              GST_ERROR_OBJECT (dc,
+                  "Inconsistent stream caps classification: elementary caps %"
+                  GST_PTR_FORMAT " can not be described as a %s",
+                  caps, G_OBJECT_TYPE_NAME (parent));
+              if (!dc->priv->current_error) {
+                gchar *caps_str = gst_caps_to_string (caps);
+
+                dc->priv->current_error = g_error_new (GST_CORE_ERROR,
+                    GST_CORE_ERROR_FAILED,
+                    "Inconsistent stream caps classification: caps %s can "
+                    "not be described as a %s", caps_str,
+                    G_OBJECT_TYPE_NAME (parent));
+                g_free (caps_str);
+              }
+              dc->priv->current_info->result = GST_DISCOVERER_ERROR;
+            }
+
+            next = parse_stream_topology (dc, st, NULL);
             res->next = next;
             next->previous = res;
           }

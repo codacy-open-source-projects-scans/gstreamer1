@@ -106,6 +106,60 @@ missing_plugins:
 
 GST_END_TEST;
 
+/* A minimal OGM text stream (tests/files/ogm-text.ogm): typefind reports
+ * application/x-ogm-text at the root and ogmtextparse re-exposes the same
+ * stream as text/x-raw. The OGM text caps are classified as a subtitle
+ * stream, so both nodes are described as one subtitle stream info; as with
+ * other decode chains (e.g. theora), the info keeps the codec caps of the
+ * root node rather than the raw node's caps. */
+GST_START_TEST (test_disco_ogm_text)
+{
+  GError *err = NULL;
+  GstDiscoverer *dc;
+  GstDiscovererInfo *info;
+  GstCaps *caps;
+  GstDiscovererStreamInfo *sinfo;
+  GList *streams;
+  gchar *uri, *path =
+      g_build_filename (GST_TEST_FILES_PATH, "ogm-text.ogm", NULL);
+
+  /* high timeout, in case we're running under valgrind */
+  dc = gst_discoverer_new (30 * GST_SECOND, &err);
+  fail_unless (dc != NULL);
+  fail_unless (err == NULL);
+
+  uri = gst_filename_to_uri (path, &err);
+  g_free (path);
+  fail_unless (err == NULL);
+
+  info = gst_discoverer_discover_uri (dc, uri, &err);
+  fail_unless (info);
+
+  /* ogmtext typefinder and ogmtextparse are in the ogg plugin; without it
+   * the stream can not even be identified */
+  if (have_ogg) {
+    fail_unless_equals_int (gst_discoverer_info_get_result (info),
+        GST_DISCOVERER_OK);
+    fail_unless (err == NULL);
+
+    streams = gst_discoverer_info_get_stream_list (info);
+    fail_unless_equals_int (g_list_length (streams), 1);
+    sinfo = g_list_nth_data (streams, 0);
+    fail_unless (GST_IS_DISCOVERER_SUBTITLE_INFO (sinfo));
+    caps = gst_discoverer_stream_info_get_caps (sinfo);
+    fail_unless_equals_string (gst_structure_get_name (gst_caps_get_structure
+            (caps, 0)), "application/x-ogm-text");
+    gst_caps_unref (caps);
+    gst_discoverer_stream_info_list_free (streams);
+  }
+
+  gst_discoverer_info_unref (info);
+  g_object_unref (dc);
+  g_free (uri);
+}
+
+GST_END_TEST;
+
 GST_START_TEST (test_disco_sync)
 {
   GError *err = NULL;
@@ -1005,6 +1059,7 @@ discoverer_suite (void)
   tcase_add_test (tc_chain, test_disco_sync_reuse_timeout);
   tcase_add_test (tc_chain, test_disco_missing_plugins);
   tcase_add_test (tc_chain, test_disco_serializing);
+  tcase_add_test (tc_chain, test_disco_ogm_text);
   tcase_add_test (tc_chain, test_disco_async);
   tcase_add_test (tc_chain, test_disco_async_custom_context);
   tcase_add_test (tc_chain, test_disco_async_reuse);
