@@ -2337,6 +2337,8 @@ gst_base_parse_handle_buffer (GstBaseParse * parse, GstBuffer * buffer,
 
   /* subclass can only do one of these, or semantics are too unclear */
   g_assert (*skip == 0 || *flushed == 0);
+  /* negative skips are invalid and lead to infinite loops below */
+  g_assert (*skip >= 0);
 
   /* track skipping */
   if (*skip > 0) {
@@ -2393,8 +2395,10 @@ gst_base_parse_handle_buffer (GstBaseParse * parse, GstBuffer * buffer,
   }
 
   if (*skip == 0 && *flushed == 0) {
-    /* Carry over discont if we need more data */
-    if (GST_BUFFER_IS_DISCONT (frame->buffer))
+    /* Carry over discont if we need more data. A subclass may also have
+     * finished the frame without consuming input (size 0 with an out_buffer),
+     * in which case the buffer was already pushed and frame->buffer is NULL. */
+    if (frame->buffer && GST_BUFFER_IS_DISCONT (frame->buffer))
       parse->priv->discont = TRUE;
   }
 
